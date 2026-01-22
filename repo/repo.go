@@ -3,6 +3,10 @@ package main
 import (
 	"github.com/a-thieme/repo/tlv"
 
+	"os"
+	"os/signal"
+	"syscall"
+
 	enc "github.com/named-data/ndnd/std/encoding"
 	"github.com/named-data/ndnd/std/engine"
 	"github.com/named-data/ndnd/std/log"
@@ -91,5 +95,12 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 func main() {
 	log.Default().SetLevel(log.LevelTrace)
 	repo := NewRepo("/ndn/drepo")
-	repo.Start()
+	if err := repo.Start(); err != nil {
+		log.Fatal(nil, "Unable to start repo", "err", err)
+	}
+
+	// Wait for a signal to quit (like Ctrl+C)
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
 }
