@@ -31,7 +31,6 @@ func main() {
 	fmt.Println("Sending command...")
 	client.ExpressCommand(notify, target, command.Encode(),
 		func(w enc.Wire, e error) {
-			// Ensure we signal that we are done processing, regardless of success/fail
 			defer close(done)
 
 			if e != nil {
@@ -47,7 +46,6 @@ func main() {
 			fmt.Println("Status:", sr.Status)
 		})
 
-	// Block here until the callback closes the 'done' channel
-	<-done
+	<-done // blocking
 	fmt.Println("finished")
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/named-data/ndnd/std/ndn"
 	"github.com/named-data/ndnd/std/object"
 	local_storage "github.com/named-data/ndnd/std/object/storage"
+	"github.com/named-data/ndnd/std/sync"
 )
 
 const NOTIFY = "notify"
@@ -21,19 +22,25 @@ type Repo struct {
 	groupPrefix  enc.Name
 	notifyPrefix *enc.Name
 
+	nodePrefix enc.Name
+
 	engine ndn.Engine
 	store  ndn.Store
 	client ndn.Client
 
+	groupSync *sync.SvsALO
+
 	commands []*tlv.Command
 }
 
-func NewRepo(groupPrefix string) *Repo {
+func NewRepo(groupPrefix string, nodePrefix string) *Repo {
 	gp, _ := enc.NameFromStr(groupPrefix)
+	np, _ := enc.NameFromStr(nodePrefix)
 	nf := gp.Append(enc.NewGenericComponent(NOTIFY))
 	return &Repo{
 		groupPrefix:  gp,
 		notifyPrefix: &nf,
+		nodePrefix:   np,
 	}
 }
 
@@ -57,7 +64,34 @@ func (r *Repo) Start() (err error) {
 
 	// new client
 	r.client = object.NewClient(r.engine, r.store, nil)
+	// group svs
 
+	// publish command to group
+	// group svs
+	log.Info(r, "starting sync", "group", r.groupPrefix)
+	r.groupSync, err = sync.NewSvsALO(sync.SvsAloOpts{
+		Name: r.nodePrefix,
+		Svs: sync.SvSyncOpts{
+			Client:      r.client,
+			GroupPrefix: r.groupPrefix,
+		},
+		Snapshot: &sync.SnapshotNull{},
+	})
+	err = r.groupSync.Start()
+	if err != nil {
+		return err
+	}
+
+	log.Debug(r, "announce", "prefix", r.groupSync.GroupPrefix())
+	r.client.AnnouncePrefix(ndn.Announcement{
+		Name:   r.groupSync.GroupPrefix(),
+		Expose: true,
+	})
+	log.Debug(r, "announce", "prefix", r.groupSync.DataPrefix())
+	r.client.AnnouncePrefix(ndn.Announcement{
+		Name:   r.groupSync.DataPrefix(),
+		Expose: true,
+	})
 	// client notification
 	log.Debug(r, "announce", "prefix", &r.notifyPrefix)
 	r.client.AnnouncePrefix(ndn.Announcement{
@@ -66,13 +100,8 @@ func (r *Repo) Start() (err error) {
 	})
 	log.Debug(r, "attach command handler")
 	r.client.AttachCommandHandler(*r.notifyPrefix, r.onCommand)
-	// group svs
 
-	// TODO: get command from client
-
-	// TODO: publish command to group
-
-	return nil
+	return err
 }
 
 // func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(enc.Wire) error ) error {
@@ -89,12 +118,16 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 		Status: "received",
 	}
 
+	log.Debug(r, "reply")
 	reply(response.Encode())
+
+	log.Debug(r, "publish to group")
+	r.groupSync.Publish(cmd.Encode())
 }
 
 func main() {
 	log.Default().SetLevel(log.LevelTrace)
-	repo := NewRepo("/ndn/drepo")
+	repo := NewRepo("/ndn/drepo", "/ndn/myrepo1")
 	if err := repo.Start(); err != nil {
 		log.Fatal(nil, "Unable to start repo", "err", err)
 	}
