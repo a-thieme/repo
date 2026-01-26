@@ -65,7 +65,7 @@ func (r *Repo) Start() (err error) {
 	// FIXME: use badger store in the deployed version for persistent storage
 	// only using memory for testing
 	log.Debug(r, "new store")
-	local_storage.NewMemoryStore()
+	r.store = local_storage.NewMemoryStore()
 
 	// log.Debug(r, "new keychain")
 	log.Debug(r, "new keychain")
