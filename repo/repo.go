@@ -1,11 +1,17 @@
 package main
 
 import (
-	"github.com/a-thieme/repo/tlv"
-
+	"context"
+	"encoding/base64"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"github.com/a-thieme/repo/tlv"
 
 	enc "github.com/named-data/ndnd/std/encoding"
 	"github.com/named-data/ndnd/std/engine"
@@ -15,6 +21,7 @@ import (
 	local_storage "github.com/named-data/ndnd/std/object/storage"
 	sec "github.com/named-data/ndnd/std/security"
 	"github.com/named-data/ndnd/std/security/keychain"
+	"github.com/named-data/ndnd/std/security/ndncert"
 	"github.com/named-data/ndnd/std/security/trust_schema"
 	"github.com/named-data/ndnd/std/sync"
 )
@@ -27,6 +34,11 @@ type Repo struct {
 
 	nodePrefix enc.Name
 
+	// Cloudflare / NDNCERT Configuration
+	domain   string
+	cfToken  string
+	cfZoneID string
+
 	engine ndn.Engine
 	store  ndn.Store
 	client ndn.Client
@@ -36,14 +48,16 @@ type Repo struct {
 	commands []*tlv.Command
 }
 
-func NewRepo(groupPrefix string, nodePrefix string) *Repo {
+func NewRepo(groupPrefix string, domain string, cfToken string, cfZoneID string) *Repo {
 	gp, _ := enc.NameFromStr(groupPrefix)
-	np, _ := enc.NameFromStr(nodePrefix)
 	nf := gp.Append(enc.NewGenericComponent(NOTIFY))
+
 	return &Repo{
 		groupPrefix:  gp,
 		notifyPrefix: &nf,
-		nodePrefix:   np,
+		domain:       domain,
+		cfToken:      cfToken,
+		cfZoneID:     cfZoneID,
 	}
 }
 
@@ -65,25 +79,98 @@ func (r *Repo) Start() (err error) {
 	log.Debug(r, "new store")
 	r.store = local_storage.NewMemoryStore()
 
+	// ---------------------------------------------------------
+	// NDNCERT Bootstrapping
+	// ---------------------------------------------------------
+
+	// 1. Fetch the NDN Testbed Root CA Certificate from GitHub (Base64 encoded)
+	const trustAnchorURL = "https://raw.githubusercontent.com/named-data/testbed/refs/heads/main/anchors/ndn-testbed-root.ndncert.2204.base64"
+
+	log.Info(r, "fetching testbed CA certificate", "url", trustAnchorURL)
+	resp, err := http.Get(trustAnchorURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch testbed CA cert: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to fetch testbed CA cert: status %d", resp.StatusCode)
+	}
+
+	base64Content, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read testbed CA cert: %w", err)
+	}
+
+	caCertBytes, err := base64.StdEncoding.DecodeString(string(base64Content))
+	if err != nil {
+		return fmt.Errorf("failed to decode base64 CA cert: %w", err)
+	}
+
+	// 2. Initialize NDNCERT Client
+	certClient, err := ndncert.NewClient(r.engine, caCertBytes)
+	if err != nil {
+		return fmt.Errorf("failed to create ndncert client: %w", err)
+	}
+
+	// 3. Request Certificate via Cloudflare DNS Challenge
+	log.Info(r, "requesting certificate via NDNCERT", "domain", r.domain)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	certRes, err := RequestCertWithCloudflare(ctx, certClient, r.domain, r.cfToken, r.cfZoneID)
+	if err != nil {
+		return fmt.Errorf("certificate request failed: %w", err)
+	}
+	log.Info(r, "obtained certificate", "name", certRes.CertData.Name())
+
+	// 4. Update Node Prefix based on the obtained identity
+	idName, err := sec.GetIdentityFromCertName(certRes.CertData.Name())
+	if err != nil {
+		return err
+	}
+	r.nodePrefix = idName
+	log.Info(r, "setting node prefix", "prefix", r.nodePrefix)
+
+	// ---------------------------------------------------------
+	// Keychain & Trust Setup
+	// ---------------------------------------------------------
+
 	kc, err := keychain.NewKeyChain("dir:///home/adam/.ndn/keys", r.store)
 	if err != nil {
 		return err
 	}
+
+	// Import the generated key and certificate into the Keychain
+	if err := kc.InsertKey(certRes.Signer); err != nil {
+		log.Warn(r, "failed to insert key into keychain (might be memory-only signer)", "err", err)
+	}
+	if err := kc.InsertCert(certRes.CertData.Content().Join()); err != nil {
+		return fmt.Errorf("failed to insert cert into keychain: %w", err)
+	}
+
+	// Create Trust Config
 	schema := trust_schema.NewNullSchema()
-	testbedRootName, _ := enc.NameFromStr("/ndn/KEY/%27%C4%B2%2A%9F%7B%81%27/ndn/v=1651246789556")
-	trust, err := sec.NewTrustConfig(kc, schema, []enc.Name{testbedRootName})
+
+	// We trust the Testbed Root (bootstrapped above) and our own key
+	caData, _, err := r.engine.Spec().ReadData(enc.NewBufferView(caCertBytes))
+	if err != nil {
+		return err
+	}
+
+	trust, err := sec.NewTrustConfig(kc, schema, []enc.Name{caData.Name()})
 	if err != nil {
 		return err
 	}
 	trust.UseDataNameFwHint = true
 
-	// new client
+	// ---------------------------------------------------------
+	// Application Start
+	// ---------------------------------------------------------
+
 	log.Debug(r, "new client")
 	r.client = object.NewClient(r.engine, r.store, trust)
-	// group svs
 
-	// publish command to group
-	// group svs
 	log.Info(r, "starting sync", "group", r.groupPrefix)
 	r.groupSync, err = sync.NewSvsALO(sync.SvsAloOpts{
 		Name: r.nodePrefix,
@@ -93,6 +180,9 @@ func (r *Repo) Start() (err error) {
 		},
 		Snapshot: &sync.SnapshotNull{},
 	})
+	if err != nil {
+		return err
+	}
 	err = r.groupSync.Start()
 	if err != nil {
 		return err
@@ -117,7 +207,7 @@ func (r *Repo) Start() (err error) {
 	log.Debug(r, "attach command handler")
 	r.client.AttachCommandHandler(*r.notifyPrefix, r.onCommand)
 
-	return err
+	return nil
 }
 
 // func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(enc.Wire) error ) error {
@@ -143,8 +233,19 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 
 func main() {
 	log.Default().SetLevel(log.LevelDebug)
-	repo := NewRepo("/ndn/drepo", "/ndn/myrepo1")
-	// repo := NewRepo("/ndn/drepo", "/ndn/myrepo2")
+
+	// Get configuration from Environment Variables
+	cfToken := os.Getenv("CF_TOKEN")
+	cfZoneID := os.Getenv("CF_ZONE_ID")
+	domain := os.Getenv("NDN_DOMAIN")
+
+	if cfToken == "" || cfZoneID == "" || domain == "" {
+		log.Fatal(nil, "Missing required environment variables: CF_TOKEN, CF_ZONE_ID, NDN_DOMAIN")
+	}
+
+	// Initialize Repo with DNS domain instead of hardcoded node prefix
+	repo := NewRepo("/ndn/drepo", domain, cfToken, cfZoneID)
+
 	if err := repo.Start(); err != nil {
 		log.Fatal(nil, "Unable to start repo", "err", err)
 	}

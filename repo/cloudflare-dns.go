@@ -20,6 +20,8 @@ func RequestCertWithCloudflare(ctx context.Context, client *ndncert.Client, doma
 		return nil, fmt.Errorf("failed to create cloudflare client: %w", err)
 	}
 
+	// Create a ResourceContainer for the Zone ID (Required in modern cloudflare-go)
+	zoneResource := cloudflare.ZoneIdentifier(cfZoneID)
 	var recordID string // Track the created record ID for cleanup
 
 	// Define the DNS challenge with automated callbacks
@@ -45,25 +47,22 @@ func RequestCertWithCloudflare(ctx context.Context, client *ndncert.Client, doma
 
 			fmt.Printf("Creating DNS TXT record: %s -> %s\n", recordName, expectedValue)
 
-			// Create the TXT record on Cloudflare
-			// Note: This assumes the standard cloudflare-go library interface.
-			rec, err := api.CreateDNSRecord(ctx, cfZoneID, cloudflare.DNSRecord{
+			// Create the TXT record on Cloudflare using CreateDNSRecordParams
+			rec, err := api.CreateDNSRecord(ctx, zoneResource, cloudflare.CreateDNSRecordParams{
 				Type:    "TXT",
 				Name:    recordName,
 				Content: expectedValue,
-				TTL:     120, // Short TTL for faster cleanup
+				TTL:     120,
 			})
 			if err != nil {
 				fmt.Printf("Failed to create Cloudflare DNS record: %v\n", err)
-				// NDNCERT expects "ready" to proceed. Returning anything else will likely
-				// cause a local error in the client, which is what we want here.
 				return "error"
 			}
 
 			// Store ID for cleanup
-			recordID = rec.Result.ID
+			recordID = rec.ID
 
-			// Wait for propagation (Cloudflare is fast, but 5-10s ensures global availability)
+			// Wait for propagation
 			fmt.Println("Record created, waiting for propagation...")
 			time.Sleep(10 * time.Second)
 
@@ -75,7 +74,8 @@ func RequestCertWithCloudflare(ctx context.Context, client *ndncert.Client, doma
 	defer func() {
 		if recordID != "" {
 			fmt.Printf("Cleaning up DNS record %s...\n", recordID)
-			err := api.DeleteDNSRecord(context.Background(), cfZoneID, recordID)
+			// Delete requires the Zone Resource Container and the Record ID
+			err := api.DeleteDNSRecord(context.Background(), zoneResource, recordID)
 			if err != nil {
 				fmt.Printf("Warning: Failed to delete DNS record: %v\n", err)
 			}
@@ -83,21 +83,17 @@ func RequestCertWithCloudflare(ctx context.Context, client *ndncert.Client, doma
 	}()
 
 	// Execute the certificate request
-	// This blocks until the process is complete or fails
 	return client.RequestCert(ndncert.RequestCertArgs{
 		Challenge: chal,
-		// Simple profile callback
 		OnProfile: func(profile *tlv.CaProfile) error {
 			return nil
 		},
-		// Provide the domain as a probe parameter if the CA requires it
 		OnProbeParam: func(key string) ([]byte, error) {
 			if key == ndncert.KwDomain {
 				return []byte(domain), nil
 			}
 			return nil, nil
 		},
-		// Use the default key choice behavior (first suggestion or generate new)
 		OnChooseKey: nil,
 		OnKeyChosen: func(keyName enc.Name) error {
 			fmt.Printf("Key chosen: %s\n", keyName)
@@ -105,3 +101,4 @@ func RequestCertWithCloudflare(ctx context.Context, client *ndncert.Client, doma
 		},
 	})
 }
+
