@@ -9,6 +9,9 @@ import (
 	"github.com/named-data/ndnd/std/log"
 	"github.com/named-data/ndnd/std/object"
 	local_storage "github.com/named-data/ndnd/std/object/storage"
+	sec "github.com/named-data/ndnd/std/security"
+	"github.com/named-data/ndnd/std/security/keychain"
+	"github.com/named-data/ndnd/std/security/trust_schema"
 )
 
 func main() {
@@ -20,6 +23,21 @@ func main() {
 	client := object.NewClient(engine, store, nil)
 	target, _ := enc.NameFromStr("mytarget")
 	notify, _ := enc.NameFromStr("/ndn/drepo/notify")
+
+	kc, err := keychain.NewKeyChain("dir:///home/adam/.ndn/keys", store)
+	if err != nil {
+		return
+	}
+	schema := trust_schema.NewNullSchema()
+	testbedRootName, _ := enc.NameFromStr("/ndn/KEY/%27%C4%B2%2A%9F%7B%81%27/ndn/v=1651246789556")
+	trust, err := sec.NewTrustConfig(kc, schema, []enc.Name{testbedRootName})
+	if err != nil {
+		return
+	}
+	trust.UseDataNameFwHint = true
+
+	// new client
+	client = object.NewClient(engine, store, trust)
 
 	command := tlv.Command{
 		Type:   "testtype",

@@ -13,12 +13,10 @@ import (
 	"github.com/named-data/ndnd/std/ndn"
 	"github.com/named-data/ndnd/std/object"
 	local_storage "github.com/named-data/ndnd/std/object/storage"
-	// "github.com/named-data/ndnd/std/security/signer"
-	"github.com/named-data/ndnd/std/sync"
-
 	sec "github.com/named-data/ndnd/std/security"
 	"github.com/named-data/ndnd/std/security/keychain"
 	"github.com/named-data/ndnd/std/security/trust_schema"
+	"github.com/named-data/ndnd/std/sync"
 )
 
 const NOTIFY = "notify"
@@ -67,29 +65,16 @@ func (r *Repo) Start() (err error) {
 	log.Debug(r, "new store")
 	r.store = local_storage.NewMemoryStore()
 
-	// log.Debug(r, "new keychain")
-	log.Debug(r, "new keychain")
-	kc, err := keychain.NewKeyChain("dir:///tmp/ndn/repo1/keys", r.store)
+	kc, err := keychain.NewKeyChain("dir:///home/adam/.ndn/keys", r.store)
 	if err != nil {
 		return err
 	}
-
-	// // TODO: specify a real trust schema
-	log.Debug(r, "new null schema")
 	schema := trust_schema.NewNullSchema()
-
-	testbedRootName, err := enc.NameFromStr("/ndn/KEY/%27%C4%B2%2A%9F%7B%81%27/ndn/v=1651246789556")
-	if err != nil {
-		return err
-	}
-
-	log.Debug(r, "new trust config")
+	testbedRootName, _ := enc.NameFromStr("/ndn/KEY/%27%C4%B2%2A%9F%7B%81%27/ndn/v=1651246789556")
 	trust, err := sec.NewTrustConfig(kc, schema, []enc.Name{testbedRootName})
 	if err != nil {
 		return err
 	}
-	//
-	// // Attach data name as forwarding hint to cert Interests
 	trust.UseDataNameFwHint = true
 
 	// new client
@@ -157,8 +142,9 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 }
 
 func main() {
-	log.Default().SetLevel(log.LevelTrace)
+	log.Default().SetLevel(log.LevelDebug)
 	repo := NewRepo("/ndn/drepo", "/ndn/myrepo1")
+	// repo := NewRepo("/ndn/drepo", "/ndn/myrepo2")
 	if err := repo.Start(); err != nil {
 		log.Fatal(nil, "Unable to start repo", "err", err)
 	}
