@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -9,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/a-thieme/repo/tlv"
 
@@ -21,7 +19,6 @@ import (
 	local_storage "github.com/named-data/ndnd/std/object/storage"
 	sec "github.com/named-data/ndnd/std/security"
 	"github.com/named-data/ndnd/std/security/keychain"
-	"github.com/named-data/ndnd/std/security/ndncert"
 	"github.com/named-data/ndnd/std/security/trust_schema"
 	"github.com/named-data/ndnd/std/sync"
 )
@@ -107,18 +104,8 @@ func (r *Repo) Start() (err error) {
 		return fmt.Errorf("failed to decode base64 CA cert: %w", err)
 	}
 
-	// 2. Initialize NDNCERT Client
-	certClient, err := ndncert.NewClient(r.engine, caCertBytes)
-	if err != nil {
-		return fmt.Errorf("failed to create ndncert client: %w", err)
-	}
-
-	// 3. Request Certificate via Cloudflare DNS Challenge
 	log.Info(r, "requesting certificate via NDNCERT", "domain", r.domain)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	certRes, err := RequestCertWithCloudflare(ctx, certClient, r.domain, r.cfToken, r.cfZoneID)
+	certRes, err := RequestCertWithCloudflare(&r.engine, caCertBytes, r.domain, r.cfToken, r.cfZoneID)
 	if err != nil {
 		return fmt.Errorf("certificate request failed: %w", err)
 	}
@@ -231,13 +218,13 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 	r.groupSync.Publish(cmd.Encode())
 }
 
-func main() {
-	log.Default().SetLevel(log.LevelDebug)
+func main1() {
+	log.Default().SetLevel(log.LevelTrace)
 
 	// Get configuration from Environment Variables
 	cfToken := os.Getenv("CF_TOKEN")
 	cfZoneID := os.Getenv("CF_ZONE_ID")
-	domain := os.Getenv("NDN_DOMAIN")
+	domain := os.Getenv("CF_DOMAIN")
 
 	if cfToken == "" || cfZoneID == "" || domain == "" {
 		log.Fatal(nil, "Missing required environment variables: CF_TOKEN, CF_ZONE_ID, NDN_DOMAIN")
