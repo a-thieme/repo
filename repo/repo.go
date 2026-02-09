@@ -107,6 +107,11 @@ func (r *Repo) Start() (err error) {
 	if err != nil {
 		return err
 	}
+	err = r.groupSync.SubscribePublisher(r.groupPrefix, r.onGroupSync)
+	if err != nil {
+		return err
+	}
+
 	err = r.groupSync.Start()
 	if err != nil {
 		return err
@@ -153,6 +158,23 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 
 	log.Debug(r, "publish to group")
 	r.groupSync.Publish(cmd.Encode())
+}
+
+func (r *Repo) onGroupSync(pub sync.SvsPub) {
+	if len(pub.Content) == 0 {
+		return
+	}
+	cmd, err := tlv.ParseCommand(enc.NewWireView(pub.Content), false)
+	if err != nil {
+		log.Warn(r, "command parse error", "name", pub.DataName)
+		return
+	}
+	log.Info(r, "received command from sync",
+		"type", cmd.Type,
+		"target", cmd.Target,
+		"from", pub.Publisher,
+		"seq", pub.SeqNum,
+	)
 }
 
 // BasicSchema allows all data and suggests the first matching key in the keychain.
