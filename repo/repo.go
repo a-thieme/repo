@@ -107,7 +107,7 @@ func (r *Repo) Start() (err error) {
 	if err != nil {
 		return err
 	}
-	err = r.groupSync.SubscribePublisher(r.groupPrefix, r.onGroupSync)
+	err = r.groupSync.SubscribePublisher(enc.Name{}, r.onGroupSync)
 	if err != nil {
 		return err
 	}
@@ -128,15 +128,14 @@ func (r *Repo) Start() (err error) {
 		Expose: true,
 	})
 	// client notification
-	log.Debug(r, "announce", "prefix", &r.notifyPrefix)
+	log.Debug(r, "announce", "prefix", r.notifyPrefix)
 	r.client.AnnouncePrefix(ndn.Announcement{
 		Name:   r.notifyPrefix.Clone(),
 		Expose: true,
 	})
 	log.Debug(r, "attach command handler")
 	r.client.AttachCommandHandler(*r.notifyPrefix, r.onCommand)
-
-	return nil
+	return r.client.Start()
 }
 
 // func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(enc.Wire) error ) error {
