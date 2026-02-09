@@ -12,7 +12,7 @@ import (
 	local_storage "github.com/named-data/ndnd/std/object/storage"
 	sec "github.com/named-data/ndnd/std/security"
 	"github.com/named-data/ndnd/std/security/keychain"
-	"github.com/named-data/ndnd/std/security/trust_schema"
+	"github.com/named-data/ndnd/std/security/signer"
 	"github.com/named-data/ndnd/std/sync"
 )
 
@@ -73,7 +73,7 @@ func (r *Repo) Start() (err error) {
 	}
 
 	// Create Trust Config
-	schema := trust_schema.NewNullSchema()
+	schema := &BasicSchema{}
 
 	// We trust the Testbed Root (bootstrapped above) and our own key
 	caData, _, err := r.engine.Spec().ReadData(enc.NewBufferView(testbedRootCert))
@@ -153,4 +153,24 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 
 	log.Debug(r, "publish to group")
 	r.groupSync.Publish(cmd.Encode())
+}
+
+// BasicSchema allows all data and suggests the first matching key in the keychain.
+type BasicSchema struct{}
+
+func (s *BasicSchema) Check(pkt enc.Name, cert enc.Name) bool {
+	return true // Trust everything (matching NullSchema behavior)
+}
+
+func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
+	myname, _ := enc.NameFromStr("/ndn/repo.teame.dev")
+	for _, id := range kc.Identities() {
+		if id.Name().IsPrefix(myname) {
+			if len(id.Keys()) > 0 {
+				return id.Keys()[0].Signer()
+			}
+		}
+	}
+
+	return signer.NewSha256Signer()
 }
