@@ -18,3 +18,15 @@ type StatusResponse struct {
 	//+field:string
 	Status string `tlv:"0x281"`
 }
+
+type NodeUpdate struct {
+	//+field:sequence:*Command:struct:Command
+	Jobs []*Command `tlv:"0x290"`
+	//+field:sequence:*Command:struct:Command
+	NewCommands []*Command `tlv:"0x291"`
+	//+field:natural
+	StorageCapacity uint64 `tlv:"0x292"`
+	//+field:natural
+	StorageUsed uint64 `tlv:"0x293"`
+}
+

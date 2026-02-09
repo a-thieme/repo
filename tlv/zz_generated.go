@@ -364,3 +364,368 @@ func ParseStatusResponse(reader enc.WireView, ignoreCritical bool) (*StatusRespo
 	context.Init()
 	return context.Parse(reader, ignoreCritical)
 }
+
+type NodeUpdateEncoder struct {
+	Length uint
+
+	Jobs_subencoder []struct {
+		Jobs_encoder CommandEncoder
+	}
+	NewCommands_subencoder []struct {
+		NewCommands_encoder CommandEncoder
+	}
+}
+
+type NodeUpdateParsingContext struct {
+	Jobs_context        CommandParsingContext
+	NewCommands_context CommandParsingContext
+}
+
+func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
+	{
+		Jobs_l := len(value.Jobs)
+		encoder.Jobs_subencoder = make([]struct {
+			Jobs_encoder CommandEncoder
+		}, Jobs_l)
+		for i := 0; i < Jobs_l; i++ {
+			pseudoEncoder := &encoder.Jobs_subencoder[i]
+			pseudoValue := struct {
+				Jobs *Command
+			}{
+				Jobs: value.Jobs[i],
+			}
+			{
+				encoder := pseudoEncoder
+				value := &pseudoValue
+				if value.Jobs != nil {
+					encoder.Jobs_encoder.Init(value.Jobs)
+				}
+				_ = encoder
+				_ = value
+			}
+		}
+	}
+	{
+		NewCommands_l := len(value.NewCommands)
+		encoder.NewCommands_subencoder = make([]struct {
+			NewCommands_encoder CommandEncoder
+		}, NewCommands_l)
+		for i := 0; i < NewCommands_l; i++ {
+			pseudoEncoder := &encoder.NewCommands_subencoder[i]
+			pseudoValue := struct {
+				NewCommands *Command
+			}{
+				NewCommands: value.NewCommands[i],
+			}
+			{
+				encoder := pseudoEncoder
+				value := &pseudoValue
+				if value.NewCommands != nil {
+					encoder.NewCommands_encoder.Init(value.NewCommands)
+				}
+				_ = encoder
+				_ = value
+			}
+		}
+	}
+
+	l := uint(0)
+	if value.Jobs != nil {
+		for seq_i, seq_v := range value.Jobs {
+			pseudoEncoder := &encoder.Jobs_subencoder[seq_i]
+			pseudoValue := struct {
+				Jobs *Command
+			}{
+				Jobs: seq_v,
+			}
+			{
+				encoder := pseudoEncoder
+				value := &pseudoValue
+				if value.Jobs != nil {
+					l += 3
+					l += uint(enc.TLNum(encoder.Jobs_encoder.Length).EncodingLength())
+					l += encoder.Jobs_encoder.Length
+				}
+				_ = encoder
+				_ = value
+			}
+		}
+	}
+	if value.NewCommands != nil {
+		for seq_i, seq_v := range value.NewCommands {
+			pseudoEncoder := &encoder.NewCommands_subencoder[seq_i]
+			pseudoValue := struct {
+				NewCommands *Command
+			}{
+				NewCommands: seq_v,
+			}
+			{
+				encoder := pseudoEncoder
+				value := &pseudoValue
+				if value.NewCommands != nil {
+					l += 3
+					l += uint(enc.TLNum(encoder.NewCommands_encoder.Length).EncodingLength())
+					l += encoder.NewCommands_encoder.Length
+				}
+				_ = encoder
+				_ = value
+			}
+		}
+	}
+	l += 3
+	l += uint(1 + enc.Nat(value.StorageCapacity).EncodingLength())
+	l += 3
+	l += uint(1 + enc.Nat(value.StorageUsed).EncodingLength())
+	encoder.Length = l
+
+}
+
+func (context *NodeUpdateParsingContext) Init() {
+	context.Jobs_context.Init()
+	context.NewCommands_context.Init()
+
+}
+
+func (encoder *NodeUpdateEncoder) EncodeInto(value *NodeUpdate, buf []byte) {
+
+	pos := uint(0)
+
+	if value.Jobs != nil {
+		for seq_i, seq_v := range value.Jobs {
+			pseudoEncoder := &encoder.Jobs_subencoder[seq_i]
+			pseudoValue := struct {
+				Jobs *Command
+			}{
+				Jobs: seq_v,
+			}
+			{
+				encoder := pseudoEncoder
+				value := &pseudoValue
+				if value.Jobs != nil {
+					buf[pos] = 253
+					binary.BigEndian.PutUint16(buf[pos+1:], uint16(656))
+					pos += 3
+					pos += uint(enc.TLNum(encoder.Jobs_encoder.Length).EncodeInto(buf[pos:]))
+					if encoder.Jobs_encoder.Length > 0 {
+						encoder.Jobs_encoder.EncodeInto(value.Jobs, buf[pos:])
+						pos += encoder.Jobs_encoder.Length
+					}
+				}
+				_ = encoder
+				_ = value
+			}
+		}
+	}
+	if value.NewCommands != nil {
+		for seq_i, seq_v := range value.NewCommands {
+			pseudoEncoder := &encoder.NewCommands_subencoder[seq_i]
+			pseudoValue := struct {
+				NewCommands *Command
+			}{
+				NewCommands: seq_v,
+			}
+			{
+				encoder := pseudoEncoder
+				value := &pseudoValue
+				if value.NewCommands != nil {
+					buf[pos] = 253
+					binary.BigEndian.PutUint16(buf[pos+1:], uint16(657))
+					pos += 3
+					pos += uint(enc.TLNum(encoder.NewCommands_encoder.Length).EncodeInto(buf[pos:]))
+					if encoder.NewCommands_encoder.Length > 0 {
+						encoder.NewCommands_encoder.EncodeInto(value.NewCommands, buf[pos:])
+						pos += encoder.NewCommands_encoder.Length
+					}
+				}
+				_ = encoder
+				_ = value
+			}
+		}
+	}
+	buf[pos] = 253
+	binary.BigEndian.PutUint16(buf[pos+1:], uint16(658))
+	pos += 3
+
+	buf[pos] = byte(enc.Nat(value.StorageCapacity).EncodeInto(buf[pos+1:]))
+	pos += uint(1 + buf[pos])
+	buf[pos] = 253
+	binary.BigEndian.PutUint16(buf[pos+1:], uint16(659))
+	pos += 3
+
+	buf[pos] = byte(enc.Nat(value.StorageUsed).EncodeInto(buf[pos+1:]))
+	pos += uint(1 + buf[pos])
+}
+
+func (encoder *NodeUpdateEncoder) Encode(value *NodeUpdate) enc.Wire {
+
+	wire := make(enc.Wire, 1)
+	wire[0] = make([]byte, encoder.Length)
+	buf := wire[0]
+	encoder.EncodeInto(value, buf)
+
+	return wire
+}
+
+func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*NodeUpdate, error) {
+
+	var handled_Jobs bool = false
+	var handled_NewCommands bool = false
+	var handled_StorageCapacity bool = false
+	var handled_StorageUsed bool = false
+
+	progress := -1
+	_ = progress
+
+	value := &NodeUpdate{}
+	var err error
+	var startPos int
+	for {
+		startPos = reader.Pos()
+		if startPos >= reader.Length() {
+			break
+		}
+		typ := enc.TLNum(0)
+		l := enc.TLNum(0)
+		typ, err = reader.ReadTLNum()
+		if err != nil {
+			return nil, enc.ErrFailToParse{TypeNum: 0, Err: err}
+		}
+		l, err = reader.ReadTLNum()
+		if err != nil {
+			return nil, enc.ErrFailToParse{TypeNum: 0, Err: err}
+		}
+
+		err = nil
+		if handled := false; true {
+			switch typ {
+			case 656:
+				if true {
+					handled = true
+					handled_Jobs = true
+					if value.Jobs == nil {
+						value.Jobs = make([]*Command, 0)
+					}
+					{
+						pseudoValue := struct {
+							Jobs *Command
+						}{}
+						{
+							value := &pseudoValue
+							value.Jobs, err = context.Jobs_context.Parse(reader.Delegate(int(l)), ignoreCritical)
+							_ = value
+						}
+						value.Jobs = append(value.Jobs, pseudoValue.Jobs)
+					}
+					progress--
+				}
+			case 657:
+				if true {
+					handled = true
+					handled_NewCommands = true
+					if value.NewCommands == nil {
+						value.NewCommands = make([]*Command, 0)
+					}
+					{
+						pseudoValue := struct {
+							NewCommands *Command
+						}{}
+						{
+							value := &pseudoValue
+							value.NewCommands, err = context.NewCommands_context.Parse(reader.Delegate(int(l)), ignoreCritical)
+							_ = value
+						}
+						value.NewCommands = append(value.NewCommands, pseudoValue.NewCommands)
+					}
+					progress--
+				}
+			case 658:
+				if true {
+					handled = true
+					handled_StorageCapacity = true
+					value.StorageCapacity = uint64(0)
+					{
+						for i := 0; i < int(l); i++ {
+							x := byte(0)
+							x, err = reader.ReadByte()
+							if err != nil {
+								if err == io.EOF {
+									err = io.ErrUnexpectedEOF
+								}
+								break
+							}
+							value.StorageCapacity = uint64(value.StorageCapacity<<8) | uint64(x)
+						}
+					}
+				}
+			case 659:
+				if true {
+					handled = true
+					handled_StorageUsed = true
+					value.StorageUsed = uint64(0)
+					{
+						for i := 0; i < int(l); i++ {
+							x := byte(0)
+							x, err = reader.ReadByte()
+							if err != nil {
+								if err == io.EOF {
+									err = io.ErrUnexpectedEOF
+								}
+								break
+							}
+							value.StorageUsed = uint64(value.StorageUsed<<8) | uint64(x)
+						}
+					}
+				}
+			default:
+				if !ignoreCritical && ((typ <= 31) || ((typ & 1) == 1)) {
+					return nil, enc.ErrUnrecognizedField{TypeNum: typ}
+				}
+				handled = true
+				err = reader.Skip(int(l))
+			}
+			if err == nil && !handled {
+			}
+			if err != nil {
+				return nil, enc.ErrFailToParse{TypeNum: typ, Err: err}
+			}
+		}
+	}
+
+	startPos = reader.Pos()
+	err = nil
+
+	if !handled_Jobs && err == nil {
+		// sequence - skip
+	}
+	if !handled_NewCommands && err == nil {
+		// sequence - skip
+	}
+	if !handled_StorageCapacity && err == nil {
+		err = enc.ErrSkipRequired{Name: "StorageCapacity", TypeNum: 658}
+	}
+	if !handled_StorageUsed && err == nil {
+		err = enc.ErrSkipRequired{Name: "StorageUsed", TypeNum: 659}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return value, nil
+}
+
+func (value *NodeUpdate) Encode() enc.Wire {
+	encoder := NodeUpdateEncoder{}
+	encoder.Init(value)
+	return encoder.Encode(value)
+}
+
+func (value *NodeUpdate) Bytes() []byte {
+	return value.Encode().Join()
+}
+
+func ParseNodeUpdate(reader enc.WireView, ignoreCritical bool) (*NodeUpdate, error) {
+	context := NodeUpdateParsingContext{}
+	context.Init()
+	return context.Parse(reader, ignoreCritical)
+}

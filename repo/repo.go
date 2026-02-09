@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"github.com/a-thieme/repo/tlv"
+	"time"
 
 	enc "github.com/named-data/ndnd/std/encoding"
 	"github.com/named-data/ndnd/std/engine"
@@ -17,11 +18,18 @@ import (
 )
 
 const NOTIFY = "notify"
+const HEARTBEAT_TIME = 5 * time.Second
 
 var testbedRootName, _ = enc.NameFromStr("/ndn/KEY/%27%C4%B2%2A%9F%7B%81%27/ndn/v=1651246789556")
 
 //go:embed testbed-root.decoded
 var testbedRootCert []byte
+
+type NodeStatus struct {
+	Capacity    uint64
+	Used        uint64
+	LastUpdated time.Time
+}
 
 type Repo struct {
 	groupPrefix  enc.Name
@@ -34,7 +42,12 @@ type Repo struct {
 
 	groupSync *sync.SvsALO
 
+	// all commands
 	commands []*tlv.Command
+	// a node's active jobs
+	jobs []*tlv.Command
+
+	nodeStatus map[string]NodeStatus
 }
 
 func NewRepo(groupPrefix string, nodePrefix string) *Repo {
@@ -46,6 +59,7 @@ func NewRepo(groupPrefix string, nodePrefix string) *Repo {
 		groupPrefix:  gp,
 		notifyPrefix: &nf,
 		nodePrefix:   np,
+		nodeStatus:   make(map[string]NodeStatus),
 	}
 }
 
@@ -135,16 +149,37 @@ func (r *Repo) Start() (err error) {
 	})
 	log.Debug(r, "attach command handler")
 	r.client.AttachCommandHandler(*r.notifyPrefix, r.onCommand)
-	return r.client.Start()
+
+	err = r.client.Start()
+	if err != nil {
+		return err
+	}
+	go r.runHeartbeat()
+	return nil
+
 }
 
-// func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(enc.Wire) error ) error {
+func (r *Repo) runHeartbeat() {
+	// Publish status every 30 seconds
+	ticker := time.NewTicker(HEARTBEAT_TIME)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		// Send an update with NO new command (just status)
+		if err := r.publishNodeUpdate(nil); err != nil {
+			log.Warn(r, "heartbeat failed", "err", err)
+		}
+	}
+}
+
 func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wire) error) {
 	log.Info(r, "got command")
 	cmd, err := tlv.ParseCommand(enc.NewWireView(content), false)
 	if err != nil {
 		return
 	}
+
+	r.commands = append(r.commands, cmd)
 	log.Debug(r, "parsed command", "target", cmd.Target)
 
 	response := tlv.StatusResponse{
@@ -152,28 +187,92 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 		Status: "received",
 	}
 
-	log.Debug(r, "reply")
 	reply(response.Encode())
 
 	log.Debug(r, "publish to group")
-	r.groupSync.Publish(cmd.Encode())
+	r.publishNodeUpdate(cmd)
+}
+
+func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
+	// Example: Mock values (10GB Capacity, 500MB Used)
+	return 1024 * 1024 * 1024 * 10, 1024 * 1024 * 500
+}
+
+func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
+	capacity, used := r.getStorageStats()
+
+	update := &tlv.NodeUpdate{
+		Jobs:            r.jobs,
+		StorageCapacity: capacity,
+		StorageUsed:     used,
+	}
+
+	if newCmd != nil {
+		update.NewCommands = []*tlv.Command{newCmd}
+	}
+
+	log.Info(r, "publishing node update",
+		"jobs", len(update.Jobs),
+		"new", len(update.NewCommands),
+		"storage_used", update.StorageUsed,
+		"storage_capacity", update.StorageCapacity,
+	)
+
+	_, _, err := r.groupSync.Publish(update.Encode())
+	if err != nil {
+		log.Error(r, "failed to publish node update", "err", err)
+		return err
+	}
+	return nil
 }
 
 func (r *Repo) onGroupSync(pub sync.SvsPub) {
 	if len(pub.Content) == 0 {
 		return
 	}
-	cmd, err := tlv.ParseCommand(enc.NewWireView(pub.Content), false)
+
+	update, err := tlv.ParseNodeUpdate(enc.NewWireView(pub.Content), false)
 	if err != nil {
-		log.Warn(r, "command parse error", "name", pub.DataName)
+		log.Warn(r, "failed to parse node update", "name", pub.DataName, "err", err)
 		return
 	}
-	log.Info(r, "received command from sync",
-		"type", cmd.Type,
-		"target", cmd.Target,
+
+	publisherName := pub.Publisher.String()
+	r.nodeStatus[publisherName] = NodeStatus{
+		Capacity:    update.StorageCapacity,
+		Used:        update.StorageUsed,
+		LastUpdated: time.Now(),
+	}
+
+	var usagePct float64 = 0
+	if update.StorageCapacity > 0 {
+		usagePct = (float64(update.StorageUsed) / float64(update.StorageCapacity)) * 100
+	}
+
+	log.Info(r, "received node update",
 		"from", pub.Publisher,
 		"seq", pub.SeqNum,
+		"jobs", len(update.Jobs),
+		"new_cmds", len(update.NewCommands),
+		"storage_pct", usagePct,
 	)
+
+	log.Debug(r, "repo status", "known_nodes", len(r.nodeStatus))
+
+	for _, job := range update.Jobs {
+		log.Debug(r, "claimed jobs",
+			"node", pub.Publisher,
+			"target", job.Target,
+		)
+	}
+
+	for _, cmd := range update.NewCommands {
+		log.Info(r, "new command",
+			"node", pub.Publisher,
+			"target", cmd.Target,
+			"type", cmd.Type,
+		)
+	}
 }
 
 // BasicSchema allows all data and suggests the first matching key in the keychain.
