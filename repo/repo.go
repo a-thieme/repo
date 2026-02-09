@@ -163,7 +163,7 @@ func (s *BasicSchema) Check(pkt enc.Name, cert enc.Name) bool {
 }
 
 func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
-	myname, _ := enc.NameFromStr("/ndn/repo.teame.dev")
+	myname, _ := enc.NameFromStr("/ndn/repo.teame.dev/repo")
 	for _, id := range kc.Identities() {
 		if id.Name().IsPrefix(myname) {
 			if len(id.Keys()) > 0 {

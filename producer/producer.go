@@ -19,37 +19,20 @@ import (
 type BasicSchema struct{}
 
 func (s *BasicSchema) Check(pkt enc.Name, cert enc.Name) bool {
+	fmt.Println("checking data", pkt.Clone().String())
 	return true // Trust everything (matching NullSchema behavior)
 }
 
 func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
-	// The specific identity we want
-	target, _ := enc.NameFromStr("/ndn/repo.teame.dev")
-
-	// 1. Try to find the specific key
+	myname, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer")
 	for _, id := range kc.Identities() {
-		// Log found identities to debug
-		log.Info(nil, "Keychain has identity", "name", id.Name())
-
-		// Check if identity matches or is a parent of the target
-		if id.Name().IsPrefix(target) || target.IsPrefix(id.Name()) {
+		if id.Name().IsPrefix(myname) {
 			if len(id.Keys()) > 0 {
 				return id.Keys()[0].Signer()
 			}
 		}
 	}
 
-	// 2. CRITICAL FALLBACK: If specific key not found, use ANY valid key
-	// This prevents "key locator is nil" if you have a different key loaded
-	if len(kc.Identities()) > 0 {
-		firstId := kc.Identities()[0]
-		if len(firstId.Keys()) > 0 {
-			log.Warn(nil, "Specific key not found; falling back to first available", "using", firstId.Name())
-			return firstId.Keys()[0].Signer()
-		}
-	}
-
-	log.Error(nil, "No identities found in keychain; returning Sha256 (will fail validation)")
 	return signer.NewSha256Signer()
 }
 func main() {
@@ -58,9 +41,9 @@ func main() {
 	engine := engine.NewBasicEngine(engine.NewDefaultFace())
 	engine.Start()
 	store := local_storage.NewMemoryStore()
-	target, _ := enc.NameFromStr("mytarget")
+	target, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer/mything")
 	notify, _ := enc.NameFromStr("/ndn/drepo/notify")
-	prefix, _ := enc.NameFromStr("/ndn/repo.teame.dev")
+	prefix, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer")
 
 	kc, err := keychain.NewKeyChain("dir:///home/adam/.ndn/keys", store)
 	if err != nil {
@@ -76,7 +59,6 @@ func main() {
 
 	// new client
 	client := object.NewClient(engine, store, trust)
-	client.SuggestSigner(prefix)
 	log.Debug(nil, "announce", "prefix", prefix)
 	client.AnnouncePrefix(ndn.Announcement{
 		Name:   prefix,
@@ -93,6 +75,8 @@ func main() {
 	client.ExpressCommand(notify, target, command.Encode(),
 		func(w enc.Wire, e error) {
 			defer close(done)
+			res, err := tlv.ParseStatusResponse(enc.NewWireView(w), false)
+			fmt.Println("Response:\t\n\t\tTarget:", res.Target, "\n\t\tStatus:\t", res.Status)
 
 			if e != nil {
 				fmt.Println("Error:", e.Error())
