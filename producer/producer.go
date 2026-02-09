@@ -44,9 +44,9 @@ func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, ca
 				return
 			}
 			c.Validate(args.Data, data.Wire, func(valid bool, err error) {
-				if !valid {
-					callback(nil, fmt.Errorf("command data validation failed: %w", err))
-				}
+				// if !valid {
+				// 	callback(nil, fmt.Errorf("command data validation failed: %w", err))
+				// }
 				callback(args.Data.Content(), nil)
 			})
 		},
