@@ -23,15 +23,33 @@ func (s *BasicSchema) Check(pkt enc.Name, cert enc.Name) bool {
 }
 
 func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
-	myname, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer")
+	// The specific identity we want
+	target, _ := enc.NameFromStr("/ndn/repo.teame.dev")
+
+	// 1. Try to find the specific key
 	for _, id := range kc.Identities() {
-		if id.Name().IsPrefix(myname) {
+		// Log found identities to debug
+		log.Info(nil, "Keychain has identity", "name", id.Name())
+
+		// Check if identity matches or is a parent of the target
+		if id.Name().IsPrefix(target) || target.IsPrefix(id.Name()) {
 			if len(id.Keys()) > 0 {
 				return id.Keys()[0].Signer()
 			}
 		}
 	}
 
+	// 2. CRITICAL FALLBACK: If specific key not found, use ANY valid key
+	// This prevents "key locator is nil" if you have a different key loaded
+	if len(kc.Identities()) > 0 {
+		firstId := kc.Identities()[0]
+		if len(firstId.Keys()) > 0 {
+			log.Warn(nil, "Specific key not found; falling back to first available", "using", firstId.Name())
+			return firstId.Keys()[0].Signer()
+		}
+	}
+
+	log.Error(nil, "No identities found in keychain; returning Sha256 (will fail validation)")
 	return signer.NewSha256Signer()
 }
 func main() {
@@ -42,7 +60,7 @@ func main() {
 	store := local_storage.NewMemoryStore()
 	target, _ := enc.NameFromStr("mytarget")
 	notify, _ := enc.NameFromStr("/ndn/drepo/notify")
-	prefix, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer")
+	prefix, _ := enc.NameFromStr("/ndn/repo.teame.dev")
 
 	kc, err := keychain.NewKeyChain("dir:///home/adam/.ndn/keys", store)
 	if err != nil {
