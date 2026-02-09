@@ -42,10 +42,8 @@ type Repo struct {
 
 	groupSync *sync.SvsALO
 
-	// all commands
 	commands []*tlv.Command
-	// a node's active jobs
-	jobs []*tlv.Command
+	jobs     []*tlv.Command
 
 	nodeStatus map[string]NodeStatus
 }
@@ -68,17 +66,14 @@ func (r *Repo) String() string {
 }
 
 func (r *Repo) Start() (err error) {
-	log.Info(r, "starting")
+	log.Info(r, "repo_start")
 
-	log.Debug(r, "make engine")
 	r.engine = engine.NewBasicEngine(engine.NewDefaultFace())
 	if err = r.engine.Start(); err != nil {
 		return err
 	}
 
 	// FIXME: use badger store in the deployed version for persistent storage
-	// only using memory for testing
-	log.Debug(r, "new store")
 	r.store = local_storage.NewMemoryStore()
 
 	kc, err := keychain.NewKeyChain("dir:///home/adam/.ndn/keys", r.store)
@@ -86,10 +81,8 @@ func (r *Repo) Start() (err error) {
 		return err
 	}
 
-	// Create Trust Config
 	schema := &BasicSchema{}
 
-	// We trust the Testbed Root (bootstrapped above) and our own key
 	caData, _, err := r.engine.Spec().ReadData(enc.NewBufferView(testbedRootCert))
 	if err != nil {
 		return err
@@ -101,14 +94,8 @@ func (r *Repo) Start() (err error) {
 	}
 	trust.UseDataNameFwHint = true
 
-	// ---------------------------------------------------------
-	// Application Start
-	// ---------------------------------------------------------
-
-	log.Debug(r, "new client")
 	r.client = object.NewClient(r.engine, r.store, trust)
 
-	log.Info(r, "starting sync", "group", r.groupPrefix)
 	r.groupSync, err = sync.NewSvsALO(sync.SvsAloOpts{
 		Name: r.nodePrefix,
 		Svs: sync.SvSyncOpts{
@@ -131,23 +118,18 @@ func (r *Repo) Start() (err error) {
 		return err
 	}
 
-	log.Debug(r, "announce", "prefix", r.groupSync.GroupPrefix())
 	r.client.AnnouncePrefix(ndn.Announcement{
 		Name:   r.groupSync.GroupPrefix(),
 		Expose: true,
 	})
-	log.Debug(r, "announce", "prefix", r.groupSync.DataPrefix())
 	r.client.AnnouncePrefix(ndn.Announcement{
 		Name:   r.groupSync.DataPrefix(),
 		Expose: true,
 	})
-	// client notification
-	log.Debug(r, "announce", "prefix", r.notifyPrefix)
 	r.client.AnnouncePrefix(ndn.Announcement{
 		Name:   r.notifyPrefix.Clone(),
 		Expose: true,
 	})
-	log.Debug(r, "attach command handler")
 	r.client.AttachCommandHandler(*r.notifyPrefix, r.onCommand)
 
 	err = r.client.Start()
@@ -156,31 +138,30 @@ func (r *Repo) Start() (err error) {
 	}
 	go r.runHeartbeat()
 	return nil
-
 }
 
 func (r *Repo) runHeartbeat() {
-	// Publish status every 30 seconds
 	ticker := time.NewTicker(HEARTBEAT_TIME)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Send an update with NO new command (just status)
+		// Send an update with no new command to act as a heartbeat
 		if err := r.publishNodeUpdate(nil); err != nil {
-			log.Warn(r, "heartbeat failed", "err", err)
+			log.Warn(r, "heartbeat_failed", "err", err)
 		}
 	}
 }
 
 func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wire) error) {
-	log.Info(r, "got command")
 	cmd, err := tlv.ParseCommand(enc.NewWireView(content), false)
 	if err != nil {
+		log.Warn(r, "command_parse_failed", "err", err)
 		return
 	}
 
+	log.Info(r, "command_recv", "target", cmd.Target, "type", cmd.Type)
+
 	r.commands = append(r.commands, cmd)
-	log.Debug(r, "parsed command", "target", cmd.Target)
 
 	response := tlv.StatusResponse{
 		Target: cmd.Target,
@@ -189,13 +170,12 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 
 	reply(response.Encode())
 
-	log.Debug(r, "publish to group")
 	r.publishNodeUpdate(cmd)
 }
 
 func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
-	// Example: Mock values (10GB Capacity, 500MB Used)
-	return 1024 * 1024 * 1024 * 10, 1024 * 1024 * 500
+	// TODO: Replace with actual syscall.Statfs or store queries
+	return 1024 * 1024 * 1024 * 10, 1024 * 1024 * 500 // 500MB/10GB
 }
 
 func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
@@ -211,16 +191,16 @@ func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
 		update.NewCommands = []*tlv.Command{newCmd}
 	}
 
-	log.Info(r, "publishing node update",
+	log.Info(r, "node_update_pub",
 		"jobs", len(update.Jobs),
-		"new", len(update.NewCommands),
+		"new_cmds", len(update.NewCommands),
 		"storage_used", update.StorageUsed,
 		"storage_capacity", update.StorageCapacity,
 	)
 
 	_, _, err := r.groupSync.Publish(update.Encode())
 	if err != nil {
-		log.Error(r, "failed to publish node update", "err", err)
+		log.Error(r, "node_update_pub_failed", "err", err)
 		return err
 	}
 	return nil
@@ -233,7 +213,7 @@ func (r *Repo) onGroupSync(pub sync.SvsPub) {
 
 	update, err := tlv.ParseNodeUpdate(enc.NewWireView(pub.Content), false)
 	if err != nil {
-		log.Warn(r, "failed to parse node update", "name", pub.DataName, "err", err)
+		log.Warn(r, "node_update_parse_failed", "name", pub.DataName, "err", err)
 		return
 	}
 
@@ -249,7 +229,7 @@ func (r *Repo) onGroupSync(pub sync.SvsPub) {
 		usagePct = (float64(update.StorageUsed) / float64(update.StorageCapacity)) * 100
 	}
 
-	log.Info(r, "received node update",
+	log.Info(r, "node_update_recv",
 		"from", pub.Publisher,
 		"seq", pub.SeqNum,
 		"jobs", len(update.Jobs),
@@ -257,17 +237,17 @@ func (r *Repo) onGroupSync(pub sync.SvsPub) {
 		"storage_pct", usagePct,
 	)
 
-	log.Debug(r, "repo status", "known_nodes", len(r.nodeStatus))
+	log.Debug(r, "cluster_status", "known_nodes", len(r.nodeStatus))
 
 	for _, job := range update.Jobs {
-		log.Debug(r, "claimed jobs",
+		log.Debug(r, "peer_job_active",
 			"node", pub.Publisher,
 			"target", job.Target,
 		)
 	}
 
 	for _, cmd := range update.NewCommands {
-		log.Info(r, "new command",
+		log.Info(r, "peer_new_cmd",
 			"node", pub.Publisher,
 			"target", cmd.Target,
 			"type", cmd.Type,
@@ -294,3 +274,4 @@ func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
 
 	return signer.NewSha256Signer()
 }
+
