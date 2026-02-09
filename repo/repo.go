@@ -26,7 +26,7 @@ var testbedRootCert []byte
 type Repo struct {
 	groupPrefix  enc.Name
 	notifyPrefix *enc.Name
-	nodePrefix   *enc.Name
+	nodePrefix   enc.Name
 
 	engine ndn.Engine
 	store  ndn.Store
@@ -45,7 +45,7 @@ func NewRepo(groupPrefix string, nodePrefix string) *Repo {
 	return &Repo{
 		groupPrefix:  gp,
 		notifyPrefix: &nf,
-		nodePrefix:   &np,
+		nodePrefix:   np,
 	}
 }
 
@@ -96,10 +96,11 @@ func (r *Repo) Start() (err error) {
 
 	log.Info(r, "starting sync", "group", r.groupPrefix)
 	r.groupSync, err = sync.NewSvsALO(sync.SvsAloOpts{
-		Name: *r.nodePrefix,
+		Name: r.nodePrefix,
 		Svs: sync.SvSyncOpts{
-			Client:      r.client,
-			GroupPrefix: r.groupPrefix,
+			Client:       r.client,
+			GroupPrefix:  r.groupPrefix,
+			SyncDataName: r.nodePrefix,
 		},
 		Snapshot: &sync.SnapshotNull{},
 	})
