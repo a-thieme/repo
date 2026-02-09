@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"github.com/a-thieme/repo/tlv"
 
 	enc "github.com/named-data/ndnd/std/encoding"
