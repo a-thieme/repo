@@ -2,8 +2,12 @@ package main
 
 import (
 	_ "embed"
-	"github.com/a-thieme/repo/tlv"
+	"math/rand/v2"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/a-thieme/repo/tlv"
 
 	enc "github.com/named-data/ndnd/std/encoding"
 	"github.com/named-data/ndnd/std/engine"
@@ -14,7 +18,7 @@ import (
 	sec "github.com/named-data/ndnd/std/security"
 	"github.com/named-data/ndnd/std/security/keychain"
 	"github.com/named-data/ndnd/std/security/signer"
-	"github.com/named-data/ndnd/std/sync"
+	svs "github.com/named-data/ndnd/std/sync"
 )
 
 const NOTIFY = "notify"
@@ -40,10 +44,15 @@ type Repo struct {
 	store  ndn.Store
 	client ndn.Client
 
-	groupSync *sync.SvsALO
+	groupSync *svs.SvsALO
+
+	mu sync.Mutex
 
 	commands []*tlv.Command
 	jobs     []*tlv.Command
+
+	storageCapacity uint64
+	storageUsed     uint64
 
 	nodeStatus map[string]NodeStatus
 }
@@ -67,6 +76,11 @@ func (r *Repo) String() string {
 
 func (r *Repo) Start() (err error) {
 	log.Info(r, "repo_start")
+
+	// random initial storage capacity (10GB base + random 0-5GB)
+	r.storageCapacity = (10 * 1024 * 1024 * 1024) + uint64(rand.Int64N(5*1024*1024*1024))
+	// Random initial usage (0-100MB)
+	r.storageUsed = uint64(rand.Int64N(100 * 1024 * 1024))
 
 	r.engine = engine.NewBasicEngine(engine.NewDefaultFace())
 	if err = r.engine.Start(); err != nil {
@@ -96,14 +110,14 @@ func (r *Repo) Start() (err error) {
 
 	r.client = object.NewClient(r.engine, r.store, trust)
 
-	r.groupSync, err = sync.NewSvsALO(sync.SvsAloOpts{
+	r.groupSync, err = svs.NewSvsALO(svs.SvsAloOpts{
 		Name: r.nodePrefix,
-		Svs: sync.SvSyncOpts{
+		Svs: svs.SvSyncOpts{
 			Client:       r.client,
 			GroupPrefix:  r.groupPrefix,
 			SyncDataName: r.nodePrefix,
 		},
-		Snapshot: &sync.SnapshotNull{},
+		Snapshot: &svs.SnapshotNull{},
 	})
 	if err != nil {
 		return err
@@ -145,7 +159,16 @@ func (r *Repo) runHeartbeat() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Send an update with no new command to act as a heartbeat
+		r.mu.Lock()
+		// Simulate sync data growth: 0-10MB per tick
+		for _, job := range r.jobs {
+			if job.Type == "JOIN" {
+				growth := uint64(rand.Int64N(10 * 1024 * 1024))
+				r.storageUsed += growth
+			}
+		}
+		r.mu.Unlock()
+
 		if err := r.publishNodeUpdate(nil); err != nil {
 			log.Warn(r, "heartbeat_failed", "err", err)
 		}
@@ -161,7 +184,9 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 
 	log.Info(r, "command_recv", "target", cmd.Target, "type", cmd.Type)
 
+	r.mu.Lock()
 	r.commands = append(r.commands, cmd)
+	r.mu.Unlock()
 
 	response := tlv.StatusResponse{
 		Target: cmd.Target,
@@ -174,15 +199,21 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 }
 
 func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
-	// TODO: Replace with actual syscall.Statfs or store queries
-	return 1024 * 1024 * 1024 * 10, 1024 * 1024 * 500 // 500MB/10GB
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.storageCapacity, r.storageUsed
 }
 
 func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
 	capacity, used := r.getStorageStats()
 
+	r.mu.Lock()
+	currentJobs := make([]*tlv.Command, len(r.jobs))
+	copy(currentJobs, r.jobs)
+	r.mu.Unlock()
+
 	update := &tlv.NodeUpdate{
-		Jobs:            r.jobs,
+		Jobs:            currentJobs,
 		StorageCapacity: capacity,
 		StorageUsed:     used,
 	}
@@ -206,7 +237,30 @@ func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
 	return nil
 }
 
-func (r *Repo) onGroupSync(pub sync.SvsPub) {
+// not thread safe
+func (r *Repo) shouldClaimJob(cmd *tlv.Command) bool {
+	myFree := r.storageCapacity - r.storageUsed
+	myName := r.nodePrefix.String()
+
+	for nodeName, status := range r.nodeStatus {
+		peerFree := status.Capacity - status.Used
+
+		if peerFree > myFree {
+			return false
+		}
+
+		if peerFree == myFree {
+			// break tie with node names
+			if strings.Compare(nodeName, myName) > 0 {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func (r *Repo) onGroupSync(pub svs.SvsPub) {
 	if len(pub.Content) == 0 {
 		return
 	}
@@ -217,12 +271,14 @@ func (r *Repo) onGroupSync(pub sync.SvsPub) {
 		return
 	}
 
+	r.mu.Lock()
 	publisherName := pub.Publisher.String()
 	r.nodeStatus[publisherName] = NodeStatus{
 		Capacity:    update.StorageCapacity,
 		Used:        update.StorageUsed,
 		LastUpdated: time.Now(),
 	}
+	r.mu.Unlock()
 
 	var usagePct float64 = 0
 	if update.StorageCapacity > 0 {
@@ -246,12 +302,33 @@ func (r *Repo) onGroupSync(pub sync.SvsPub) {
 		)
 	}
 
+	claimedJob := false
+	r.mu.Lock()
 	for _, cmd := range update.NewCommands {
 		log.Info(r, "peer_new_cmd",
 			"node", pub.Publisher,
 			"target", cmd.Target,
 			"type", cmd.Type,
 		)
+
+		if r.shouldClaimJob(cmd) {
+			log.Info(r, "job_claimed", "target", cmd.Target)
+			r.jobs = append(r.jobs, cmd)
+			claimedJob = true
+
+			if cmd.Type == "INSERT" {
+				cost := uint64(rand.Int64N(500 * 1024 * 1024))
+				r.storageUsed += cost
+				if r.storageUsed > r.storageCapacity {
+					r.storageUsed = r.storageCapacity
+				}
+			}
+		}
+	}
+	r.mu.Unlock()
+
+	if claimedJob {
+		go r.publishNodeUpdate(nil)
 	}
 }
 
@@ -274,4 +351,3 @@ func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
 
 	return signer.NewSha256Signer()
 }
-
