@@ -8,12 +8,50 @@ import (
 	"github.com/named-data/ndnd/std/engine"
 	"github.com/named-data/ndnd/std/log"
 	"github.com/named-data/ndnd/std/ndn"
+	spec "github.com/named-data/ndnd/std/ndn/spec_2022"
 	"github.com/named-data/ndnd/std/object"
 	local_storage "github.com/named-data/ndnd/std/object/storage"
 	sec "github.com/named-data/ndnd/std/security"
 	"github.com/named-data/ndnd/std/security/keychain"
 	"github.com/named-data/ndnd/std/security/signer"
 )
+
+func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, callback func(enc.Wire, error)) {
+	signer := c.SuggestSigner(name)
+	if signer == nil {
+		callback(nil, fmt.Errorf("no signer found for command: %s", name))
+		return
+	}
+
+	dataCfg := ndn.DataConfig{}
+	data, err := spec.Spec{}.MakeData(name, &dataCfg, cmd, signer)
+	if err != nil {
+		callback(nil, fmt.Errorf("failed to make command data: %w", err))
+		return
+	}
+
+	c.ExpressR(ndn.ExpressRArgs{
+		Name: dest,
+		Config: &ndn.InterestConfig{
+			CanBePrefix: false,
+			MustBeFresh: true,
+		},
+		AppParam: data.Wire,
+		Retries:  0,
+		Callback: func(args ndn.ExpressCallbackArgs) {
+			if args.Result != ndn.InterestResultData {
+				callback(nil, fmt.Errorf("command failed: %s", args.Result))
+				return
+			}
+			c.Validate(args.Data, data.Wire, func(valid bool, err error) {
+				if !valid {
+					callback(nil, fmt.Errorf("command data validation failed: %w", err))
+				}
+				callback(args.Data.Content(), nil)
+			})
+		},
+	})
+}
 
 // BasicSchema allows all data and suggests the first matching key in the keychain.
 type BasicSchema struct{}
@@ -72,12 +110,9 @@ func main() {
 	done := make(chan struct{})
 
 	fmt.Println("Sending command...")
-	client.ExpressCommand(notify, target, command.Encode(),
+	ExpressCommand(client, notify, target, command.Encode(),
 		func(w enc.Wire, e error) {
 			defer close(done)
-			res, err := tlv.ParseStatusResponse(enc.NewWireView(w), false)
-			fmt.Println("Response:\t\n\t\tTarget:", res.Target, "\n\t\tStatus:\t", res.Status)
-
 			if e != nil {
 				fmt.Println("Error:", e.Error())
 				return
