@@ -20,8 +20,8 @@ type StatusResponse struct {
 }
 
 type NodeUpdate struct {
-	//+field:sequence:*Command:struct:Command
-	Jobs []*Command `tlv:"0x290"`
+	//+field:sequence:enc.Name:name
+	Jobs []enc.Name `tlv:"0x290"`
 	//+field:struct:Command
 	NewCommand *Command `tlv:"0x291"`
 	//+field:natural

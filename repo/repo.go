@@ -3,7 +3,6 @@ package main
 import (
 	_ "embed"
 	"math/rand/v2"
-	"strings"
 	"sync"
 	"time"
 
@@ -21,20 +20,14 @@ import (
 	svs "github.com/named-data/ndnd/std/sync"
 )
 
+// constants
 const NOTIFY = "notify"
 const HEARTBEAT_TIME = 5 * time.Second
-
-var testbedRootName, _ = enc.NameFromStr("/ndn/KEY/%27%C4%B2%2A%9F%7B%81%27/ndn/v=1651246789556")
 
 //go:embed testbed-root.decoded
 var testbedRootCert []byte
 
-type NodeStatus struct {
-	Capacity    uint64
-	Used        uint64
-	LastUpdated time.Time
-}
-
+// structs
 type Repo struct {
 	groupPrefix  enc.Name
 	notifyPrefix *enc.Name
@@ -49,14 +42,100 @@ type Repo struct {
 	mu sync.Mutex
 
 	nodeStatus map[string]NodeStatus
-	commands   []*tlv.Command
+	commands   map[*enc.Name]*tlv.Command
 
-	jobs            []*tlv.Command
 	storageCapacity uint64
 	storageUsed     uint64
+
+	rf int
 }
 
-func NewRepo(groupPrefix string, nodePrefix string) *Repo {
+type NodeStatus struct {
+	Capacity    uint64
+	Used        uint64
+	LastUpdated time.Time
+	Jobs        []enc.Name
+}
+
+// utilities
+func (r *Repo) String() string {
+	return "repo"
+}
+
+func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.storageCapacity, r.storageUsed
+}
+
+func (r *Repo) addCommand(cmd *tlv.Command) {
+	r.mu.Lock()
+	r.commands[&cmd.Target] = cmd
+	r.mu.Unlock()
+}
+
+func (r *Repo) calculateReplication(cmd *tlv.Command) int {
+	target := cmd.Target
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	count := 0
+	for _, status := range r.nodeStatus {
+		for _, jobTarget := range status.Jobs {
+			if jobTarget.Equal(target) {
+				count++
+				break
+			}
+		}
+	}
+
+	return count
+}
+
+func (r *Repo) getMyJobs() []enc.Name {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nodeStatus["mine"].Jobs
+}
+
+func (r *Repo) getCommmandForTarget(target enc.Name) tlv.Command {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return *r.commands[&target]
+}
+
+func (r *Repo) getMyCommands() []tlv.Command {
+	myJobs := r.getMyJobs()
+	commands := make([]tlv.Command, len(myJobs))
+	for index, target := range myJobs {
+		commands[index] = r.getCommmandForTarget(target)
+	}
+	return commands
+}
+
+func (r *Repo) publishNodeUpdate() {
+	r.publishCommand(nil)
+}
+
+func (r *Repo) publishCommand(newCmd *tlv.Command) {
+	capacity, used := r.getStorageStats()
+
+	myJobs := r.getMyJobs()
+	update := &tlv.NodeUpdate{
+		Jobs:            myJobs,
+		StorageCapacity: capacity,
+		StorageUsed:     used,
+		NewCommand:      newCmd,
+	}
+
+	_, _, err := r.groupSync.Publish(update.Encode())
+	if err != nil {
+		log.Fatal(r, "node_update_pub_failed", "err", err)
+	}
+}
+
+// initialization
+func NewRepo(groupPrefix string, nodePrefix string, replicationFactor int) *Repo {
 	gp, _ := enc.NameFromStr(groupPrefix)
 	np, _ := enc.NameFromStr(nodePrefix)
 	nf := gp.Append(enc.NewGenericComponent(NOTIFY))
@@ -66,17 +145,8 @@ func NewRepo(groupPrefix string, nodePrefix string) *Repo {
 		notifyPrefix: &nf,
 		nodePrefix:   np,
 		nodeStatus:   make(map[string]NodeStatus),
+		rf:           replicationFactor,
 	}
-}
-
-func (r *Repo) String() string {
-	return "repo"
-}
-
-func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.storageCapacity, r.storageUsed
 }
 
 func (r *Repo) Start() (err error) {
@@ -90,7 +160,7 @@ func (r *Repo) Start() (err error) {
 		return err
 	}
 
-	// FIXME: use badger store in the deployed version for persistent storage
+	// TODO: use badger store in the deployed version for persistent storage
 	r.store = local_storage.NewMemoryStore()
 
 	kc, err := keychain.NewKeyChain("dir:///home/adam/.ndn/keys", r.store)
@@ -157,14 +227,14 @@ func (r *Repo) Start() (err error) {
 	return nil
 }
 
-// TODO: separate the storage ticker from heartbeat ticker
+// FIXME: separate the storage ticker from heartbeat ticker
 func (r *Repo) runHeartbeat() {
 	ticker := time.NewTicker(HEARTBEAT_TIME)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		r.mu.Lock()
-		for _, job := range r.jobs {
+		for _, job := range r.getMyCommands() {
 			if job.Type == "JOIN" {
 				r.storageUsed += uint64(rand.Int64N(10 * 1024 * 1024))
 			}
@@ -175,12 +245,11 @@ func (r *Repo) runHeartbeat() {
 		}
 		r.mu.Unlock()
 
-		if err := r.publishNodeUpdate(nil); err != nil {
-			log.Warn(r, "heartbeat_failed", "err", err)
-		}
+		r.publishNodeUpdate()
 	}
 }
 
+// handle external actions
 func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wire) error) {
 	cmd, err := tlv.ParseCommand(enc.NewWireView(content), false)
 	if err != nil {
@@ -195,14 +264,8 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 	reply(response.Encode())
 
 	r.addCommand(cmd)
-	r.publishNodeUpdate(cmd)
-	// r.checkReplication(cmd)
-}
-
-func (r *Repo) addCommand(cmd *tlv.Command) {
-	r.mu.Lock()
-	r.commands = append(r.commands, cmd)
-	r.mu.Unlock()
+	r.publishCommand(cmd)
+	r.replicate(cmd)
 }
 
 func (r *Repo) onGroupSync(pub svs.SvsPub) {
@@ -213,90 +276,52 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 	}
 
 	publisherName := pub.Publisher.String()
+
 	r.mu.Lock()
+	// FIXME: move to utility that updates the node and returns any job that changed from the previous one
+	// for now, it can just do the negative deltas, since we are not worried about over-replication
+	// then, for each of these negative deltas, call replicate
 	r.nodeStatus[publisherName] = NodeStatus{
 		Capacity:    update.StorageCapacity,
 		Used:        update.StorageUsed,
 		LastUpdated: time.Now(),
+		Jobs:        update.Jobs,
 	}
 	r.mu.Unlock()
-
-	if update.NewCommand != nil {
-		if r.claimJob(update.NewCommand) {
-			go r.publishNodeUpdate(nil)
-		}
-	}
 }
 
-func (r *Repo) claimJob(cmd *tlv.Command) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if !r.shouldClaimJob(cmd) {
-		return false
+// actions/logic
+func (r *Repo) replicate(cmd *tlv.Command) {
+	if r.calculateReplication(cmd) >= r.rf { // good or over
+		return
 	}
-
-	log.Info(r, "job_claimed", "target", cmd.Target)
-	r.jobs = append(r.jobs, cmd)
-
-	if cmd.Type == "INSERT" {
-		cost := uint64(rand.Int64N(500 * 1024 * 1024))
-		r.storageUsed += cost
-		if r.storageUsed > r.storageCapacity {
-			r.storageUsed = r.storageCapacity
-		}
-	}
-
-	return true
-}
-
-func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
-	capacity, used := r.getStorageStats()
-
-	r.mu.Lock()
-	currentJobs := make([]*tlv.Command, len(r.jobs))
-	copy(currentJobs, r.jobs)
-	r.mu.Unlock()
-
-	update := &tlv.NodeUpdate{
-		Jobs:            currentJobs,
-		StorageCapacity: capacity,
-		StorageUsed:     used,
-		NewCommand:      newCmd,
-	}
-
-	_, _, err := r.groupSync.Publish(update.Encode())
-	if err != nil {
-		log.Error(r, "node_update_pub_failed", "err", err)
-		return err
-	}
-	return nil
-}
-
-// not thread safe
-func (r *Repo) shouldClaimJob(cmd *tlv.Command) bool {
-	myFree := r.storageCapacity - r.storageUsed
-
-	for nodeName, status := range r.nodeStatus {
-		peerFree := status.Capacity - status.Used
-
-		if peerFree > myFree {
-			return false
-		}
-
-		// FIXME: untested
-		if peerFree == myFree {
-			// Break tie with node names (Highest name wins)
-			if strings.Compare(nodeName, r.nodePrefix.String()) > 0 {
-				log.Info(r, "peer wins")
-				return false
+	// under-replicated
+	if r.shouldClaimJobHydra(cmd) {
+		// FIXME: add job to node status and do the below part in that utility
+		if cmd.Type == "INSERT" {
+			cost := uint64(rand.Int64N(500 * 1024 * 1024))
+			r.storageUsed += cost
+			if r.storageUsed > r.storageCapacity {
+				r.storageUsed = r.storageCapacity
 			}
 		}
+		r.publishNodeUpdate()
+
 	}
 
-	return true
 }
 
+func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
+	// FIXME: do this logic:
+	// 0) let n be the amount of additional times the command needs to be done to get to r.rl
+	// 1) sort all nodes by availability, first being the most available
+	// 2) iterate through the first n nodes that aren't doing the command.
+	// 2a) if we are any of the nodes listed in (2), return true
+
+	return false
+}
+
+// because I didn't write a trust schema
 type BasicSchema struct{}
 
 func (s *BasicSchema) Check(pkt enc.Name, cert enc.Name) bool {

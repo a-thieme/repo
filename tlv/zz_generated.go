@@ -369,13 +369,12 @@ type NodeUpdateEncoder struct {
 	Length uint
 
 	Jobs_subencoder []struct {
-		Jobs_encoder CommandEncoder
+		Jobs_length uint
 	}
 	NewCommand_encoder CommandEncoder
 }
 
 type NodeUpdateParsingContext struct {
-	Jobs_context       CommandParsingContext
 	NewCommand_context CommandParsingContext
 }
 
@@ -383,12 +382,12 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 	{
 		Jobs_l := len(value.Jobs)
 		encoder.Jobs_subencoder = make([]struct {
-			Jobs_encoder CommandEncoder
+			Jobs_length uint
 		}, Jobs_l)
 		for i := 0; i < Jobs_l; i++ {
 			pseudoEncoder := &encoder.Jobs_subencoder[i]
 			pseudoValue := struct {
-				Jobs *Command
+				Jobs enc.Name
 			}{
 				Jobs: value.Jobs[i],
 			}
@@ -396,7 +395,10 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 				encoder := pseudoEncoder
 				value := &pseudoValue
 				if value.Jobs != nil {
-					encoder.Jobs_encoder.Init(value.Jobs)
+					encoder.Jobs_length = 0
+					for _, c := range value.Jobs {
+						encoder.Jobs_length += uint(c.EncodingLength())
+					}
 				}
 				_ = encoder
 				_ = value
@@ -412,7 +414,7 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 		for seq_i, seq_v := range value.Jobs {
 			pseudoEncoder := &encoder.Jobs_subencoder[seq_i]
 			pseudoValue := struct {
-				Jobs *Command
+				Jobs enc.Name
 			}{
 				Jobs: seq_v,
 			}
@@ -421,8 +423,8 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 				value := &pseudoValue
 				if value.Jobs != nil {
 					l += 3
-					l += uint(enc.TLNum(encoder.Jobs_encoder.Length).EncodingLength())
-					l += encoder.Jobs_encoder.Length
+					l += uint(enc.TLNum(encoder.Jobs_length).EncodingLength())
+					l += encoder.Jobs_length
 				}
 				_ = encoder
 				_ = value
@@ -443,7 +445,7 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 }
 
 func (context *NodeUpdateParsingContext) Init() {
-	context.Jobs_context.Init()
+
 	context.NewCommand_context.Init()
 
 }
@@ -456,7 +458,7 @@ func (encoder *NodeUpdateEncoder) EncodeInto(value *NodeUpdate, buf []byte) {
 		for seq_i, seq_v := range value.Jobs {
 			pseudoEncoder := &encoder.Jobs_subencoder[seq_i]
 			pseudoValue := struct {
-				Jobs *Command
+				Jobs enc.Name
 			}{
 				Jobs: seq_v,
 			}
@@ -467,10 +469,9 @@ func (encoder *NodeUpdateEncoder) EncodeInto(value *NodeUpdate, buf []byte) {
 					buf[pos] = 253
 					binary.BigEndian.PutUint16(buf[pos+1:], uint16(656))
 					pos += 3
-					pos += uint(enc.TLNum(encoder.Jobs_encoder.Length).EncodeInto(buf[pos:]))
-					if encoder.Jobs_encoder.Length > 0 {
-						encoder.Jobs_encoder.EncodeInto(value.Jobs, buf[pos:])
-						pos += encoder.Jobs_encoder.Length
+					pos += uint(enc.TLNum(encoder.Jobs_length).EncodeInto(buf[pos:]))
+					for _, c := range value.Jobs {
+						pos += uint(c.EncodeInto(buf[pos:]))
 					}
 				}
 				_ = encoder
@@ -549,15 +550,16 @@ func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritic
 					handled = true
 					handled_Jobs = true
 					if value.Jobs == nil {
-						value.Jobs = make([]*Command, 0)
+						value.Jobs = make([]enc.Name, 0)
 					}
 					{
 						pseudoValue := struct {
-							Jobs *Command
+							Jobs enc.Name
 						}{}
 						{
 							value := &pseudoValue
-							value.Jobs, err = context.Jobs_context.Parse(reader.Delegate(int(l)), ignoreCritical)
+							delegate := reader.Delegate(int(l))
+							value.Jobs, err = delegate.ReadName()
 							_ = value
 						}
 						value.Jobs = append(value.Jobs, pseudoValue.Jobs)
