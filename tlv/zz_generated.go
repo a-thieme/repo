@@ -371,14 +371,12 @@ type NodeUpdateEncoder struct {
 	Jobs_subencoder []struct {
 		Jobs_encoder CommandEncoder
 	}
-	NewCommands_subencoder []struct {
-		NewCommands_encoder CommandEncoder
-	}
+	NewCommand_encoder CommandEncoder
 }
 
 type NodeUpdateParsingContext struct {
-	Jobs_context        CommandParsingContext
-	NewCommands_context CommandParsingContext
+	Jobs_context       CommandParsingContext
+	NewCommand_context CommandParsingContext
 }
 
 func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
@@ -405,28 +403,8 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 			}
 		}
 	}
-	{
-		NewCommands_l := len(value.NewCommands)
-		encoder.NewCommands_subencoder = make([]struct {
-			NewCommands_encoder CommandEncoder
-		}, NewCommands_l)
-		for i := 0; i < NewCommands_l; i++ {
-			pseudoEncoder := &encoder.NewCommands_subencoder[i]
-			pseudoValue := struct {
-				NewCommands *Command
-			}{
-				NewCommands: value.NewCommands[i],
-			}
-			{
-				encoder := pseudoEncoder
-				value := &pseudoValue
-				if value.NewCommands != nil {
-					encoder.NewCommands_encoder.Init(value.NewCommands)
-				}
-				_ = encoder
-				_ = value
-			}
-		}
+	if value.NewCommand != nil {
+		encoder.NewCommand_encoder.Init(value.NewCommand)
 	}
 
 	l := uint(0)
@@ -451,26 +429,10 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 			}
 		}
 	}
-	if value.NewCommands != nil {
-		for seq_i, seq_v := range value.NewCommands {
-			pseudoEncoder := &encoder.NewCommands_subencoder[seq_i]
-			pseudoValue := struct {
-				NewCommands *Command
-			}{
-				NewCommands: seq_v,
-			}
-			{
-				encoder := pseudoEncoder
-				value := &pseudoValue
-				if value.NewCommands != nil {
-					l += 3
-					l += uint(enc.TLNum(encoder.NewCommands_encoder.Length).EncodingLength())
-					l += encoder.NewCommands_encoder.Length
-				}
-				_ = encoder
-				_ = value
-			}
-		}
+	if value.NewCommand != nil {
+		l += 3
+		l += uint(enc.TLNum(encoder.NewCommand_encoder.Length).EncodingLength())
+		l += encoder.NewCommand_encoder.Length
 	}
 	l += 3
 	l += uint(1 + enc.Nat(value.StorageCapacity).EncodingLength())
@@ -482,7 +444,7 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 
 func (context *NodeUpdateParsingContext) Init() {
 	context.Jobs_context.Init()
-	context.NewCommands_context.Init()
+	context.NewCommand_context.Init()
 
 }
 
@@ -516,30 +478,14 @@ func (encoder *NodeUpdateEncoder) EncodeInto(value *NodeUpdate, buf []byte) {
 			}
 		}
 	}
-	if value.NewCommands != nil {
-		for seq_i, seq_v := range value.NewCommands {
-			pseudoEncoder := &encoder.NewCommands_subencoder[seq_i]
-			pseudoValue := struct {
-				NewCommands *Command
-			}{
-				NewCommands: seq_v,
-			}
-			{
-				encoder := pseudoEncoder
-				value := &pseudoValue
-				if value.NewCommands != nil {
-					buf[pos] = 253
-					binary.BigEndian.PutUint16(buf[pos+1:], uint16(657))
-					pos += 3
-					pos += uint(enc.TLNum(encoder.NewCommands_encoder.Length).EncodeInto(buf[pos:]))
-					if encoder.NewCommands_encoder.Length > 0 {
-						encoder.NewCommands_encoder.EncodeInto(value.NewCommands, buf[pos:])
-						pos += encoder.NewCommands_encoder.Length
-					}
-				}
-				_ = encoder
-				_ = value
-			}
+	if value.NewCommand != nil {
+		buf[pos] = 253
+		binary.BigEndian.PutUint16(buf[pos+1:], uint16(657))
+		pos += 3
+		pos += uint(enc.TLNum(encoder.NewCommand_encoder.Length).EncodeInto(buf[pos:]))
+		if encoder.NewCommand_encoder.Length > 0 {
+			encoder.NewCommand_encoder.EncodeInto(value.NewCommand, buf[pos:])
+			pos += encoder.NewCommand_encoder.Length
 		}
 	}
 	buf[pos] = 253
@@ -569,7 +515,7 @@ func (encoder *NodeUpdateEncoder) Encode(value *NodeUpdate) enc.Wire {
 func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*NodeUpdate, error) {
 
 	var handled_Jobs bool = false
-	var handled_NewCommands bool = false
+	var handled_NewCommand bool = false
 	var handled_StorageCapacity bool = false
 	var handled_StorageUsed bool = false
 
@@ -621,22 +567,8 @@ func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritic
 			case 657:
 				if true {
 					handled = true
-					handled_NewCommands = true
-					if value.NewCommands == nil {
-						value.NewCommands = make([]*Command, 0)
-					}
-					{
-						pseudoValue := struct {
-							NewCommands *Command
-						}{}
-						{
-							value := &pseudoValue
-							value.NewCommands, err = context.NewCommands_context.Parse(reader.Delegate(int(l)), ignoreCritical)
-							_ = value
-						}
-						value.NewCommands = append(value.NewCommands, pseudoValue.NewCommands)
-					}
-					progress--
+					handled_NewCommand = true
+					value.NewCommand, err = context.NewCommand_context.Parse(reader.Delegate(int(l)), ignoreCritical)
 				}
 			case 658:
 				if true {
@@ -697,8 +629,8 @@ func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritic
 	if !handled_Jobs && err == nil {
 		// sequence - skip
 	}
-	if !handled_NewCommands && err == nil {
-		// sequence - skip
+	if !handled_NewCommand && err == nil {
+		value.NewCommand = nil
 	}
 	if !handled_StorageCapacity && err == nil {
 		err = enc.ErrSkipRequired{Name: "StorageCapacity", TypeNum: 658}

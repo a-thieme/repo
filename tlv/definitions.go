@@ -22,8 +22,8 @@ type StatusResponse struct {
 type NodeUpdate struct {
 	//+field:sequence:*Command:struct:Command
 	Jobs []*Command `tlv:"0x290"`
-	//+field:sequence:*Command:struct:Command
-	NewCommands []*Command `tlv:"0x291"`
+	//+field:struct:Command
+	NewCommand *Command `tlv:"0x291"`
 	//+field:natural
 	StorageCapacity uint64 `tlv:"0x292"`
 	//+field:natural

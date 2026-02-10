@@ -77,9 +77,7 @@ func (r *Repo) String() string {
 func (r *Repo) Start() (err error) {
 	log.Info(r, "repo_start")
 
-	// random initial storage capacity (10GB base + random 0-5GB)
-	r.storageCapacity = (10 * 1024 * 1024 * 1024) // + uint64(rand.Int64N(5*1024*1024*1024))
-	// Random initial usage (0-100MB)
+	r.storageCapacity = (10 * 1024 * 1024 * 1024) + uint64(rand.Int64N(5*1024*1024*1024))
 	r.storageUsed = uint64(rand.Int64N(100 * 1024 * 1024))
 
 	r.engine = engine.NewBasicEngine(engine.NewDefaultFace())
@@ -160,12 +158,14 @@ func (r *Repo) runHeartbeat() {
 
 	for range ticker.C {
 		r.mu.Lock()
-		// Simulate sync data growth: 0-10MB per tick
 		for _, job := range r.jobs {
 			if job.Type == "JOIN" {
-				growth := uint64(rand.Int64N(10 * 1024 * 1024))
-				r.storageUsed += growth
+				r.storageUsed += uint64(rand.Int64N(10 * 1024 * 1024))
 			}
+		}
+		if r.storageUsed > r.storageCapacity {
+			// TODO: release job
+			r.storageUsed = r.storageCapacity
 		}
 		r.mu.Unlock()
 
@@ -173,6 +173,29 @@ func (r *Repo) runHeartbeat() {
 			log.Warn(r, "heartbeat_failed", "err", err)
 		}
 	}
+}
+
+func (r *Repo) claimJob(cmd *tlv.Command) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !r.shouldClaimJob(cmd) {
+		return false
+	}
+
+	// Execution logic
+	log.Info(r, "job_claimed", "target", cmd.Target)
+	r.jobs = append(r.jobs, cmd)
+
+	if cmd.Type == "INSERT" {
+		cost := uint64(rand.Int64N(500 * 1024 * 1024))
+		r.storageUsed += cost
+		if r.storageUsed > r.storageCapacity {
+			r.storageUsed = r.storageCapacity
+		}
+	}
+
+	return true
 }
 
 func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wire) error) {
@@ -196,6 +219,10 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 	reply(response.Encode())
 
 	r.publishNodeUpdate(cmd)
+
+	if r.claimJob(cmd) {
+		go r.publishNodeUpdate(nil)
+	}
 }
 
 func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
@@ -219,12 +246,12 @@ func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
 	}
 
 	if newCmd != nil {
-		update.NewCommands = []*tlv.Command{newCmd}
+		update.NewCommand = newCmd
 	}
 
-	log.Info(r, "node_update_pub",
+	log.Trace(r, "node_update_pub",
 		"jobs", len(update.Jobs),
-		"new_cmds", len(update.NewCommands),
+		"has_new_cmd", update.NewCommand != nil,
 		"storage_used", update.StorageUsed,
 		"storage_capacity", update.StorageCapacity,
 	)
@@ -237,10 +264,10 @@ func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
 	return nil
 }
 
-// not thread safe
+// shouldClaimJob returns true if we are the best candidate.
+// It assumes the caller holds the lock (called by claimJob).
 func (r *Repo) shouldClaimJob(cmd *tlv.Command) bool {
 	myFree := r.storageCapacity - r.storageUsed
-	myName := r.nodePrefix.String()
 
 	for nodeName, status := range r.nodeStatus {
 		peerFree := status.Capacity - status.Used
@@ -249,9 +276,11 @@ func (r *Repo) shouldClaimJob(cmd *tlv.Command) bool {
 			return false
 		}
 
+		// FIXME: untested
 		if peerFree == myFree {
-			// break tie with node names
-			if strings.Compare(nodeName, myName) > 0 {
+			// Break tie with node names (Highest name wins)
+			if strings.Compare(nodeName, r.nodePrefix.String()) > 0 {
+				log.Info(r, "peer wins")
 				return false
 			}
 		}
@@ -285,11 +314,11 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 		usagePct = (float64(update.StorageUsed) / float64(update.StorageCapacity)) * 100
 	}
 
-	log.Info(r, "node_update_recv",
+	log.Trace(r, "node_update_recv",
 		"from", pub.Publisher,
 		"seq", pub.SeqNum,
 		"jobs", len(update.Jobs),
-		"new_cmds", len(update.NewCommands),
+		"has_new_cmd", update.NewCommand != nil,
 		"storage_pct", usagePct,
 	)
 
@@ -302,41 +331,17 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 		)
 	}
 
-	claimedJob := false
-	r.mu.Lock()
-	for _, cmd := range update.NewCommands {
-		log.Info(r, "peer_new_cmd",
-			"node", pub.Publisher,
-			"target", cmd.Target,
-			"type", cmd.Type,
-		)
-
-		if r.shouldClaimJob(cmd) {
-			log.Info(r, "job_claimed", "target", cmd.Target)
-			r.jobs = append(r.jobs, cmd)
-			claimedJob = true
-
-			if cmd.Type == "INSERT" {
-				cost := uint64(rand.Int64N(500 * 1024 * 1024))
-				r.storageUsed += cost
-				if r.storageUsed > r.storageCapacity {
-					r.storageUsed = r.storageCapacity
-				}
-			}
+	if update.NewCommand != nil {
+		if r.claimJob(update.NewCommand) {
+			go r.publishNodeUpdate(nil)
 		}
-	}
-	r.mu.Unlock()
-
-	if claimedJob {
-		go r.publishNodeUpdate(nil)
 	}
 }
 
-// BasicSchema allows all data and suggests the first matching key in the keychain.
 type BasicSchema struct{}
 
 func (s *BasicSchema) Check(pkt enc.Name, cert enc.Name) bool {
-	return true // Trust everything (matching NullSchema behavior)
+	return true
 }
 
 func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
@@ -348,7 +353,5 @@ func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
 			}
 		}
 	}
-
 	return signer.NewSha256Signer()
 }
-
