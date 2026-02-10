@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"math/rand/v2"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -82,10 +83,10 @@ func (r *Repo) getCommandInternal(target enc.Name) *tlv.Command {
 	return r.commands[target.String()]
 }
 
+// Internal helper: assumes lock is held
 func (r *Repo) calculateReplication(target enc.Name) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	count := 0
 	for _, status := range r.nodeStatus {
 		for _, jobTarget := range status.Jobs {
@@ -318,14 +319,9 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) []enc.
 	// Calculate negative deltas (jobs present in old but missing in new)
 	dropped := make([]enc.Name, 0)
 	for _, oldJob := range oldJobs {
-		stillExists := false
-		// FIXME: for loop can be simplified using slices.ContainsFunc
-		for _, newJob := range update.Jobs {
-			if oldJob.Equal(newJob) {
-				stillExists = true
-				break
-			}
-		}
+		stillExists := slices.ContainsFunc(update.Jobs, func(n enc.Name) bool {
+			return oldJob.Equal(n)
+		})
 		if !stillExists {
 			dropped = append(dropped, oldJob)
 		}
@@ -342,25 +338,14 @@ func (r *Repo) replicate(cmd *tlv.Command) {
 
 	// under-replicated
 	if r.shouldClaimJobHydra(cmd) {
-		if r.claimJob(cmd) {
-			r.publishNodeUpdate()
-		}
+		r.claimJob(cmd)
 	}
 }
 
-// FIXME: claimJob should only be called if we are not already doing the job, so the check and return value shouldn't be necessary
-func (r *Repo) claimJob(cmd *tlv.Command) bool {
+func (r *Repo) claimJob(cmd *tlv.Command) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	myStatus := r.nodeStatus["mine"]
-
-	// Check if already doing it
-	for _, job := range myStatus.Jobs {
-		if job.Equal(cmd.Target) {
-			return false
-		}
-	}
 
 	// Add job
 	myStatus.Jobs = append(myStatus.Jobs, cmd.Target)
@@ -377,36 +362,21 @@ func (r *Repo) claimJob(cmd *tlv.Command) bool {
 	}
 
 	r.nodeStatus["mine"] = myStatus
-	return true
+	r.mu.Unlock()
+	r.publishNodeUpdate()
 }
 
 func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
-	// FIXME: use r.calculateReplication() here instead
-	currentReplication := 0
-	for _, status := range r.nodeStatus {
-		for _, job := range status.Jobs {
-			if job.Equal(cmd.Target) {
-				currentReplication++
-				break
-			}
-		}
-	}
+	currentReplication := r.calculateReplication(cmd.Target)
 
 	needed := r.rf - currentReplication
 	if needed <= 0 {
 		return false
 	}
 
-	// FIXME: replace this candidate struct and for loop. we already have r.nodeStatus; just copy and sort it
-	// Define candidate struct
-	type Candidate struct {
-		Name string
-		Free uint64
-	}
-	candidates := make([]Candidate, 0)
+	r.mu.Lock()
+	candidates := make([]string, 0, len(r.nodeStatus))
 
 	for name, status := range r.nodeStatus {
 		isDoing := false
@@ -418,29 +388,33 @@ func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
 		}
 
 		if !isDoing {
-			free := uint64(0)
-			if status.Capacity > status.Used {
-				free = status.Capacity - status.Used
-			}
-			candidates = append(candidates, Candidate{Name: name, Free: free})
+			candidates = append(candidates, name)
 		}
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].Free != candidates[j].Free {
-			return candidates[i].Free > candidates[j].Free
+		// Calculate free space for i
+		// FIXME: create a utility for getting the free space of a node so we don't have to keep doing the same calculation over and over
+		statusI := r.nodeStatus[candidates[i]]
+		freeI := statusI.Capacity - statusI.Used
+
+		// Calculate free space for j
+		statusJ := r.nodeStatus[candidates[j]]
+		freeJ := statusJ.Capacity - statusJ.Used
+
+		if freeI != freeJ {
+			return freeI > freeJ
 		}
-		return strings.Compare(candidates[i].Name, candidates[j].Name) > 0
+		return strings.Compare(candidates[i], candidates[j]) > 0
 	})
 
-	// FIXME: modernize by using "min()"
-	limit := needed
-	if limit > len(candidates) {
-		limit = len(candidates)
-	}
+	r.mu.Unlock()
 
+	limit := min(needed, len(candidates))
+
+	// FIXME: for loop can be modernized using range over int
 	for i := 0; i < limit; i++ {
-		if candidates[i].Name == "mine" {
+		if candidates[i] == "mine" {
 			return true
 		}
 	}
@@ -466,3 +440,4 @@ func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
 	}
 	return signer.NewSha256Signer()
 }
+
