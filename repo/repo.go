@@ -62,6 +62,13 @@ type NodeStatus struct {
 }
 
 // utilities
+func (ns NodeStatus) FreeSpace() uint64 {
+	if ns.Used >= ns.Capacity {
+		return 0
+	}
+	return ns.Capacity - ns.Used
+}
+
 func (r *Repo) String() string {
 	return "repo"
 }
@@ -81,22 +88,6 @@ func (r *Repo) addCommand(cmd *tlv.Command) {
 // Internal helper: assumes lock is held
 func (r *Repo) getCommandInternal(target enc.Name) *tlv.Command {
 	return r.commands[target.String()]
-}
-
-// Internal helper: assumes lock is held
-func (r *Repo) calculateReplication(target enc.Name) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	count := 0
-	for _, status := range r.nodeStatus {
-		for _, jobTarget := range status.Jobs {
-			if jobTarget.Equal(target) {
-				count++
-				break
-			}
-		}
-	}
-	return count
 }
 
 func (r *Repo) getMyJobs() []enc.Name {
@@ -332,11 +323,6 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) []enc.
 
 // actions/logic
 func (r *Repo) replicate(cmd *tlv.Command) {
-	if r.calculateReplication(cmd.Target) >= r.rf {
-		return
-	}
-
-	// under-replicated
 	if r.shouldClaimJobHydra(cmd) {
 		r.claimJob(cmd)
 	}
@@ -367,15 +353,10 @@ func (r *Repo) claimJob(cmd *tlv.Command) {
 }
 
 func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
-
-	currentReplication := r.calculateReplication(cmd.Target)
-
-	needed := r.rf - currentReplication
-	if needed <= 0 {
-		return false
-	}
-
 	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	currentReplication := 0
 	candidates := make([]string, 0, len(r.nodeStatus))
 
 	for name, status := range r.nodeStatus {
@@ -387,20 +368,24 @@ func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
 			}
 		}
 
-		if !isDoing {
+		if isDoing {
+			currentReplication++
+		} else {
 			candidates = append(candidates, name)
 		}
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		// Calculate free space for i
-		// FIXME: create a utility for getting the free space of a node so we don't have to keep doing the same calculation over and over
-		statusI := r.nodeStatus[candidates[i]]
-		freeI := statusI.Capacity - statusI.Used
+	needed := r.rf - currentReplication
+	if needed <= 0 {
+		return false
+	}
 
-		// Calculate free space for j
+	sort.Slice(candidates, func(i, j int) bool {
+		statusI := r.nodeStatus[candidates[i]]
+		freeI := statusI.FreeSpace()
+
 		statusJ := r.nodeStatus[candidates[j]]
-		freeJ := statusJ.Capacity - statusJ.Used
+		freeJ := statusJ.FreeSpace()
 
 		if freeI != freeJ {
 			return freeI > freeJ
@@ -408,12 +393,9 @@ func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
 		return strings.Compare(candidates[i], candidates[j]) > 0
 	})
 
-	r.mu.Unlock()
-
 	limit := min(needed, len(candidates))
 
-	// FIXME: for loop can be modernized using range over int
-	for i := 0; i < limit; i++ {
+	for i := range limit {
 		if candidates[i] == "mine" {
 			return true
 		}
@@ -440,4 +422,3 @@ func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
 	}
 	return signer.NewSha256Signer()
 }
-
