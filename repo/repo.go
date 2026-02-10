@@ -120,6 +120,36 @@ func (r *Repo) publishCommand(newCmd *tlv.Command) {
 	}
 }
 
+func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) []enc.Name {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	oldStatus, exists := r.nodeStatus[publisher]
+	var oldJobs []enc.Name
+	if exists {
+		oldJobs = oldStatus.Jobs
+	}
+
+	r.nodeStatus[publisher] = NodeStatus{
+		Capacity:    update.StorageCapacity,
+		Used:        update.StorageUsed,
+		LastUpdated: time.Now(),
+		Jobs:        update.Jobs,
+	}
+
+	dropped := make([]enc.Name, 0)
+	for _, oldJob := range oldJobs {
+		stillExists := slices.ContainsFunc(update.Jobs, func(n enc.Name) bool {
+			return oldJob.Equal(n)
+		})
+		if !stillExists {
+			dropped = append(dropped, oldJob)
+		}
+	}
+
+	return dropped
+}
+
 // initialization
 func NewRepo(groupPrefix string, nodePrefix string, replicationFactor int) *Repo {
 	gp, _ := enc.NameFromStr(groupPrefix)
@@ -289,38 +319,6 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 	}
 }
 
-// Utility to update node and return negative deltas (dropped jobs)
-func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) []enc.Name {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	oldStatus, exists := r.nodeStatus[publisher]
-	var oldJobs []enc.Name
-	if exists {
-		oldJobs = oldStatus.Jobs
-	}
-
-	r.nodeStatus[publisher] = NodeStatus{
-		Capacity:    update.StorageCapacity,
-		Used:        update.StorageUsed,
-		LastUpdated: time.Now(),
-		Jobs:        update.Jobs,
-	}
-
-	// Calculate negative deltas (jobs present in old but missing in new)
-	dropped := make([]enc.Name, 0)
-	for _, oldJob := range oldJobs {
-		stillExists := slices.ContainsFunc(update.Jobs, func(n enc.Name) bool {
-			return oldJob.Equal(n)
-		})
-		if !stillExists {
-			dropped = append(dropped, oldJob)
-		}
-	}
-
-	return dropped
-}
-
 // actions/logic
 func (r *Repo) replicate(cmd *tlv.Command) {
 	if r.shouldClaimJobHydra(cmd) {
@@ -422,3 +420,4 @@ func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
 	}
 	return signer.NewSha256Signer()
 }
+
