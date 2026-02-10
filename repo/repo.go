@@ -73,6 +73,12 @@ func (r *Repo) String() string {
 	return "repo"
 }
 
+func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.storageCapacity, r.storageUsed
+}
+
 func (r *Repo) Start() (err error) {
 	log.Info(r, "repo_start")
 
@@ -175,6 +181,53 @@ func (r *Repo) runHeartbeat() {
 	}
 }
 
+func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wire) error) {
+	cmd, err := tlv.ParseCommand(enc.NewWireView(content), false)
+	if err != nil {
+		log.Warn(r, "command_parse_failed", "err", err)
+		return
+	}
+
+	response := tlv.StatusResponse{
+		Target: cmd.Target,
+		Status: "received",
+	}
+	reply(response.Encode())
+
+	r.addCommand(cmd)
+	r.publishNodeUpdate(cmd)
+	// r.checkReplication(cmd)
+}
+
+func (r *Repo) addCommand(cmd *tlv.Command) {
+	r.mu.Lock()
+	r.commands = append(r.commands, cmd)
+	r.mu.Unlock()
+}
+
+func (r *Repo) onGroupSync(pub svs.SvsPub) {
+	update, err := tlv.ParseNodeUpdate(enc.NewWireView(pub.Content), false)
+	if err != nil {
+		log.Warn(r, "node_update_parse_failed", "name", pub.DataName, "err", err)
+		return
+	}
+
+	publisherName := pub.Publisher.String()
+	r.mu.Lock()
+	r.nodeStatus[publisherName] = NodeStatus{
+		Capacity:    update.StorageCapacity,
+		Used:        update.StorageUsed,
+		LastUpdated: time.Now(),
+	}
+	r.mu.Unlock()
+
+	if update.NewCommand != nil {
+		if r.claimJob(update.NewCommand) {
+			go r.publishNodeUpdate(nil)
+		}
+	}
+}
+
 func (r *Repo) claimJob(cmd *tlv.Command) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -195,36 +248,6 @@ func (r *Repo) claimJob(cmd *tlv.Command) bool {
 	}
 
 	return true
-}
-
-func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wire) error) {
-	cmd, err := tlv.ParseCommand(enc.NewWireView(content), false)
-	if err != nil {
-		log.Warn(r, "command_parse_failed", "err", err)
-		return
-	}
-
-	response := tlv.StatusResponse{
-		Target: cmd.Target,
-		Status: "received",
-	}
-	reply(response.Encode())
-
-	r.mu.Lock()
-	r.commands = append(r.commands, cmd)
-	r.mu.Unlock()
-
-	// FIXME: check this logic
-	r.publishNodeUpdate(cmd)
-	if r.claimJob(cmd) {
-		go r.publishNodeUpdate(nil)
-	}
-}
-
-func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.storageCapacity, r.storageUsed
 }
 
 func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
@@ -272,29 +295,6 @@ func (r *Repo) shouldClaimJob(cmd *tlv.Command) bool {
 	}
 
 	return true
-}
-
-func (r *Repo) onGroupSync(pub svs.SvsPub) {
-	update, err := tlv.ParseNodeUpdate(enc.NewWireView(pub.Content), false)
-	if err != nil {
-		log.Warn(r, "node_update_parse_failed", "name", pub.DataName, "err", err)
-		return
-	}
-
-	publisherName := pub.Publisher.String()
-	r.mu.Lock()
-	r.nodeStatus[publisherName] = NodeStatus{
-		Capacity:    update.StorageCapacity,
-		Used:        update.StorageUsed,
-		LastUpdated: time.Now(),
-	}
-	r.mu.Unlock()
-
-	if update.NewCommand != nil {
-		if r.claimJob(update.NewCommand) {
-			go r.publishNodeUpdate(nil)
-		}
-	}
 }
 
 type BasicSchema struct{}
