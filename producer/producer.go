@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"github.com/a-thieme/repo/tlv"
+	"time"
 
 	enc "github.com/named-data/ndnd/std/encoding"
 	"github.com/named-data/ndnd/std/engine"
@@ -79,9 +80,10 @@ func main() {
 	engine := engine.NewBasicEngine(engine.NewDefaultFace())
 	engine.Start()
 	store := local_storage.NewMemoryStore()
-	target, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer/mything")
+	target, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer/mytarget/")
 	notify, _ := enc.NameFromStr("/ndn/drepo/notify")
 	prefix, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer")
+	target = target.Append(enc.NewTimestampComponent(uint64(time.Now().Unix())))
 
 	kc, err := keychain.NewKeyChain("dir:///home/adam/.ndn/keys", store)
 	if err != nil {
@@ -103,7 +105,7 @@ func main() {
 		Expose: true,
 	})
 	command := tlv.Command{
-		Type:   "testtype",
+		Type:   "INSERT",
 		Target: target,
 	}
 

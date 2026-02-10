@@ -78,7 +78,7 @@ func (r *Repo) Start() (err error) {
 	log.Info(r, "repo_start")
 
 	// random initial storage capacity (10GB base + random 0-5GB)
-	r.storageCapacity = (10 * 1024 * 1024 * 1024) + uint64(rand.Int64N(5*1024*1024*1024))
+	r.storageCapacity = (10 * 1024 * 1024 * 1024) // + uint64(rand.Int64N(5*1024*1024*1024))
 	// Random initial usage (0-100MB)
 	r.storageUsed = uint64(rand.Int64N(100 * 1024 * 1024))
 
@@ -351,3 +351,4 @@ func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
 
 	return signer.NewSha256Signer()
 }
+
