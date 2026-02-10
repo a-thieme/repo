@@ -3,6 +3,8 @@ package main
 import (
 	_ "embed"
 	"math/rand/v2"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 // constants
 const NOTIFY = "notify"
 const HEARTBEAT_TIME = 5 * time.Second
+const STORAGE_TICK_TIME = 1 * time.Second
 
 //go:embed testbed-root.decoded
 var testbedRootCert []byte
@@ -42,7 +45,7 @@ type Repo struct {
 	mu sync.Mutex
 
 	nodeStatus map[string]NodeStatus
-	commands   map[*enc.Name]*tlv.Command
+	commands   map[string]*tlv.Command
 
 	storageCapacity uint64
 	storageUsed     uint64
@@ -70,12 +73,16 @@ func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
 
 func (r *Repo) addCommand(cmd *tlv.Command) {
 	r.mu.Lock()
-	r.commands[&cmd.Target] = cmd
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	r.commands[cmd.Target.String()] = cmd
 }
 
-func (r *Repo) calculateReplication(cmd *tlv.Command) int {
-	target := cmd.Target
+// Internal helper: assumes lock is held
+func (r *Repo) getCommandInternal(target enc.Name) *tlv.Command {
+	return r.commands[target.String()]
+}
+
+func (r *Repo) calculateReplication(target enc.Name) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -88,29 +95,16 @@ func (r *Repo) calculateReplication(cmd *tlv.Command) int {
 			}
 		}
 	}
-
 	return count
 }
 
 func (r *Repo) getMyJobs() []enc.Name {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.nodeStatus["mine"].Jobs
-}
-
-func (r *Repo) getCommmandForTarget(target enc.Name) tlv.Command {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return *r.commands[&target]
-}
-
-func (r *Repo) getMyCommands() []tlv.Command {
-	myJobs := r.getMyJobs()
-	commands := make([]tlv.Command, len(myJobs))
-	for index, target := range myJobs {
-		commands[index] = r.getCommmandForTarget(target)
-	}
-	return commands
+	src := r.nodeStatus["mine"].Jobs
+	dst := make([]enc.Name, len(src))
+	copy(dst, src)
+	return dst
 }
 
 func (r *Repo) publishNodeUpdate() {
@@ -119,8 +113,8 @@ func (r *Repo) publishNodeUpdate() {
 
 func (r *Repo) publishCommand(newCmd *tlv.Command) {
 	capacity, used := r.getStorageStats()
-
 	myJobs := r.getMyJobs()
+
 	update := &tlv.NodeUpdate{
 		Jobs:            myJobs,
 		StorageCapacity: capacity,
@@ -140,13 +134,20 @@ func NewRepo(groupPrefix string, nodePrefix string, replicationFactor int) *Repo
 	np, _ := enc.NameFromStr(nodePrefix)
 	nf := gp.Append(enc.NewGenericComponent(NOTIFY))
 
-	return &Repo{
+	r := &Repo{
 		groupPrefix:  gp,
 		notifyPrefix: &nf,
 		nodePrefix:   np,
 		nodeStatus:   make(map[string]NodeStatus),
+		commands:     make(map[string]*tlv.Command),
 		rf:           replicationFactor,
 	}
+
+	r.nodeStatus["mine"] = NodeStatus{
+		Jobs: make([]enc.Name, 0),
+	}
+
+	return r
 }
 
 func (r *Repo) Start() (err error) {
@@ -224,28 +225,33 @@ func (r *Repo) Start() (err error) {
 		return err
 	}
 	go r.runHeartbeat()
+	go r.runStorageSimulation()
 	return nil
 }
 
-// FIXME: separate the storage ticker from heartbeat ticker
 func (r *Repo) runHeartbeat() {
 	ticker := time.NewTicker(HEARTBEAT_TIME)
 	defer ticker.Stop()
 
 	for range ticker.C {
+		r.publishNodeUpdate()
+	}
+}
+
+func (r *Repo) runStorageSimulation() {
+	ticker := time.NewTicker(STORAGE_TICK_TIME)
+	defer ticker.Stop()
+
+	for range ticker.C {
 		r.mu.Lock()
-		for _, job := range r.getMyCommands() {
-			if job.Type == "JOIN" {
+		myStatus := r.nodeStatus["mine"]
+		for _, target := range myStatus.Jobs {
+			cmd := r.getCommandInternal(target)
+			if cmd != nil && cmd.Type == "JOIN" {
 				r.storageUsed += uint64(rand.Int64N(10 * 1024 * 1024))
 			}
 		}
-		if r.storageUsed > r.storageCapacity {
-			// TODO: release job
-			r.storageUsed = r.storageCapacity
-		}
 		r.mu.Unlock()
-
-		r.publishNodeUpdate()
 	}
 }
 
@@ -276,52 +282,173 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 	}
 
 	publisherName := pub.Publisher.String()
+	droppedJobs := r.updateNodeStatus(publisherName, update)
 
+	for _, target := range droppedJobs {
+		// We need the full command object to replicate
+		r.mu.Lock()
+		cmd := r.getCommandInternal(target)
+		r.mu.Unlock()
+
+		if cmd != nil {
+			log.Info(r, "job_dropped_by_peer_checking_replication", "peer", publisherName, "target", target)
+			r.replicate(cmd)
+		}
+	}
+}
+
+// Utility to update node and return negative deltas (dropped jobs)
+func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) []enc.Name {
 	r.mu.Lock()
-	// FIXME: move to utility that updates the node and returns any job that changed from the previous one
-	// for now, it can just do the negative deltas, since we are not worried about over-replication
-	// then, for each of these negative deltas, call replicate
-	r.nodeStatus[publisherName] = NodeStatus{
+	defer r.mu.Unlock()
+
+	oldStatus, exists := r.nodeStatus[publisher]
+	var oldJobs []enc.Name
+	if exists {
+		oldJobs = oldStatus.Jobs
+	}
+
+	r.nodeStatus[publisher] = NodeStatus{
 		Capacity:    update.StorageCapacity,
 		Used:        update.StorageUsed,
 		LastUpdated: time.Now(),
 		Jobs:        update.Jobs,
 	}
-	r.mu.Unlock()
+
+	// Calculate negative deltas (jobs present in old but missing in new)
+	dropped := make([]enc.Name, 0)
+	for _, oldJob := range oldJobs {
+		stillExists := false
+		// FIXME: for loop can be simplified using slices.ContainsFunc
+		for _, newJob := range update.Jobs {
+			if oldJob.Equal(newJob) {
+				stillExists = true
+				break
+			}
+		}
+		if !stillExists {
+			dropped = append(dropped, oldJob)
+		}
+	}
+
+	return dropped
 }
 
 // actions/logic
 func (r *Repo) replicate(cmd *tlv.Command) {
-	if r.calculateReplication(cmd) >= r.rf { // good or over
+	if r.calculateReplication(cmd.Target) >= r.rf {
 		return
 	}
+
 	// under-replicated
 	if r.shouldClaimJobHydra(cmd) {
-		// FIXME: add job to node status and do the below part in that utility
-		if cmd.Type == "INSERT" {
-			cost := uint64(rand.Int64N(500 * 1024 * 1024))
-			r.storageUsed += cost
-			if r.storageUsed > r.storageCapacity {
-				r.storageUsed = r.storageCapacity
-			}
+		if r.claimJob(cmd) {
+			r.publishNodeUpdate()
 		}
-		r.publishNodeUpdate()
+	}
+}
 
+// FIXME: claimJob should only be called if we are not already doing the job, so the check and return value shouldn't be necessary
+func (r *Repo) claimJob(cmd *tlv.Command) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	myStatus := r.nodeStatus["mine"]
+
+	// Check if already doing it
+	for _, job := range myStatus.Jobs {
+		if job.Equal(cmd.Target) {
+			return false
+		}
 	}
 
+	// Add job
+	myStatus.Jobs = append(myStatus.Jobs, cmd.Target)
+
+	// Apply immediate cost
+	if cmd.Type == "INSERT" {
+		cost := uint64(rand.Int64N(500 * 1024 * 1024))
+		r.storageUsed += cost
+		if r.storageUsed > r.storageCapacity {
+			r.storageUsed = r.storageCapacity
+		}
+		myStatus.Used = r.storageUsed
+		myStatus.Capacity = r.storageCapacity
+	}
+
+	r.nodeStatus["mine"] = myStatus
+	return true
 }
 
 func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
-	// FIXME: do this logic:
-	// 0) let n be the amount of additional times the command needs to be done to get to r.rl
-	// 1) sort all nodes by availability, first being the most available
-	// 2) iterate through the first n nodes that aren't doing the command.
-	// 2a) if we are any of the nodes listed in (2), return true
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// FIXME: use r.calculateReplication() here instead
+	currentReplication := 0
+	for _, status := range r.nodeStatus {
+		for _, job := range status.Jobs {
+			if job.Equal(cmd.Target) {
+				currentReplication++
+				break
+			}
+		}
+	}
+
+	needed := r.rf - currentReplication
+	if needed <= 0 {
+		return false
+	}
+
+	// FIXME: replace this candidate struct and for loop. we already have r.nodeStatus; just copy and sort it
+	// Define candidate struct
+	type Candidate struct {
+		Name string
+		Free uint64
+	}
+	candidates := make([]Candidate, 0)
+
+	for name, status := range r.nodeStatus {
+		isDoing := false
+		for _, job := range status.Jobs {
+			if job.Equal(cmd.Target) {
+				isDoing = true
+				break
+			}
+		}
+
+		if !isDoing {
+			free := uint64(0)
+			if status.Capacity > status.Used {
+				free = status.Capacity - status.Used
+			}
+			candidates = append(candidates, Candidate{Name: name, Free: free})
+		}
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Free != candidates[j].Free {
+			return candidates[i].Free > candidates[j].Free
+		}
+		return strings.Compare(candidates[i].Name, candidates[j].Name) > 0
+	})
+
+	// FIXME: modernize by using "min()"
+	limit := needed
+	if limit > len(candidates) {
+		limit = len(candidates)
+	}
+
+	for i := 0; i < limit; i++ {
+		if candidates[i].Name == "mine" {
+			return true
+		}
+	}
 
 	return false
 }
 
-// because I didn't write a trust schema
+// BasicSchema allows all data and suggests the first matching key in the keychain.
 type BasicSchema struct{}
 
 func (s *BasicSchema) Check(pkt enc.Name, cert enc.Name) bool {
