@@ -48,13 +48,12 @@ type Repo struct {
 
 	mu sync.Mutex
 
-	commands []*tlv.Command
-	jobs     []*tlv.Command
+	nodeStatus map[string]NodeStatus
+	commands   []*tlv.Command
 
+	jobs            []*tlv.Command
 	storageCapacity uint64
 	storageUsed     uint64
-
-	nodeStatus map[string]NodeStatus
 }
 
 func NewRepo(groupPrefix string, nodePrefix string) *Repo {
@@ -152,6 +151,7 @@ func (r *Repo) Start() (err error) {
 	return nil
 }
 
+// TODO: separate the storage ticker from heartbeat ticker
 func (r *Repo) runHeartbeat() {
 	ticker := time.NewTicker(HEARTBEAT_TIME)
 	defer ticker.Stop()
@@ -183,7 +183,6 @@ func (r *Repo) claimJob(cmd *tlv.Command) bool {
 		return false
 	}
 
-	// Execution logic
 	log.Info(r, "job_claimed", "target", cmd.Target)
 	r.jobs = append(r.jobs, cmd)
 
@@ -205,21 +204,18 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 		return
 	}
 
-	log.Info(r, "command_recv", "target", cmd.Target, "type", cmd.Type)
+	response := tlv.StatusResponse{
+		Target: cmd.Target,
+		Status: "received",
+	}
+	reply(response.Encode())
 
 	r.mu.Lock()
 	r.commands = append(r.commands, cmd)
 	r.mu.Unlock()
 
-	response := tlv.StatusResponse{
-		Target: cmd.Target,
-		Status: "received",
-	}
-
-	reply(response.Encode())
-
+	// FIXME: check this logic
 	r.publishNodeUpdate(cmd)
-
 	if r.claimJob(cmd) {
 		go r.publishNodeUpdate(nil)
 	}
@@ -243,18 +239,8 @@ func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
 		Jobs:            currentJobs,
 		StorageCapacity: capacity,
 		StorageUsed:     used,
+		NewCommand:      newCmd,
 	}
-
-	if newCmd != nil {
-		update.NewCommand = newCmd
-	}
-
-	log.Trace(r, "node_update_pub",
-		"jobs", len(update.Jobs),
-		"has_new_cmd", update.NewCommand != nil,
-		"storage_used", update.StorageUsed,
-		"storage_capacity", update.StorageCapacity,
-	)
 
 	_, _, err := r.groupSync.Publish(update.Encode())
 	if err != nil {
@@ -264,8 +250,7 @@ func (r *Repo) publishNodeUpdate(newCmd *tlv.Command) error {
 	return nil
 }
 
-// shouldClaimJob returns true if we are the best candidate.
-// It assumes the caller holds the lock (called by claimJob).
+// not thread safe
 func (r *Repo) shouldClaimJob(cmd *tlv.Command) bool {
 	myFree := r.storageCapacity - r.storageUsed
 
@@ -290,46 +275,20 @@ func (r *Repo) shouldClaimJob(cmd *tlv.Command) bool {
 }
 
 func (r *Repo) onGroupSync(pub svs.SvsPub) {
-	if len(pub.Content) == 0 {
-		return
-	}
-
 	update, err := tlv.ParseNodeUpdate(enc.NewWireView(pub.Content), false)
 	if err != nil {
 		log.Warn(r, "node_update_parse_failed", "name", pub.DataName, "err", err)
 		return
 	}
 
-	r.mu.Lock()
 	publisherName := pub.Publisher.String()
+	r.mu.Lock()
 	r.nodeStatus[publisherName] = NodeStatus{
 		Capacity:    update.StorageCapacity,
 		Used:        update.StorageUsed,
 		LastUpdated: time.Now(),
 	}
 	r.mu.Unlock()
-
-	var usagePct float64 = 0
-	if update.StorageCapacity > 0 {
-		usagePct = (float64(update.StorageUsed) / float64(update.StorageCapacity)) * 100
-	}
-
-	log.Trace(r, "node_update_recv",
-		"from", pub.Publisher,
-		"seq", pub.SeqNum,
-		"jobs", len(update.Jobs),
-		"has_new_cmd", update.NewCommand != nil,
-		"storage_pct", usagePct,
-	)
-
-	log.Debug(r, "cluster_status", "known_nodes", len(r.nodeStatus))
-
-	for _, job := range update.Jobs {
-		log.Debug(r, "peer_job_active",
-			"node", pub.Publisher,
-			"target", job.Target,
-		)
-	}
 
 	if update.NewCommand != nil {
 		if r.claimJob(update.NewCommand) {
