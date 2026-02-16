@@ -12,6 +12,17 @@ type Command struct {
 	SnapshotThreshold uint64 `tlv:"0x255"`
 }
 
+type InternalCommand struct {
+	//+field:string
+	Type string `tlv:"0x252"`
+	//+field:name
+	Target enc.Name `tlv:"0x253"`
+	//+field:natural
+	SnapshotThreshold uint64 `tlv:"0x255"`
+	//+field:natural
+	StorageSpace uint64 `tlv:"0x294"`
+}
+
 type StatusResponse struct {
 	//+field:name
 	Target enc.Name `tlv:"0x280"`
@@ -29,4 +40,3 @@ type NodeUpdate struct {
 	//+field:natural
 	StorageUsed uint64 `tlv:"0x293"`
 }
-

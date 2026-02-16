@@ -203,6 +203,231 @@ func ParseCommand(reader enc.WireView, ignoreCritical bool) (*Command, error) {
 	return context.Parse(reader, ignoreCritical)
 }
 
+type InternalCommandEncoder struct {
+	Length uint
+
+	Target_length uint
+}
+
+type InternalCommandParsingContext struct {
+}
+
+func (encoder *InternalCommandEncoder) Init(value *InternalCommand) {
+
+	if value.Target != nil {
+		encoder.Target_length = 0
+		for _, c := range value.Target {
+			encoder.Target_length += uint(c.EncodingLength())
+		}
+	}
+
+	l := uint(0)
+	l += 3
+	l += uint(enc.TLNum(len(value.Type)).EncodingLength())
+	l += uint(len(value.Type))
+	if value.Target != nil {
+		l += 3
+		l += uint(enc.TLNum(encoder.Target_length).EncodingLength())
+		l += encoder.Target_length
+	}
+	l += 3
+	l += uint(1 + enc.Nat(value.SnapshotThreshold).EncodingLength())
+	l += 3
+	l += uint(1 + enc.Nat(value.StorageSpace).EncodingLength())
+	encoder.Length = l
+
+}
+
+func (context *InternalCommandParsingContext) Init() {
+
+}
+
+func (encoder *InternalCommandEncoder) EncodeInto(value *InternalCommand, buf []byte) {
+
+	pos := uint(0)
+
+	buf[pos] = 253
+	binary.BigEndian.PutUint16(buf[pos+1:], uint16(594))
+	pos += 3
+	pos += uint(enc.TLNum(len(value.Type)).EncodeInto(buf[pos:]))
+	copy(buf[pos:], value.Type)
+	pos += uint(len(value.Type))
+	if value.Target != nil {
+		buf[pos] = 253
+		binary.BigEndian.PutUint16(buf[pos+1:], uint16(595))
+		pos += 3
+		pos += uint(enc.TLNum(encoder.Target_length).EncodeInto(buf[pos:]))
+		for _, c := range value.Target {
+			pos += uint(c.EncodeInto(buf[pos:]))
+		}
+	}
+	buf[pos] = 253
+	binary.BigEndian.PutUint16(buf[pos+1:], uint16(597))
+	pos += 3
+
+	buf[pos] = byte(enc.Nat(value.SnapshotThreshold).EncodeInto(buf[pos+1:]))
+	pos += uint(1 + buf[pos])
+	buf[pos] = 253
+	binary.BigEndian.PutUint16(buf[pos+1:], uint16(660))
+	pos += 3
+
+	buf[pos] = byte(enc.Nat(value.StorageSpace).EncodeInto(buf[pos+1:]))
+	pos += uint(1 + buf[pos])
+}
+
+func (encoder *InternalCommandEncoder) Encode(value *InternalCommand) enc.Wire {
+
+	wire := make(enc.Wire, 1)
+	wire[0] = make([]byte, encoder.Length)
+	buf := wire[0]
+	encoder.EncodeInto(value, buf)
+
+	return wire
+}
+
+func (context *InternalCommandParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*InternalCommand, error) {
+
+	var handled_Type bool = false
+	var handled_Target bool = false
+	var handled_SnapshotThreshold bool = false
+	var handled_StorageSpace bool = false
+
+	progress := -1
+	_ = progress
+
+	value := &InternalCommand{}
+	var err error
+	var startPos int
+	for {
+		startPos = reader.Pos()
+		if startPos >= reader.Length() {
+			break
+		}
+		typ := enc.TLNum(0)
+		l := enc.TLNum(0)
+		typ, err = reader.ReadTLNum()
+		if err != nil {
+			return nil, enc.ErrFailToParse{TypeNum: 0, Err: err}
+		}
+		l, err = reader.ReadTLNum()
+		if err != nil {
+			return nil, enc.ErrFailToParse{TypeNum: 0, Err: err}
+		}
+
+		err = nil
+		if handled := false; true {
+			switch typ {
+			case 594:
+				if true {
+					handled = true
+					handled_Type = true
+					{
+						var builder strings.Builder
+						_, err = reader.CopyN(&builder, int(l))
+						if err == nil {
+							value.Type = builder.String()
+						}
+					}
+				}
+			case 595:
+				if true {
+					handled = true
+					handled_Target = true
+					delegate := reader.Delegate(int(l))
+					value.Target, err = delegate.ReadName()
+				}
+			case 597:
+				if true {
+					handled = true
+					handled_SnapshotThreshold = true
+					value.SnapshotThreshold = uint64(0)
+					{
+						for i := 0; i < int(l); i++ {
+							x := byte(0)
+							x, err = reader.ReadByte()
+							if err != nil {
+								if err == io.EOF {
+									err = io.ErrUnexpectedEOF
+								}
+								break
+							}
+							value.SnapshotThreshold = uint64(value.SnapshotThreshold<<8) | uint64(x)
+						}
+					}
+				}
+			case 660:
+				if true {
+					handled = true
+					handled_StorageSpace = true
+					value.StorageSpace = uint64(0)
+					{
+						for i := 0; i < int(l); i++ {
+							x := byte(0)
+							x, err = reader.ReadByte()
+							if err != nil {
+								if err == io.EOF {
+									err = io.ErrUnexpectedEOF
+								}
+								break
+							}
+							value.StorageSpace = uint64(value.StorageSpace<<8) | uint64(x)
+						}
+					}
+				}
+			default:
+				if !ignoreCritical && ((typ <= 31) || ((typ & 1) == 1)) {
+					return nil, enc.ErrUnrecognizedField{TypeNum: typ}
+				}
+				handled = true
+				err = reader.Skip(int(l))
+			}
+			if err == nil && !handled {
+			}
+			if err != nil {
+				return nil, enc.ErrFailToParse{TypeNum: typ, Err: err}
+			}
+		}
+	}
+
+	startPos = reader.Pos()
+	err = nil
+
+	if !handled_Type && err == nil {
+		err = enc.ErrSkipRequired{Name: "Type", TypeNum: 594}
+	}
+	if !handled_Target && err == nil {
+		value.Target = nil
+	}
+	if !handled_SnapshotThreshold && err == nil {
+		err = enc.ErrSkipRequired{Name: "SnapshotThreshold", TypeNum: 597}
+	}
+	if !handled_StorageSpace && err == nil {
+		err = enc.ErrSkipRequired{Name: "StorageSpace", TypeNum: 660}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return value, nil
+}
+
+func (value *InternalCommand) Encode() enc.Wire {
+	encoder := InternalCommandEncoder{}
+	encoder.Init(value)
+	return encoder.Encode(value)
+}
+
+func (value *InternalCommand) Bytes() []byte {
+	return value.Encode().Join()
+}
+
+func ParseInternalCommand(reader enc.WireView, ignoreCritical bool) (*InternalCommand, error) {
+	context := InternalCommandParsingContext{}
+	context.Init()
+	return context.Parse(reader, ignoreCritical)
+}
+
 type StatusResponseEncoder struct {
 	Length uint
 
