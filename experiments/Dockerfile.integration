@@ -1,0 +1,22 @@
+FROM ghcr.io/named-data/mini-ndn:master
+
+RUN apt-get update && apt-get install -y \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /home/adam/.ndn/keys && \
+    mkdir -p /root/.ndn/keys
+
+WORKDIR /workspace
+
+COPY experiments/runner.py /usr/local/bin/runner.py
+RUN chmod +x /usr/local/bin/runner.py
+
+COPY bin/repo /usr/local/bin/repo
+COPY bin/producer /usr/local/bin/producer
+RUN chmod +x /usr/local/bin/repo /usr/local/bin/producer
+
+COPY keys/ /home/adam/.ndn/keys/
+COPY keys/ /root/.ndn/keys/
+
+ENTRYPOINT ["/bin/bash"]

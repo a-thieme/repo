@@ -597,10 +597,14 @@ type NodeUpdateEncoder struct {
 		Jobs_length uint
 	}
 	NewCommand_encoder CommandEncoder
+
+	JobRelease_encoder InternalCommandEncoder
 }
 
 type NodeUpdateParsingContext struct {
 	NewCommand_context CommandParsingContext
+
+	JobRelease_context InternalCommandParsingContext
 }
 
 func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
@@ -634,6 +638,10 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 		encoder.NewCommand_encoder.Init(value.NewCommand)
 	}
 
+	if value.JobRelease != nil {
+		encoder.JobRelease_encoder.Init(value.JobRelease)
+	}
+
 	l := uint(0)
 	if value.Jobs != nil {
 		for seq_i, seq_v := range value.Jobs {
@@ -665,6 +673,11 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 	l += uint(1 + enc.Nat(value.StorageCapacity).EncodingLength())
 	l += 3
 	l += uint(1 + enc.Nat(value.StorageUsed).EncodingLength())
+	if value.JobRelease != nil {
+		l += 3
+		l += uint(enc.TLNum(encoder.JobRelease_encoder.Length).EncodingLength())
+		l += encoder.JobRelease_encoder.Length
+	}
 	encoder.Length = l
 
 }
@@ -673,6 +686,7 @@ func (context *NodeUpdateParsingContext) Init() {
 
 	context.NewCommand_context.Init()
 
+	context.JobRelease_context.Init()
 }
 
 func (encoder *NodeUpdateEncoder) EncodeInto(value *NodeUpdate, buf []byte) {
@@ -726,6 +740,16 @@ func (encoder *NodeUpdateEncoder) EncodeInto(value *NodeUpdate, buf []byte) {
 
 	buf[pos] = byte(enc.Nat(value.StorageUsed).EncodeInto(buf[pos+1:]))
 	pos += uint(1 + buf[pos])
+	if value.JobRelease != nil {
+		buf[pos] = 253
+		binary.BigEndian.PutUint16(buf[pos+1:], uint16(660))
+		pos += 3
+		pos += uint(enc.TLNum(encoder.JobRelease_encoder.Length).EncodeInto(buf[pos:]))
+		if encoder.JobRelease_encoder.Length > 0 {
+			encoder.JobRelease_encoder.EncodeInto(value.JobRelease, buf[pos:])
+			pos += encoder.JobRelease_encoder.Length
+		}
+	}
 }
 
 func (encoder *NodeUpdateEncoder) Encode(value *NodeUpdate) enc.Wire {
@@ -744,6 +768,7 @@ func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritic
 	var handled_NewCommand bool = false
 	var handled_StorageCapacity bool = false
 	var handled_StorageUsed bool = false
+	var handled_JobRelease bool = false
 
 	progress := -1
 	_ = progress
@@ -835,6 +860,12 @@ func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritic
 						}
 					}
 				}
+			case 660:
+				if true {
+					handled = true
+					handled_JobRelease = true
+					value.JobRelease, err = context.JobRelease_context.Parse(reader.Delegate(int(l)), ignoreCritical)
+				}
 			default:
 				if !ignoreCritical && ((typ <= 31) || ((typ & 1) == 1)) {
 					return nil, enc.ErrUnrecognizedField{TypeNum: typ}
@@ -864,6 +895,9 @@ func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritic
 	}
 	if !handled_StorageUsed && err == nil {
 		err = enc.ErrSkipRequired{Name: "StorageUsed", TypeNum: 659}
+	}
+	if !handled_JobRelease && err == nil {
+		value.JobRelease = nil
 	}
 
 	if err != nil {

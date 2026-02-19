@@ -1,9 +1,11 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	"github.com/a-thieme/repo/tlv"
 	"time"
+
+	"github.com/a-thieme/repo/tlv"
 
 	enc "github.com/named-data/ndnd/std/encoding"
 	"github.com/named-data/ndnd/std/engine"
@@ -75,15 +77,17 @@ func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
 	return signer.NewSha256Signer()
 }
 func main() {
+	count := flag.Int("count", 1, "number of commands to send")
+	rate := flag.Int("rate", 1, "commands per second")
+	flag.Parse()
+
 	log.Default().SetLevel(log.LevelTrace)
 	fmt.Println("starting")
 	engine := engine.NewBasicEngine(engine.NewDefaultFace())
 	engine.Start()
 	store := local_storage.NewMemoryStore()
-	target, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer/mytarget/")
 	notify, _ := enc.NameFromStr("/ndn/drepo/notify")
 	prefix, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer")
-	target = target.Append(enc.NewTimestampComponent(uint64(time.Now().Unix())))
 
 	kc, err := keychain.NewKeyChain("dir:///home/adam/.ndn/keys", store)
 	if err != nil {
@@ -97,37 +101,48 @@ func main() {
 	}
 	trust.UseDataNameFwHint = true
 
-	// new client
 	client := object.NewClient(engine, store, trust)
 	log.Debug(nil, "announce", "prefix", prefix)
 	client.AnnouncePrefix(ndn.Announcement{
 		Name:   prefix,
 		Expose: true,
 	})
-	command := tlv.Command{
-		Type:   "INSERT",
-		Target: target,
+
+	interval := time.Second / time.Duration(*rate)
+	for i := 0; i < *count; i++ {
+		if i > 0 {
+			time.Sleep(interval)
+		}
+
+		target, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer/mytarget/")
+		target = target.Append(enc.NewTimestampComponent(uint64(time.Now().UnixNano())))
+
+		command := tlv.Command{
+			Type:   "INSERT",
+			Target: target,
+		}
+
+		done := make(chan struct{})
+
+		fmt.Printf("Sending command %d/%d...\n", i+1, *count)
+		ExpressCommand(client, notify, target, command.Encode(),
+			func(w enc.Wire, e error) {
+				defer close(done)
+				if e != nil {
+					fmt.Println("Error:", e.Error())
+					return
+				}
+				sr, err := tlv.ParseStatusResponse(enc.NewWireView(w), false)
+				if err != nil {
+					fmt.Println("Parse Error:", err.Error())
+					return
+				}
+				fmt.Println("Target:", sr.Target)
+				fmt.Println("Status:", sr.Status)
+			})
+
+		<-done
 	}
 
-	done := make(chan struct{})
-
-	fmt.Println("Sending command...")
-	ExpressCommand(client, notify, target, command.Encode(),
-		func(w enc.Wire, e error) {
-			defer close(done)
-			if e != nil {
-				fmt.Println("Error:", e.Error())
-				return
-			}
-			sr, err := tlv.ParseStatusResponse(enc.NewWireView(w), false)
-			if err != nil {
-				fmt.Println("Parse Error:", err.Error())
-				return
-			}
-			fmt.Println("Target:", sr.Target)
-			fmt.Println("Status:", sr.Status)
-		})
-
-	<-done // blocking
 	fmt.Println("finished")
 }
