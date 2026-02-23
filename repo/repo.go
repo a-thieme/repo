@@ -25,7 +25,7 @@ import (
 
 // constants
 const NOTIFY = "notify"
-const HEARTBEAT_TIME = 5 * time.Second
+const DEFAULT_HEARTBEAT_INTERVAL = 5 * time.Second
 const STORAGE_TICK_TIME = 1 * time.Second
 
 //go:embed testbed-root.decoded
@@ -51,20 +51,26 @@ type Repo struct {
 
 	storageCapacity uint64
 	storageUsed     uint64
+	jobs            []enc.Name
 	jobStorageUsage map[string]uint64
 
-	rf int
+	rf                int
+	noRelease         bool
+	maxJoinGrowthRate uint64
+	heartbeatInterval time.Duration
 
+	nodeTimers   map[string]*time.Timer
 	eventLogger  *util.EventLogger
 	countingFace *util.CountingFace
 }
 
 type NodeStatus struct {
-	Capacity          uint64
-	Used              uint64
-	LastUpdated       time.Time
-	Jobs              []enc.Name
-	MissingHeartbeats int
+	Capacity    uint64
+	Used        uint64
+	LastUpdated time.Time
+	Jobs        []enc.Name
+	Alive       bool
+	TimerID     uint64
 }
 
 // utilities
@@ -83,6 +89,17 @@ func (r *Repo) myNodeName() string {
 	return r.nodePrefix.String()
 }
 
+func (r *Repo) amIDoingJob(target enc.Name) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, job := range r.jobs {
+		if job.Equal(target) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Repo) SetEventLogger(logger *util.EventLogger) {
 	r.eventLogger = logger
 }
@@ -99,9 +116,20 @@ func hashFromString(s string) uint64 {
 	return uint64(h)
 }
 
+func stringNamesToEncNames(names []string) []enc.Name {
+	result := make([]enc.Name, len(names))
+	for i, n := range names {
+		result[i], _ = enc.NameFromStr(n)
+	}
+	return result
+}
+
 func (r *Repo) countReplication(target enc.Name) int {
 	count := 0
 	for _, status := range r.nodeStatus {
+		if !status.Alive {
+			continue
+		}
 		for _, job := range status.Jobs {
 			if job.Equal(target) {
 				count++
@@ -129,42 +157,55 @@ func (r *Repo) getCommandInternal(target enc.Name) *tlv.Command {
 	return r.commands[target.String()]
 }
 
+func (r *Repo) getCommand(target enc.Name) *tlv.Command {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.getCommandInternal(target)
+}
+
 func (r *Repo) getMyJobs() []enc.Name {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	src := r.nodeStatus[r.myNodeName()].Jobs
-	dst := make([]enc.Name, len(src))
-	copy(dst, src)
+	dst := make([]enc.Name, len(r.jobs))
+	copy(dst, r.jobs)
 	return dst
 }
 
-func (r *Repo) publishNodeUpdate() {
+func (r *Repo) publishNodeUpdate(jobAssignments []*tlv.JobAssignment) {
 	capacity, used := r.getStorageStats()
 	myJobs := r.getMyJobs()
 
-	// Check if we need to release a job (storage > 75%)
-	if used > capacity*75/100 {
+	if !r.noRelease && used > capacity*75/100 {
 		r.mu.Lock()
 		jobToRelease := r.findJobToRelease()
 		if jobToRelease != nil {
 			r.mu.Unlock()
 
-			// Remove from local state and update storage
 			r.removeJobFromLocal(jobToRelease.Target)
 
-			// Update with JobRelease
 			update := &tlv.NodeUpdate{
 				Jobs:            myJobs,
 				StorageCapacity: capacity,
 				StorageUsed:     used,
 				NewCommand:      nil,
 				JobRelease:      jobToRelease,
+				JobAssignments:  jobAssignments,
 			}
 
 			_, _, err := r.groupSync.Publish(update.Encode())
 			if err != nil {
 				log.Fatal(r, "node_update_pub_failed", "err", err)
 			}
+
+			r.mu.Lock()
+			r.nodeStatus[r.myNodeName()] = NodeStatus{
+				Capacity:    capacity,
+				Used:        used,
+				Jobs:        myJobs,
+				LastUpdated: time.Now(),
+				Alive:       true,
+			}
+			r.mu.Unlock()
 		} else {
 			r.mu.Unlock()
 		}
@@ -174,12 +215,23 @@ func (r *Repo) publishNodeUpdate() {
 			StorageCapacity: capacity,
 			StorageUsed:     used,
 			NewCommand:      nil,
+			JobAssignments:  jobAssignments,
 		}
 
 		_, _, err := r.groupSync.Publish(update.Encode())
 		if err != nil {
 			log.Fatal(r, "node_update_pub_failed", "err", err)
 		}
+
+		r.mu.Lock()
+		r.nodeStatus[r.myNodeName()] = NodeStatus{
+			Capacity:    capacity,
+			Used:        used,
+			Jobs:        myJobs,
+			LastUpdated: time.Now(),
+			Alive:       true,
+		}
+		r.mu.Unlock()
 	}
 }
 
@@ -187,12 +239,11 @@ func (r *Repo) findJobToRelease() *tlv.InternalCommand {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	myStatus := r.nodeStatus[r.myNodeName()]
-	if len(myStatus.Jobs) == 0 {
+	if len(r.jobs) == 0 {
 		return nil
 	}
 
-	target := myStatus.Jobs[len(myStatus.Jobs)-1]
+	target := r.jobs[len(r.jobs)-1]
 
 	cmd := r.getCommandInternal(target)
 	if cmd == nil {
@@ -212,15 +263,13 @@ func (r *Repo) removeJobFromLocal(target enc.Name) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	myStatus := r.nodeStatus[r.myNodeName()]
-
 	newJobs := make([]enc.Name, 0)
-	for _, job := range myStatus.Jobs {
+	for _, job := range r.jobs {
 		if job.String() != target.String() {
 			newJobs = append(newJobs, job)
 		}
 	}
-	myStatus.Jobs = newJobs
+	r.jobs = newJobs
 
 	jobKey := target.String()
 	if r.jobStorageUsage != nil {
@@ -233,14 +282,48 @@ func (r *Repo) removeJobFromLocal(target enc.Name) {
 		}
 	}
 
-	r.nodeStatus[r.myNodeName()] = myStatus
-
 	if r.eventLogger != nil {
 		r.eventLogger.LogJobReleased(target.String())
 	}
 }
 
-func (r *Repo) publishCommand(newCmd *tlv.Command) {
+func (r *Repo) publishCommand(newCmd *tlv.Command, winners []string) {
+	capacity, used := r.getStorageStats()
+	myJobs := r.getMyJobs()
+
+	var jobAssignments []*tlv.JobAssignment
+	if len(winners) > 0 {
+		jobAssignments = []*tlv.JobAssignment{{
+			Target:    newCmd.Target,
+			Assignees: stringNamesToEncNames(winners),
+		}}
+	}
+
+	update := &tlv.NodeUpdate{
+		Jobs:            myJobs,
+		StorageCapacity: capacity,
+		StorageUsed:     used,
+		NewCommand:      newCmd,
+		JobAssignments:  jobAssignments,
+	}
+
+	_, _, err := r.groupSync.Publish(update.Encode())
+	if err != nil {
+		log.Fatal(r, "node_update_pub_failed", "err", err)
+	}
+
+	r.mu.Lock()
+	r.nodeStatus[r.myNodeName()] = NodeStatus{
+		Capacity:    capacity,
+		Used:        used,
+		Jobs:        myJobs,
+		LastUpdated: time.Now(),
+		Alive:       true,
+	}
+	r.mu.Unlock()
+}
+
+func (r *Repo) publishJobAssignments(assignments []*tlv.JobAssignment) {
 	capacity, used := r.getStorageStats()
 	myJobs := r.getMyJobs()
 
@@ -248,13 +331,64 @@ func (r *Repo) publishCommand(newCmd *tlv.Command) {
 		Jobs:            myJobs,
 		StorageCapacity: capacity,
 		StorageUsed:     used,
-		NewCommand:      newCmd,
+		JobAssignments:  assignments,
 	}
 
 	_, _, err := r.groupSync.Publish(update.Encode())
 	if err != nil {
 		log.Fatal(r, "node_update_pub_failed", "err", err)
 	}
+
+	r.mu.Lock()
+	r.nodeStatus[r.myNodeName()] = NodeStatus{
+		Capacity:    capacity,
+		Used:        used,
+		Jobs:        myJobs,
+		LastUpdated: time.Now(),
+		Alive:       true,
+	}
+	r.mu.Unlock()
+}
+
+func (r *Repo) handleJobAssignment(assignment *tlv.JobAssignment) {
+	myPrefix := r.myNodeName()
+	target := assignment.Target
+
+	if r.amIDoingJob(target) {
+		return
+	}
+
+	amAssignee := false
+	for _, a := range assignment.Assignees {
+		if a.String() == myPrefix {
+			amAssignee = true
+			break
+		}
+	}
+	if !amAssignee {
+		return
+	}
+
+	cmd := r.getCommand(target)
+	if cmd == nil {
+		return
+	}
+
+	winners := r.determineWinnersHydra(cmd)
+	if winners == nil {
+		return
+	}
+
+	amWinner := slices.Contains(winners, myPrefix)
+	if amWinner {
+		r.claimJob(cmd)
+		return
+	}
+
+	r.publishJobAssignments([]*tlv.JobAssignment{{
+		Target:    target,
+		Assignees: stringNamesToEncNames(winners),
+	}})
 }
 
 func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) []enc.Name {
@@ -272,7 +406,10 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) []enc.
 		Used:        update.StorageUsed,
 		LastUpdated: time.Now(),
 		Jobs:        update.Jobs,
+		Alive:       true,
 	}
+
+	r.resetNodeTimer(publisher)
 
 	dropped := make([]enc.Name, 0)
 	for _, oldJob := range oldJobs {
@@ -287,26 +424,83 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) []enc.
 	return dropped
 }
 
+func (r *Repo) resetNodeTimer(nodeName string) {
+	if timer, exists := r.nodeTimers[nodeName]; exists {
+		timer.Stop()
+	}
+	status := r.nodeStatus[nodeName]
+	status.TimerID++
+	r.nodeStatus[nodeName] = status
+	timerID := status.TimerID
+	timeout := 3*r.heartbeatInterval + 500*time.Millisecond
+	r.nodeTimers[nodeName] = time.AfterFunc(timeout, func() {
+		r.onNodeTimeout(nodeName, timerID)
+	})
+}
+
+func (r *Repo) onNodeTimeout(nodeName string, expectedTimerID uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	status, exists := r.nodeStatus[nodeName]
+	if !exists || !status.Alive || status.TimerID != expectedTimerID {
+		return
+	}
+
+	status.Alive = false
+	r.nodeStatus[nodeName] = status
+
+	var assignments []*tlv.JobAssignment
+	for _, target := range status.Jobs {
+		cmd := r.getCommandInternal(target)
+		if cmd == nil {
+			continue
+		}
+		winners := r.determineWinnersHydraInternal(cmd)
+		if winners != nil {
+			assignments = append(assignments, &tlv.JobAssignment{
+				Target:    target,
+				Assignees: stringNamesToEncNames(winners),
+			})
+		}
+	}
+
+	delete(r.nodeTimers, nodeName)
+
+	if len(assignments) > 0 {
+		go r.publishJobAssignments(assignments)
+	}
+}
+
 // initialization
-func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, replicationFactor int) *Repo {
+func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, replicationFactor int, noRelease bool, maxJoinGrowthRate uint64, heartbeatInterval time.Duration) *Repo {
 	gp, _ := enc.NameFromStr(groupPrefix)
 	np, _ := enc.NameFromStr(nodePrefix)
 	si, _ := enc.NameFromStr(signingIdentity)
 	nf := gp.Append(enc.NewGenericComponent(NOTIFY))
 
-	r := &Repo{
-		groupPrefix:     gp,
-		notifyPrefix:    &nf,
-		nodePrefix:      np,
-		signingIdentity: si,
-		nodeStatus:      make(map[string]NodeStatus),
-		commands:        make(map[string]*tlv.Command),
-		jobStorageUsage: make(map[string]uint64),
-		rf:              replicationFactor,
+	if maxJoinGrowthRate == 0 {
+		maxJoinGrowthRate = 10 * 1024 * 1024
 	}
 
-	r.nodeStatus[r.nodePrefix.String()] = NodeStatus{
-		Jobs: make([]enc.Name, 0),
+	if heartbeatInterval == 0 {
+		heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL
+	}
+
+	r := &Repo{
+		groupPrefix:       gp,
+		notifyPrefix:      &nf,
+		nodePrefix:        np,
+		signingIdentity:   si,
+		nodeStatus:        make(map[string]NodeStatus),
+		commands:          make(map[string]*tlv.Command),
+		jobs:              make([]enc.Name, 0),
+		jobStorageUsage:   make(map[string]uint64),
+		rf:                replicationFactor,
+		noRelease:         noRelease,
+		maxJoinGrowthRate: maxJoinGrowthRate,
+		heartbeatInterval: heartbeatInterval,
+		nodeTimers:        make(map[string]*time.Timer),
 	}
 
 	return r
@@ -319,10 +513,13 @@ func (r *Repo) Start() (err error) {
 	r.storageUsed = (hashFromString(r.nodePrefix.String()) % (100 * 1024 * 1024))
 
 	r.mu.Lock()
-	myStatus := r.nodeStatus[r.myNodeName()]
-	myStatus.Capacity = r.storageCapacity
-	myStatus.Used = r.storageUsed
-	r.nodeStatus[r.myNodeName()] = myStatus
+	r.nodeStatus[r.myNodeName()] = NodeStatus{
+		Capacity:    r.storageCapacity,
+		Used:        r.storageUsed,
+		Jobs:        r.jobs,
+		LastUpdated: time.Now(),
+		Alive:       true,
+	}
 	r.mu.Unlock()
 
 	var face ndn.Face = engine.NewDefaultFace()
@@ -363,7 +560,7 @@ func (r *Repo) Start() (err error) {
 		Name: r.nodePrefix,
 		Svs: svs.SvSyncOpts{
 			Client:       r.client,
-			GroupPrefix:  r.groupPrefix,
+			GroupPrefix:  r.groupPrefix.Append(enc.NewGenericComponent("group-messages")),
 			SyncDataName: r.nodePrefix,
 		},
 		Snapshot: &svs.SnapshotNull{},
@@ -382,7 +579,7 @@ func (r *Repo) Start() (err error) {
 	}
 
 	r.client.AnnouncePrefix(ndn.Announcement{
-		Name:   r.groupSync.GroupPrefix(),
+		Name:   r.groupSync.SyncPrefix(),
 		Expose: true,
 	})
 	r.client.AnnouncePrefix(ndn.Announcement{
@@ -401,47 +598,17 @@ func (r *Repo) Start() (err error) {
 	}
 	go r.runHeartbeat()
 	go r.runStorageSimulation()
-	go r.runHeartbeatMonitor()
 	return nil
 }
 
 func (r *Repo) runHeartbeat() {
-	ticker := time.NewTicker(HEARTBEAT_TIME)
+	r.publishNodeUpdate(nil)
+
+	ticker := time.NewTicker(r.heartbeatInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		r.publishNodeUpdate()
-	}
-}
-
-func (r *Repo) runHeartbeatMonitor() {
-	heartbeatInterval := HEARTBEAT_TIME
-
-	offlineTimeout := 3*heartbeatInterval + 500*time.Millisecond
-
-	ticker := time.NewTicker(heartbeatInterval)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		r.mu.Lock()
-		for node, status := range r.nodeStatus {
-			timeSinceLastUpdate := time.Since(status.LastUpdated)
-
-			if timeSinceLastUpdate > offlineTimeout {
-				if status.MissingHeartbeats < 3 {
-					status.MissingHeartbeats++
-				}
-
-				r.nodeStatus[node] = status
-
-				if status.MissingHeartbeats == 1 {
-					for _, cmd := range r.commands {
-						go r.replicate(cmd)
-					}
-				}
-			}
-		}
-		r.mu.Unlock()
+		r.publishNodeUpdate(nil)
 	}
 }
 
@@ -451,18 +618,19 @@ func (r *Repo) runStorageSimulation() {
 
 	for range ticker.C {
 		r.mu.Lock()
-		myStatus := r.nodeStatus[r.myNodeName()]
 		var delta uint64
-		for _, target := range myStatus.Jobs {
+		for _, target := range r.jobs {
 			cmd := r.getCommandInternal(target)
 			if cmd != nil && cmd.Type == "JOIN" {
 				jobKey := target.String()
 				if r.jobStorageUsage == nil {
 					r.jobStorageUsage = make(map[string]uint64)
 				}
-				growth := (hashFromString(cmd.Target.String()) % (10 * 1024 * 1024))
-				r.jobStorageUsage[jobKey] += growth
-				delta += growth
+				growth := (hashFromString(cmd.Target.String()) % r.maxJoinGrowthRate)
+				if growth > 0 {
+					r.jobStorageUsage[jobKey] += growth
+					delta += growth
+				}
 			}
 		}
 		r.storageUsed += delta
@@ -496,9 +664,19 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 	reply(response.Encode())
 
 	r.addCommand(cmd)
-	r.publishCommand(cmd)
 
-	go r.replicate(cmd)
+	winners := r.determineWinnersHydra(cmd)
+	r.publishCommand(cmd, winners)
+
+	myPrefix := r.myNodeName()
+	if winners != nil {
+		for _, w := range winners {
+			if w == myPrefix {
+				r.claimJob(cmd)
+				break
+			}
+		}
+	}
 }
 
 func (r *Repo) onGroupSync(pub svs.SvsPub) {
@@ -521,7 +699,13 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 
 	if update.NewCommand != nil {
 		r.addCommand(update.NewCommand)
-		go r.replicate(update.NewCommand)
+		if r.eventLogger != nil {
+			r.eventLogger.LogCommandSynced(update.NewCommand.Type, update.NewCommand.Target.String(), publisherName)
+		}
+	}
+
+	for _, assignment := range update.JobAssignments {
+		r.handleJobAssignment(assignment)
 	}
 
 	if update.JobRelease != nil {
@@ -531,7 +715,13 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 
 		if cmd != nil {
 			log.Info(r, "job_released_by_peer", "peer", publisherName, "target", update.JobRelease.Target)
-			go r.replicate(cmd)
+			winners := r.determineWinnersHydra(cmd)
+			if winners != nil {
+				r.publishJobAssignments([]*tlv.JobAssignment{{
+					Target:    cmd.Target,
+					Assignees: stringNamesToEncNames(winners),
+				}})
+			}
 		}
 	}
 
@@ -542,24 +732,21 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 
 		if cmd != nil {
 			log.Info(r, "job_dropped_by_peer_checking_replication", "peer", publisherName, "target", target)
-			r.replicate(cmd)
+			winners := r.determineWinnersHydra(cmd)
+			if winners != nil {
+				r.publishJobAssignments([]*tlv.JobAssignment{{
+					Target:    cmd.Target,
+					Assignees: stringNamesToEncNames(winners),
+				}})
+			}
 		}
-	}
-}
-
-// actions/logic
-func (r *Repo) replicate(cmd *tlv.Command) {
-	if r.shouldClaimJobHydra(cmd) {
-		r.claimJob(cmd)
 	}
 }
 
 func (r *Repo) claimJob(cmd *tlv.Command) {
 	r.mu.Lock()
 
-	myStatus := r.nodeStatus[r.myNodeName()]
-
-	myStatus.Jobs = append(myStatus.Jobs, cmd.Target)
+	r.jobs = append(r.jobs, cmd.Target)
 
 	if cmd.Type == "INSERT" {
 		cost := (hashFromString(cmd.Target.String()) % (500 * 1024 * 1024))
@@ -567,8 +754,6 @@ func (r *Repo) claimJob(cmd *tlv.Command) {
 		if r.storageUsed > r.storageCapacity {
 			r.storageUsed = r.storageCapacity
 		}
-		myStatus.Used = r.storageUsed
-		myStatus.Capacity = r.storageCapacity
 
 		jobKey := cmd.Target.String()
 		if r.jobStorageUsage == nil {
@@ -577,7 +762,6 @@ func (r *Repo) claimJob(cmd *tlv.Command) {
 		r.jobStorageUsage[jobKey] += cost
 	}
 
-	r.nodeStatus[r.myNodeName()] = myStatus
 	currentReplication := r.countReplication(cmd.Target)
 	r.mu.Unlock()
 
@@ -585,13 +769,16 @@ func (r *Repo) claimJob(cmd *tlv.Command) {
 		r.eventLogger.LogJobClaimed(cmd.Target.String(), currentReplication)
 	}
 
-	r.publishNodeUpdate()
+	r.publishNodeUpdate(nil)
 }
 
-func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
+func (r *Repo) determineWinnersHydra(cmd *tlv.Command) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.determineWinnersHydraInternal(cmd)
+}
 
+func (r *Repo) determineWinnersHydraInternal(cmd *tlv.Command) []string {
 	currentReplication := r.countReplication(cmd.Target)
 	myPrefix := r.myNodeName()
 
@@ -599,6 +786,9 @@ func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
 	freeSpace := make(map[string]uint64)
 
 	for name, status := range r.nodeStatus {
+		if !status.Alive {
+			continue
+		}
 		isDoing := false
 		for _, job := range status.Jobs {
 			if job.Equal(cmd.Target) {
@@ -628,14 +818,14 @@ func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
 				freeSpace,
 			)
 		}
-		return false
+		return nil
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
 		if freeSpace[candidates[i]] != freeSpace[candidates[j]] {
 			return freeSpace[candidates[i]] > freeSpace[candidates[j]]
 		}
-		return strings.Compare(candidates[i], candidates[j]) > 0
+		return strings.Compare(candidates[i], candidates[j]) < 0
 	})
 
 	limit := min(needed, len(candidates))
@@ -663,7 +853,7 @@ func (r *Repo) shouldClaimJobHydra(cmd *tlv.Command) bool {
 			freeSpace,
 		)
 	}
-	return shouldClaim
+	return selectedCandidates
 }
 
 // BasicSchema allows all data and suggests the first matching key in the keychain.

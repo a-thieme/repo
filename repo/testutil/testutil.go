@@ -15,6 +15,7 @@ const (
 	EventSyncInterestSent EventType = "sync_interest_sent"
 	EventDataSent         EventType = "data_sent"
 	EventCommandReceived  EventType = "command_received"
+	EventCommandSynced    EventType = "command_synced"
 	EventJobClaimed       EventType = "job_claimed"
 	EventJobReleased      EventType = "job_released"
 	EventNodeUpdate       EventType = "node_update"

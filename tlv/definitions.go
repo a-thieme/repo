@@ -30,6 +30,13 @@ type StatusResponse struct {
 	Status string `tlv:"0x281"`
 }
 
+type JobAssignment struct {
+	//+field:name
+	Target enc.Name `tlv:"0x295"`
+	//+field:sequence:enc.Name:name
+	Assignees []enc.Name `tlv:"0x296"`
+}
+
 type NodeUpdate struct {
 	//+field:sequence:enc.Name:name
 	Jobs []enc.Name `tlv:"0x290"`
@@ -41,4 +48,6 @@ type NodeUpdate struct {
 	StorageUsed uint64 `tlv:"0x293"`
 	//+field:struct:InternalCommand
 	JobRelease *InternalCommand `tlv:"0x294"`
+	//+field:sequence:*JobAssignment:struct:JobAssignment
+	JobAssignments []*JobAssignment `tlv:"0x297"`
 }

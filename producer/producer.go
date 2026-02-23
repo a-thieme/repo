@@ -79,7 +79,23 @@ func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
 func main() {
 	count := flag.Int("count", 1, "number of commands to send")
 	rate := flag.Int("rate", 1, "commands per second")
+	timeout := flag.Duration("timeout", 10*time.Second, "command response timeout")
+	cmdType := flag.String("type", "insert", "command type: insert, join, or both")
+	joinRatio := flag.Float64("join-ratio", 0.5, "ratio of JOIN commands when type is both (0.0-1.0)")
 	flag.Parse()
+
+	validTypes := map[string]bool{"insert": true, "join": true, "both": true}
+	if !validTypes[*cmdType] {
+		fmt.Println("Error: -type must be 'insert', 'join', or 'both'")
+		flag.Usage()
+		return
+	}
+
+	if *joinRatio < 0.0 || *joinRatio > 1.0 {
+		fmt.Println("Error: -join-ratio must be between 0.0 and 1.0")
+		flag.Usage()
+		return
+	}
 
 	log.Default().SetLevel(log.LevelTrace)
 	fmt.Println("starting")
@@ -117,14 +133,28 @@ func main() {
 		target, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer/mytarget/")
 		target = target.Append(enc.NewTimestampComponent(uint64(time.Now().UnixNano())))
 
+		var commandType string
+		switch *cmdType {
+		case "insert":
+			commandType = "INSERT"
+		case "join":
+			commandType = "JOIN"
+		case "both":
+			if float64(i%2) < *joinRatio*2 {
+				commandType = "JOIN"
+			} else {
+				commandType = "INSERT"
+			}
+		}
+
 		command := tlv.Command{
-			Type:   "INSERT",
+			Type:   commandType,
 			Target: target,
 		}
 
 		done := make(chan struct{})
 
-		fmt.Printf("Sending command %d/%d...\n", i+1, *count)
+		fmt.Printf("Sending command %d/%d (type=%s)...\n", i+1, *count, commandType)
 		ExpressCommand(client, notify, target, command.Encode(),
 			func(w enc.Wire, e error) {
 				defer close(done)
@@ -141,7 +171,12 @@ func main() {
 				fmt.Println("Status:", sr.Status)
 			})
 
-		<-done
+		select {
+		case <-done:
+		case <-time.After(*timeout):
+			fmt.Println("Error: command timed out")
+			return
+		}
 	}
 
 	fmt.Println("finished")

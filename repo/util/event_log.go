@@ -12,12 +12,16 @@ type EventType string
 const (
 	EventSyncInterestSent EventType = "sync_interest_sent"
 	EventDataSent         EventType = "data_sent"
+	EventInterestReceived EventType = "interest_received"
+	EventDataReceived     EventType = "data_received"
 	EventCommandReceived  EventType = "command_received"
+	EventCommandSynced    EventType = "command_synced"
 	EventJobClaimed       EventType = "job_claimed"
 	EventJobReleased      EventType = "job_released"
 	EventNodeUpdate       EventType = "node_update"
 	EventReplicationCheck EventType = "replication_check"
 	EventStorageChanged   EventType = "storage_changed"
+	EventJobAssignment    EventType = "job_assignment"
 )
 
 type Event struct {
@@ -43,6 +47,7 @@ type Event struct {
 	Candidates         []string          `json:"candidates,omitempty"`
 	SelectedCandidates []string          `json:"selectedCandidates,omitempty"`
 	FreeSpace          map[string]uint64 `json:"freeSpace,omitempty"`
+	Assignees          []string          `json:"assignees,omitempty"`
 }
 
 type EventLogger struct {
@@ -95,11 +100,36 @@ func (l *EventLogger) LogDataSent(name string, total uint64) {
 	})
 }
 
+func (l *EventLogger) LogInterestReceived(name string, total uint64) {
+	l.Log(Event{
+		EventType: EventInterestReceived,
+		Name:      name,
+		Total:     total,
+	})
+}
+
+func (l *EventLogger) LogDataReceived(name string, total uint64) {
+	l.Log(Event{
+		EventType: EventDataReceived,
+		Name:      name,
+		Total:     total,
+	})
+}
+
 func (l *EventLogger) LogCommandReceived(cmdType string, target string) {
 	l.Log(Event{
 		EventType: EventCommandReceived,
 		Type:      cmdType,
 		Target:    target,
+	})
+}
+
+func (l *EventLogger) LogCommandSynced(cmdType string, target string, fromNode string) {
+	l.Log(Event{
+		EventType: EventCommandSynced,
+		Type:      cmdType,
+		Target:    target,
+		From:      fromNode,
 	})
 }
 
@@ -159,7 +189,17 @@ func (l *EventLogger) LogStorageChanged(used, delta uint64) {
 	})
 }
 
+func (l *EventLogger) LogJobAssignment(target string, assignees []string) {
+	l.Log(Event{
+		EventType: EventJobAssignment,
+		Target:    target,
+		Assignees: assignees,
+	})
+}
+
 type PacketStats struct {
-	SyncInterestsSent uint64
-	DataPacketsSent   uint64
+	SyncInterestsSent   uint64
+	DataPacketsSent     uint64
+	InterestsReceived   uint64
+	DataPacketsReceived uint64
 }

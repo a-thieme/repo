@@ -129,6 +129,7 @@ func TestCountingFace_ParseTLVType(t *testing.T) {
 		{"interest", []byte{0x05, 0x10}, 0x05},
 		{"data", []byte{0x06, 0x20}, 0x06},
 		{"other", []byte{0x07, 0x00}, 0x07},
+		{"lppacket", []byte{0x64, 0x10}, 0x64},
 	}
 
 	for _, tt := range tests {
@@ -141,8 +142,43 @@ func TestCountingFace_ParseTLVType(t *testing.T) {
 	}
 }
 
+func TestCountingFace_LpPacketDataName(t *testing.T) {
+	dataPkt := []byte{
+		0x06, 0x12,
+		0x07, 0x0b, 0x08, 0x03, 'n', 'd', 'n', 0x08, 0x04, 'd', 'a', 't', 'a',
+		0x14, 0x00,
+		0x15, 0x00,
+		0x16, 0x03, 0x1b, 0x01, 0x00,
+	}
+
+	lpPkt := []byte{
+		0x64, 0x00,
+		0x62, 0x01, 0x00,
+		0x50, byte(len(dataPkt)),
+	}
+	lpPkt = append(lpPkt, dataPkt...)
+	lpPkt[1] = byte(len(lpPkt) - 2)
+
+	name := util.ParseLpPacketDataName(enc.Wire{lpPkt})
+	if name == "" {
+		t.Error("Expected to find data name in LpPacket, got empty string")
+	}
+	if name != "/ndn/data" {
+		t.Errorf("Expected /ndn/data, got %s", name)
+	}
+}
+
 func TestRepo_ReplicationLogic(t *testing.T) {
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3)
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0)
+
+	repo.mu.Lock()
+	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
+		Alive:    true,
+	}
+	repo.mu.Unlock()
 
 	target, _ := enc.NameFromStr("/ndn/target/1")
 	cmd := &tlv.Command{
@@ -150,14 +186,14 @@ func TestRepo_ReplicationLogic(t *testing.T) {
 		Target: target,
 	}
 
-	shouldClaim := repo.shouldClaimJobHydra(cmd)
-	if !shouldClaim {
+	shouldClaim := repo.determineWinnersHydra(cmd)
+	if shouldClaim == nil {
 		t.Error("Empty repo should claim first job")
 	}
 }
 
 func TestRepo_ReplicationAlreadySatisfied(t *testing.T) {
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 2)
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 2, false, 10*1024*1024, 0)
 
 	target, _ := enc.NameFromStr("/ndn/target/1")
 	cmd := &tlv.Command{
@@ -167,15 +203,17 @@ func TestRepo_ReplicationAlreadySatisfied(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus["other-node-1"] = NodeStatus{
-		Jobs: []enc.Name{target},
+		Jobs:  []enc.Name{target},
+		Alive: true,
 	}
 	repo.nodeStatus["other-node-2"] = NodeStatus{
-		Jobs: []enc.Name{target},
+		Jobs:  []enc.Name{target},
+		Alive: true,
 	}
 	repo.mu.Unlock()
 
-	shouldClaim := repo.shouldClaimJobHydra(cmd)
-	if shouldClaim {
+	shouldClaim := repo.determineWinnersHydra(cmd)
+	if shouldClaim != nil {
 		t.Error("Repo should not claim when replication factor already satisfied")
 	}
 }
@@ -206,19 +244,27 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 		t.Errorf("Target mismatch: expected %s, got %s", target, parsed.NewCommand.Target)
 	}
 
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3)
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0)
 
 	repo.mu.Lock()
+	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
+		Jobs:        []enc.Name{},
+		Capacity:    1000000000,
+		Used:        0,
+		LastUpdated: time.Now(),
+		Alive:       true,
+	}
 	repo.nodeStatus["peer-node"] = NodeStatus{
 		Jobs:        []enc.Name{},
 		Capacity:    1000000000,
 		Used:        0,
 		LastUpdated: time.Now(),
+		Alive:       true,
 	}
 	repo.mu.Unlock()
 
-	shouldClaim := repo.shouldClaimJobHydra(cmd)
-	if !shouldClaim {
+	winners := repo.determineWinnersHydra(cmd)
+	if winners == nil {
 		t.Error("Repo should claim job when replication not satisfied")
 	}
 
@@ -243,13 +289,14 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 	repos := make([]*Repo, nodeCount)
 
 	for i := 0; i < nodeCount; i++ {
-		repo := NewRepo("/ndn/drepo", nodeNames[i], "/ndn/repo.teame.dev/repo", replicationFactor)
+		repo := NewRepo("/ndn/drepo", nodeNames[i], "/ndn/repo.teame.dev/repo", replicationFactor, false, 10*1024*1024, 0)
 		repo.mu.Lock()
 		repo.storageCapacity = 1000000000
 		repo.nodeStatus[repo.myNodeName()] = NodeStatus{
 			Jobs:     []enc.Name{},
 			Capacity: 1000000000,
 			Used:     0,
+			Alive:    true,
 		}
 		repo.mu.Unlock()
 		repos[i] = repo
@@ -272,6 +319,7 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 					Capacity:    1000000000,
 					Used:        0,
 					LastUpdated: time.Now(),
+					Alive:       true,
 				}
 				repos[i].mu.Unlock()
 			}
@@ -281,14 +329,20 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 	claimCount := 0
 	claimedBy := make([]string, 0)
 	for i := 0; i < nodeCount; i++ {
-		if repos[i].shouldClaimJobHydra(cmd) {
-			repos[i].mu.Lock()
-			myStatus := repos[i].nodeStatus[repos[i].myNodeName()]
-			myStatus.Jobs = append(myStatus.Jobs, cmd.Target)
-			repos[i].nodeStatus[repos[i].myNodeName()] = myStatus
-			repos[i].mu.Unlock()
-			claimCount++
-			claimedBy = append(claimedBy, nodeNames[i])
+		winners := repos[i].determineWinnersHydra(cmd)
+		if winners != nil {
+			for _, w := range winners {
+				if w == nodeNames[i] {
+					repos[i].mu.Lock()
+					myStatus := repos[i].nodeStatus[repos[i].myNodeName()]
+					myStatus.Jobs = append(myStatus.Jobs, cmd.Target)
+					repos[i].nodeStatus[repos[i].myNodeName()] = myStatus
+					repos[i].mu.Unlock()
+					claimCount++
+					claimedBy = append(claimedBy, nodeNames[i])
+					break
+				}
+			}
 		}
 	}
 
