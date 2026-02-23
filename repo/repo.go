@@ -825,7 +825,7 @@ func (r *Repo) determineWinnersHydraInternal(cmd *tlv.Command) []string {
 		if freeSpace[candidates[i]] != freeSpace[candidates[j]] {
 			return freeSpace[candidates[i]] > freeSpace[candidates[j]]
 		}
-		return strings.Compare(candidates[i], candidates[j]) > 0
+		return strings.Compare(candidates[i], candidates[j]) < 0
 	})
 
 	limit := min(needed, len(candidates))
