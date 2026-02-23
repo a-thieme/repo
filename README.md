@@ -92,7 +92,8 @@ Defines data structures:
 
 ### Node Detection Mechanism
 - **Offline Detection**: Nodes detected offline after 3 consecutive missed heartbeats
-- **Detection Timeout**: Calculated as 3 × heartbeatInterval + 500ms delay
+- **Detection Timeout**: `3 × heartbeat-interval + 500ms` (default: 15.5s with 5s interval)
+- **Configurable**: Use `--heartbeat-interval` flag to adjust detection speed
 - **Status Tracking**: Real-time node status tracking with heartbeat monitoring
 - **Resilience**: Automatic handling of node failures
 
@@ -115,31 +116,77 @@ For detailed technical information, see README-TECHNICAL.md.
 
 ## Testing
 
-### Unit Tests
+### Using Make (Recommended)
 ```bash
-go test -v ./repo/...
+make test              # Run all tests (5m timeout)
+make test-short        # Quick tests only (skips integration/failure tests, ~30s)
+make test-unit         # Run only unit tests (no NFD required)
+make test-integration  # Run integration tests (requires NFD running)
+make test-failure      # Run failure recovery tests (requires NFD running)
 ```
 
-### Integration Tests (Mini-NDN)
-Integration tests run inside Docker using mini-ndn to simulate a distributed network:
+### Manual Test Commands
+```bash
+# All tests with appropriate timeout
+go test -timeout 5m ./...
+
+# Quick tests (skips long-running integration tests)
+go test -short -timeout 30s ./...
+
+# Unit tests only (no NFD required)
+go test -v -run 'Test(EventLogger|CountingFace|Repo_|TLV_)' -timeout 30s ./repo/...
+
+# Integration tests (requires NFD running)
+go test -v -run 'TestLocal|TestCommand|TestEvent' -timeout 3m ./repo/...
+
+# Failure recovery tests (requires NFD running)
+go test -v -run 'TestFailureRecovery' -timeout 5m ./repo/...
+```
+
+### Test Categories
+
+| Category | Command | Requirements |
+|----------|---------|--------------|
+| Unit | `make test-unit` | None |
+| Integration | `make test-integration` | NFD running |
+| Failure Recovery | `make test-failure` | NFD running |
+| Timing Calibration | `make test-timing` | Docker/mini-ndn |
+| Mini-NDN | `make test-mini-ndn` | Docker/mini-ndn |
+
+### Integration Tests (Docker / Mini-NDN)
 
 ```bash
-# Quick test (5 nodes, ~3 min)
-go test -v ./repo -run TestMiniNDNIntegration -timeout 10m
+# Build binaries and Docker image
+make -C experiments build
 
-# Custom node count
-NODE_COUNT=10 go test -v ./repo -run TestMiniNDNIntegration_CustomNodeCount -timeout 30m
+# Calibrate timeouts (recommended first run)
+make -C experiments calibrate
 
-# Full topology (24 nodes, ~8 min)
-RUN_FULL_TOPOLOGY=1 go test -v ./repo -run TestMiniNDNIntegration_FullTopology -timeout 15m
+# Run producer scaling experiments
+make -C experiments run
 
-# Multi-node experiments (5, 10, 15, 20, 24 nodes)
-./experiments/run_experiments.sh
+# Custom configuration
+make -C experiments run NODE_COUNTS="24" PRODUCER_COUNTS="1 5 10 24"
+
+# Single experiment
+make -C experiments single NODES=24 PRODUCERS=1
 ```
 
 **Requirements:**
 - Docker installed and running
 - `--privileged` mode for mininet
+
+**Make Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NODE_COUNTS` | `24` | Space-separated node counts |
+| `PRODUCER_COUNTS` | `1 2 4 8 16 24` | Space-separated producer counts |
+| `RF` | `3` | Replication factor |
+| `COMMAND_COUNT` | `1` | Commands per producer |
+| `TIMEOUT` | `120` | Timeout per experiment (seconds) |
+| `CALIBRATE_NODES` | `24` | Node count for calibration |
+| `CALIBRATE_ITER` | `3` | Calibration iterations |
 
 **Evaluated Metrics:**
 | # | Metric |

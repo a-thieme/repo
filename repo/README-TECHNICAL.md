@@ -57,14 +57,24 @@ type NodeStatus struct {
 ### NodeUpdate Structure
 ```go
 type NodeUpdate struct {
-    Jobs              []enc.Name // Job list
-    NewCommand        *Command    // New command
-    StorageCapacity   uint64      // Storage capacity
-    StorageUsed       uint64      // Used storage
-    JobRelease        *InternalCommand // Job release (optional)
+    Jobs              []enc.Name        // Job list
+    NewCommand        *Command          // New command
+    StorageCapacity   uint64            // Storage capacity
+    StorageUsed       uint64            // Used storage
+    JobRelease        *InternalCommand  // Job release (optional)
+    JobAssignments    []*JobAssignment  // Job assignments (optional)
 }
 ```
-Published via group sync to share node status. The JobRelease field signals when a node is releasing a job due to storage pressure.
+Published via group sync to share node status. The JobRelease field signals when a node is releasing a job due to storage pressure. The JobAssignments field contains assignment decisions for job distribution.
+
+### JobAssignment Structure
+```go
+type JobAssignment struct {
+    Target    enc.Name   // Target name for the job
+    Assignees []enc.Name // List of nodes assigned to this job
+}
+```
+Used for job assignment coordination between nodes. When a node receives a new command or detects a node failure, it calculates winners using `determineWinnersHydra()` and includes JobAssignments in the NodeUpdate. Nodes receiving a JobAssignment check if they are assignees and either claim the job or publish their own view of winners.
 
 ### InternalCommand Structure
 ```go
@@ -152,10 +162,10 @@ The system uses a sophisticated job distribution mechanism:
 
 ### Heartbeat Mechanism
 ```go
-const HEARTBEAT_TIME = 5 * time.Second
+const DEFAULT_HEARTBEAT_INTERVAL = 5 * time.Second
 
 func (r *Repo) runHeartbeat() {
-    ticker := time.NewTicker(HEARTBEAT_TIME)
+    ticker := time.NewTicker(r.heartbeatInterval)
     for range ticker.C {
         r.publishNodeUpdate()
     }
@@ -170,10 +180,9 @@ func (r *Repo) runHeartbeat() {
 
 ### Offline Detection
 ```go
-offlineTimeout := 3 * heartbeatInterval + 500 * time.Millisecond
-
 func (r *Repo) runHeartbeatMonitor() {
-    ticker := time.NewTicker(heartbeatInterval)
+    offlineTimeout := 3*r.heartbeatInterval + 500 * time.Millisecond
+    ticker := time.NewTicker(r.heartbeatInterval)
     for range ticker.C {
         for node, status := range r.nodeStatus {
             timeSinceLastUpdate := time.Since(status.LastUpdated)
@@ -187,9 +196,10 @@ func (r *Repo) runHeartbeatMonitor() {
 
 ### Detection Mechanism
 - **Detection Threshold**: 3 consecutive missed heartbeats
-- **Detection Timeout**: 15 seconds (3 × 5s + 0.5s delay)
+- **Detection Timeout**: `3 × heartbeat-interval + 500ms` (default: 15.5s with 5s interval)
 - **Re-evaluation**: Automatic re-evaluation when node goes offline
 - **Resilience**: Automatic handling of node failures
+- **Configurable**: Use `--heartbeat-interval` to adjust detection speed
 
 ### MissingHeartbeats Field
 ```go
@@ -204,23 +214,12 @@ type NodeStatus struct {
 ### Heartbeat Monitoring System
 ```go
 func (r *Repo) runHeartbeatMonitor() {
-    offlineTimeout := 3 * heartbeatInterval + 500 * time.Millisecond
-    ticker := time.NewTicker(heartbeatInterval)
+    offlineTimeout := 3*r.heartbeatInterval + 500 * time.Millisecond
+    ticker := time.NewTicker(r.heartbeatInterval)
     for range ticker.C {
         // Monitor node status
         // Detect offline nodes
         // Trigger re-evaluation
-    }
-}
-```
-
-### Job Claim Monitoring
-```go
-func (r *Repo) monitorJobClaims() {
-    ticker := time.NewTicker(HEARTBEAT_TIME)
-    for range ticker.C {
-        // Monitor active jobs
-        // Trigger replication for jobs with storage usage
     }
 }
 ```
@@ -267,13 +266,29 @@ The system logs all significant events to a JSONL file for debugging and analysi
 | Event | Description | Key Fields |
 |-------|-------------|------------|
 | `sync_interest_sent` | SVS sync interest sent | `total` |
-| `data_sent` | Data packet sent | `name`, `total` |
+| `data_sent` | Data packet sent (interest satisfied) | `name`, `total` |
 | `command_received` | Command received from producer | `type`, `target` |
 | `job_claimed` | Node claimed a job | `target`, `replication` |
 | `job_released` | Node released a job | `target` |
 | `node_update` | Node status update received | `from`, `jobs`, `capacity`, `used` |
 | `replication_check` | Replication decision made | See below |
 | `storage_changed` | Storage updated | `used`, `delta` |
+
+#### Data Packet Counting
+
+The `data_sent` event counts Data packets served from the local store in response to Interests from other nodes. This metric measures how many interests a node satisfied.
+
+**What is counted:**
+- Data packets served from the local store via `client.Consume()` (SVS data fetches)
+- Both bare Data packets (TLV type `0x06`) and Data wrapped in LpPacket (TLV type `0x64`)
+
+**What is NOT counted:**
+- SVS Sync Interests containing data in AppParam (these are Interests, not Data)
+- Multicast command notifications (these are Interests, not Data)
+
+**Technical note:** Data packets responding to Interests with PIT tokens are wrapped in LpPacket per NDNLPv2 spec. The `CountingFace` implementation parses LpPacket headers to correctly count these nested Data packets.
+
+**Expected counts:** Each node publishes ~5 SVS updates during a 25-second test (1 initial + ~4 heartbeats). With NFD caching disabled or enabled, each unique data object is served once by the producer node (SVS data is stored in the application's local store, not NFD's ContentStore).
 
 #### Replication Decision Logging
 
@@ -335,17 +350,19 @@ The system has been enhanced with:
 ### Code Structure
 
 **Main Files:**
-- `/home/adam/ndn/repo/repo/repo.go`: Main repository implementation
-- `/home/adam/ndn/repo/producer/producer.go`: Producer component
-- `/home/adam/ndn/repo/tlv/definitions.go`: TLV definitions
+- `repo/repo.go`: Main repository implementation
+- `repo/timeouts.go`: Centralized timeout constants with CLI flags
+- `repo/main.go`: Entry point
+- `producer/producer.go`: Producer component
+- `tlv/definitions.go`: TLV definitions
 
 **Key Functions:**
 - `runHeartbeat()`: Heartbeat publishing mechanism
 - `runHeartbeatMonitor()`: Node status monitoring
 - `runStorageSimulation()`: Storage growth simulation for JOIN commands
-- `monitorJobClaims()`: Job claim monitoring
-- `shouldClaimJobHydra()`: Job claiming logic
-- `replicate()`: Replication execution
+- `determineWinnersHydra()`: Determine which nodes should claim a job
+- `handleJobAssignment()`: Process incoming job assignments
+- `publishJobAssignments()`: Broadcast job assignment decisions
 - `onCommand()`: Command handling
 - `publishNodeUpdate()`: Node update publishing
 - `findJobToRelease()`: Find job to release when storage > 75%
@@ -372,11 +389,38 @@ The system has been enhanced with:
 - **repo.go**: Main repository implementation file
 
 ### Key Files and Purposes
-- **repo.go**: Main repository implementation with monitoring (665 lines)
+- **repo.go**: Main repository implementation with monitoring (~865 lines)
+- **timeouts.go**: Centralized timeout constants with CLI flags
 - **producer.go**: Producer command sending
-- **definitions.go**: TLV structure definitions (45 lines)
+- **definitions.go**: TLV structure definitions (~53 lines)
 - **main.go**: Main entry point
 - **util/**: Utility packages (EventLogger, CountingFace)
+
+### Timeout Configuration
+
+All timeout values are centralized in `timeouts.go` and configurable via CLI flags.
+Use `make -C experiments calibrate` to measure realistic values in Docker:
+
+```bash
+make -C experiments calibrate
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--heartbeat-interval` | 5s | Heartbeat interval for node status updates |
+| `--svs-timeout` | 10s | SVS health check timeout |
+| `--producer-timeout` | 5s | Producer command timeout |
+| `--replication-timeout` | 10s | Replication wait timeout |
+| `--nfd-wait` | 3s | NFD initialization wait |
+| `--routing-wait` | 2s | Routing convergence wait |
+
+### SVS Prefix Configuration
+
+The SVS library uses `NewKeywordComponent("svs")` which creates a **KeywordNameComponent** (TLV type 0x20 = 32). In NDN URI encoding:
+- Generic component: `/ndn/drepo/group-messages/svs`
+- Keyword component: `/ndn/drepo/group-messages/32=svs`
+
+The repo announces the **keyword component** prefix. Routes and multicast strategy must use the same prefix to match. Using the wrong prefix causes SVS sync to fail.
 
 ### Development Environment
 - **Go Version**: 1.25.6

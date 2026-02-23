@@ -1,233 +1,144 @@
-# LLM Context: NDN Distributed Repository
+# LLM Context File
 
-## Current Session Status
+**PURPOSE:** Read this at the start of each session to understand the codebase quickly. Update this file after learning new important details, but keep it concise to minimize context usage.
 
-### Working
-- **All integration tests PASS**:
-  - `TestLocalReplication_FiveNodes` - 5 nodes, 3 claims (~26s)
-  - `TestNodeUpdateExchange` - 3 nodes, verifies SVS heartbeat sync (~24s)
-  - `TestCommandPropagation` - 3 nodes, verifies command propagation via SVS (~55s)
-  - `TestMiniNDNIntegration` - Docker-based 5-node testbed (~43s)
-  - `TestMiniNDNIntegration_CustomNodeCount` - Configurable node count via `NODE_COUNT` env var
-- **Experiment runner**: `experiments/run_experiments.sh` runs tests with multiple node counts
-- **Unit tests**: All replication logic tests pass
+## System Overview
 
-### Recent Changes (This Session)
-- Added `TestMiniNDNIntegration_CustomNodeCount` for configurable node count tests
-- Updated `runner.py` to track replication timeline and detect over/under-replication
-- Added `run_experiments.sh` for running multi-node experiments
-- New metrics: `max_replication`, `over_replicated`, `under_replicated`
-- Packet stats now summed across all nodes (not max)
-
-### Fixed This Session
-- **Race condition**: NFD route registration race fixed with 500ms staggered repo starts
-- **SVS sync failure**: Caused by routes not being registered before repos started communicating
-
-## System
-Distributed NDN repo with resilient storage. Replication factor (rf)=3, node detection via 3 missed heartbeats (15s timeout). Go 1.25.6.
+Distributed NDN repository with resilient storage. Uses State Vector Sync (SVS) for group communication. Replication factor (rf)=3 by default. Node detection via 3 missed heartbeats (~15s timeout). Go 1.25.6, uses `ndnd` SDK.
 
 ## Key Files
+
 | Path | Purpose |
 |------|---------|
-| `repo/repo.go` | Main repo impl (~680 lines) |
+| `repo/repo.go` | Main repo impl (~865 lines) |
 | `repo/main.go` | Entry point, flag parsing |
-| `repo/integration_test.go` | Integration tests (local, 3-5 nodes) |
-| `repo/mini_ndn_integration_test.go` | Docker mini-ndn tests (including CustomNodeCount) |
-| `repo/repo_test.go` | Unit tests |
-| `repo/testutil/testutil.go` | Test utilities for event parsing |
-| `repo/util/event_log.go` | Event logging with replication decisions |
-| `tlv/definitions.go` | TLV structs (45 lines) |
-| `tlv/zz_generated.go` | Generated TLV code |
+| `repo/timeouts.go` | Timeout constants with CLI flags |
+| `repo/integration_test.go` | Local integration + concurrent + storage tests |
+| `repo/integration_failure_test.go` | Failure recovery + cascading + edge case tests |
+| `repo/mini_ndn_integration_test.go` | Docker mini-ndn tests |
+| `repo/util/event_log.go` | Event logging |
+| `repo/util/counting_face.go` | Packet counting (supports LpPacket) |
+| `tlv/definitions.go` | TLV struct definitions (~53 lines) |
 | `producer/producer.go` | Command sender |
-| `experiments/runner.py` | Docker runner for mini-ndn (tracks over/under-replication) |
-| `experiments/run_experiments.sh` | Multi-node experiment runner |
+| `experiments/runner.py` | Docker orchestrator for mini-ndn |
+| `experiments/Makefile` | Experiment runner interface |
+| `scripts/run_all_experiments.sh` | Run all tests and produce summary |
+| `TEST_RESULTS.md` | Latest test results documentation |
 
-## Event Logging
+## Event Types
 
-### Event Types
 | Event | Description | Key Fields |
 |-------|-------------|------------|
 | `sync_interest_sent` | SVS sync interest | `total` |
-| `data_sent` | Data packet sent | `name`, `total` |
+| `data_sent` | Data packet served | `name`, `total` |
 | `command_received` | Command received | `type`, `target` |
-| `job_claimed` | Job claimed | `target`, `replication` (node's local view) |
+| `job_claimed` | Job claimed | `target`, `replication` |
 | `job_released` | Job released | `target` |
 | `node_update` | Node status received | `from`, `jobs`, `capacity`, `used` |
-| `replication_check` | Replication decision | See below |
+| `replication_check` | Replication decision | `shouldClaim`, `reason`, `candidates`, `selectedCandidates`, `freeSpace` |
 | `storage_changed` | Storage updated | `used`, `delta` |
 
-### Replication Decision Logging
-`replication_check` events now include full decision details:
-
-```json
-{
-  "event": "replication_check",
-  "target": "/ndn/target/...",
-  "shouldClaim": false,
-  "reason": "not_selected",
-  "currentReplication": 0,
-  "neededReplication": 3,
-  "candidates": ["/ndn/repo/c", "/ndn/repo/d", "/ndn/repo/e", "/ndn/repo/a", "/ndn/repo/b"],
-  "selectedCandidates": ["/ndn/repo/c", "/ndn/repo/d", "/ndn/repo/e"],
-  "freeSpace": {"/ndn/repo/a": 5e9, "/ndn/repo/b": 4.8e9, ...}
-}
-```
-
-**Reasons:**
-- `replication_satisfied`: Already have rf nodes doing the job
-- `selected_as_candidate`: This node is in top N by free space
-- `not_selected`: This node is not in top N
-
-### Global Replication Analysis
-Use test utilities to compute oracle view from all logs:
-
-```go
-// True replication count at a point in time
-count := testutil.ComputeGlobalReplicationAtTime(allEvents, target, timestamp)
-
-// Full timeline of replication changes
-timeline := testutil.ComputeGlobalReplicationTimeline(allEvents, target)
-```
-
-## Bugs Fixed This Session
-
-### 1. `onGroupSync()` not handling `NewCommand` field
-- **Location**: `repo/repo.go:518-564`
-- **Problem**: Sync updates were received but `update.NewCommand` was ignored
-- **Fix**: Added handling for `NewCommand` and `JobRelease` fields in `onGroupSync()`
-
-### 2. Replication candidate sorting bug
-- **Location**: `repo/repo.go:605-662`
-- **Problem**: "mine" was compared with node prefixes like "/ndn/repo/afa", causing inconsistent sorting
-- **Fix**: Now uses actual node prefix string (`myPrefix`) for consistent sorting
-
-### 3. Signing identity vs node prefix confusion
-- **Location**: `repo/repo.go`, `repo/main.go`
-- **Problem**: All repos used same prefix, and signing identity needed to match keychain keys
-- **Fix**: Split into `--node-prefix` (unique per node) and `--signing-identity` (matches `/ndn/repo.teame.dev/repo` key)
-
-### 4. "mine" node status had zero free space
-- **Location**: `repo/repo.go:307-309` (initialization), `repo/repo.go:317-323` (Start)
-- **Problem**: Node's own status was stored under key "mine" with only `Jobs` initialized, but `Capacity` and `Used` were 0. This caused `FreeSpace()` to return 0, making every node sort itself LAST in candidate selection.
-- **Fix**: 
-  - Changed key from "mine" to actual node prefix string for consistency
-  - Added `myNodeName()` helper method
-  - Initialize `Capacity` and `Used` in `Start()` after storage stats are computed
-  - Updated all references to use actual node name
-
-### 5. Mini-NDN routing using manual nfdc commands
-- **Location**: `experiments/runner.py`
-- **Problem**: Manual `nfdc face create` and `nfdc route add` commands were unreliable
-- **Fix**: Replaced with `NdnRoutingHelper` from mini-ndn, which computes routes centrally and installs FIB entries properly. Added origins for `/ndn/drepo`, `/ndn/drepo/ndn`, `/ndn/repo/<node>`, `/ndn/drepo/ndn/repo/<node>`
-
-### 6. Multicast forwarding for local test
-- **Fix**: `nfdc strategy set /ndn/drepo /localhost/nfd/strategy/multicast`
-
-### 7. NFD route registration race condition (THIS SESSION)
-- **Location**: `repo/integration_test.go`
-- **Problem**: When multiple repos started simultaneously, NFD rejected some prefix registrations with "error 403: authorization rejected". This caused SVS sync to fail because some repos couldn't register their data prefixes.
-- **Fix**: 
-  - Add 500ms delay between starting each repo
-  - Add 3s routing convergence wait after setting multicast strategy
-  - This ensures all FIB entries are registered before SVS communication begins
-
 ## Core Functions (repo.go)
-- `onCommand()` - Handle incoming commands, trigger replication
-- `onGroupSync()` - Handle sync updates, process NewCommand and JobRelease
-- `replicate()` - Execute replication logic
-- `shouldClaimJobHydra()` - Determine if node should claim job (sorted by free space)
+
+- `onCommand()` - Handle incoming commands, calculate winners, publish with JobAssignment
+- `onGroupSync()` - Handle sync updates, process NewCommand, JobRelease, JobAssignments
+- `determineWinnersHydra()` - Select nodes for job (sorted by free space, top N)
+- `handleJobAssignment()` - Process incoming JobAssignment, claim or publish disagreement
 - `claimJob()` - Claim job, update storage
-- `publishCommand()` - Broadcast new command via group sync
-- `publishNodeUpdate()` - Broadcast node status via group sync
-- `runHeartbeat()` - 5s periodic status broadcast
-- `runHeartbeatMonitor()` - Detect offline nodes (3 missed beats)
+- `publishCommand()` / `publishNodeUpdate()` / `publishJobAssignments()` - Broadcast via SVS
+- `runHeartbeat()` - Periodic status broadcast (default 5s)
+- `runHeartbeatMonitor()` - Detect offline nodes, trigger re-replication
 - `runStorageSimulation()` - Deterministic growth for JOIN commands
-- `myNodeName()` - Returns the node's own prefix string for consistent status lookups
 
-## CLI Flags (repo/main.go)
+## CLI Flags
+
+**Repo:**
 ```bash
---event-log <path>         # Event log file (default: events.jsonl)
---node-prefix <prefix>     # Unique node prefix (e.g., /ndn/repo/local/a)
---signing-identity <name>  # Signing identity for keychain (default: /ndn/repo.teame.dev/repo)
---debug                    # Enable debug logging
+--event-log <path>           # Event log file (default: events.jsonl)
+--node-prefix <prefix>       # Unique node prefix (e.g., /ndn/repo/local/a)
+--signing-identity <name>    # Signing identity (default: /ndn/repo.teame.dev/repo)
+--heartbeat-interval <dur>   # Heartbeat interval (default: 5s)
+--no-release                 # Disable automatic job release at 75% capacity
+--max-join-growth-rate <n>   # Max JOIN storage growth/sec (default: 10MB)
+--debug                      # Enable debug logging
 ```
 
-## TLV Types (0x prefix)
-| Type | Code | Field |
-|------|------|-------|
-| Type | 252 | Command type string |
-| Target | 253, 280 | Command target name |
-| SnapshotThreshold | 255 | Threshold value |
-| StorageSpace | 294 | Storage size |
-| Status | 281 | Response status |
-| Jobs | 290 | Job name list |
-| NewCommand | 291 | New command |
-| StorageCapacity | 292 | Total capacity |
-| StorageUsed | 293 | Used capacity |
-| JobRelease | 294 | Job release signal |
-
-## Structs
-```
-Repo: groupPrefix, notifyPrefix, nodePrefix, signingIdentity, engine, store, client, groupSync, nodeStatus, commands, storageCapacity, storageUsed, rf, eventLogger
-
-Command: Type, Target, SnapshotThreshold
-InternalCommand: Type, Target, SnapshotThreshold, StorageSpace (job release)
-StatusResponse: Target, Status
-NodeUpdate: Jobs, NewCommand, StorageCapacity, StorageUsed, JobRelease
-NodeStatus: Capacity, Used, LastUpdated, Jobs, MissingHeartbeats
+**Producer:**
+```bash
+--count <n>           # Number of commands (default: 1)
+--rate <n>            # Commands per second (default: 1)
+--timeout <dur>       # Response timeout (default: 10s)
+--type <type>         # Command type: insert, join, or both (default: insert)
+--join-ratio <ratio>  # JOIN ratio when type=both (default: 0.5)
 ```
 
 ## Data Flow
+
 ```
-Producer --[Command]--> Repo.onCommand() --> addCommand() + publishCommand() + replicate()
-                                                    |
-                              GroupSync <--[NodeUpdate with NewCommand]--> Other nodes
-                                                    |
-                                              onGroupSync() --> addCommand() --> replicate()
-                                                    |
-                                              shouldClaimJobHydra() --> claimJob()
+Producer --[Command]--> Repo.onCommand() 
+    --> addCommand() + determineWinnersHydra() + publishCommand(winners)
+    --> GroupSync <--[NodeUpdate with JobAssignment]--> Other nodes
+    --> onGroupSync() --> handleJobAssignment()
+    --> If I'm assignee and should claim --> claimJob()
+    --> If I'm assignee but disagree --> publishJobAssignments(my view)
 ```
 
-## How to Run Tests
+## TLV Types (0x prefix)
 
-```bash
-# All integration tests
-go test -v ./repo -run "TestNodeUpdateExchange|TestCommandPropagation|TestLocalReplication" -timeout 3m
-
-# Mini-NDN test (requires Docker)
-docker rmi mini-ndn-integration  # Force rebuild
-go test -v ./repo -run TestMiniNDNIntegration -timeout 2m
-
-# Custom node count test
-NODE_COUNT=10 go test -v ./repo -run TestMiniNDNIntegration_CustomNodeCount -timeout 30m
-
-# Multi-node experiments
-./experiments/run_experiments.sh
-
-# Unit tests
-go test -v ./repo -run "TestRepo_" -timeout 30s
-```
+| Type | Code | Field |
+|------|------|-------|
+| Command Type | 252 | Command type string |
+| Target | 253, 280, 295 | Command target name |
+| SnapshotThreshold | 255 | Threshold value |
+| Status | 281 | Response status |
+| Jobs | 290 | Job name list |
+| NewCommand | 291 | New command struct |
+| StorageCapacity | 292 | Total capacity |
+| StorageUsed | 293 | Used capacity |
+| JobRelease | 294 | InternalCommand for release |
+| StorageSpace | 294 | Storage size in InternalCommand |
+| JobAssignment Assignees | 296 | List of assignee names |
+| JobAssignments | 297 | List of JobAssignment structs |
 
 ## Important Commands
 
 ```bash
-# Set multicast strategy
-nfdc strategy set /ndn/drepo /localhost/nfd/strategy/multicast
+# Set multicast strategy for SVS (MUST use keyword component prefix!)
+nfdc strategy set /ndn/drepo/group-messages/32=svs /localhost/nfd/strategy/multicast
 
-# Check FIB entries
-nfdc fib list
+# Set best-route for notify
+nfdc strategy set /ndn/drepo/notify /localhost/nfd/strategy/best-route
 
-# Rebuild Docker image
-docker rmi mini-ndn-integration
-go test -v ./repo -run TestMiniNDNIntegration -timeout 2m
+# Run experiments
+make -C experiments calibrate CALIBRATE_NODES=24 CALIBRATE_ITER=3
+make -C experiments run NODE_COUNTS="24" PRODUCER_COUNTS="1 2 4"
+
+# Run tests
+make test-short       # Quick unit tests (~30s)
+make test-unit        # Unit tests only (no NFD)
+make test-integration # Local NFD integration tests
+make test-concurrent  # Concurrent command tests
+make test-storage     # Storage pressure tests
+make test-edge        # RF edge cases (RF=1, RF=nodes) + node join
+make test-failure     # Failure recovery tests
+make test-all-local   # All local NFD tests (no Docker)
+make test-mini-ndn    # Docker mini-ndn tests
+./scripts/run_all_experiments.sh  # Run all + produce summary
 
 # Kill hanging processes
 pkill -9 -f "repo --event-log"
 ```
 
-## Build
-```
-go build ./repo/...  # ✓
-go vet ./repo/...    # ✓
-gofmt -w ./repo/     # ✓
+## Known Issues
+
+1. **Failure recovery not implemented** - `TestFailureRecovery_*` tests fail because surviving nodes don't re-claim jobs when a node dies. The `runHeartbeatMonitor()` detects offline nodes but doesn't trigger re-replication.
+
+2. **Flaky initial replication** - Sometimes initial replication fails with 0 claims due to SVS sync timing. Consider increasing `--svs-timeout`.
+
+## Build Verification
+
+```bash
+go build ./repo/...  # Build
+go vet ./repo/...    # Static analysis
+gofmt -w ./repo/     # Format
 ```
