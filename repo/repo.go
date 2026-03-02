@@ -76,8 +76,8 @@ type NodeStatus struct {
 }
 
 // utilities
-func (ns NodeStatus) UsedSpace() uint64 {
-	return ns.Used / ns.Capacity
+func (ns NodeStatus) UsedSpace() float64 {
+	return float64(ns.Used) / float64(ns.Capacity)
 }
 
 func (r *Repo) String() string {
@@ -348,6 +348,13 @@ func (r *Repo) Start() (err error) {
 
 	var face ndn.Face = engine.NewDefaultFace()
 
+	if r.eventLogger != nil {
+		// Define the prefix used to identify SVS sync interests
+		syncPrefix := r.groupPrefix.Append(enc.NewGenericComponent("group-messages")).Append(enc.NewKeywordComponent("svs")).String()
+		r.countingFace = util.NewCountingFace(face, r.eventLogger, syncPrefix)
+		face = r.countingFace
+	}
+
 	r.engine = engine.NewBasicEngine(face)
 	if err = r.engine.Start(); err != nil {
 		return err
@@ -543,7 +550,7 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 
 func (r *Repo) doJob(cmd *tlv.Command) bool {
 	c, u := r.getStorageStats()
-	if u > 0 && float64(u/c) > 0.75 {
+	if u > 0 && (float64(u)/float64(c) > 0.75) {
 		return false
 	}
 	r.mu.Lock()
@@ -579,7 +586,7 @@ func (r *Repo) determineWinnersHydraInternal(cmd *tlv.Command) []string {
 	myPrefix := r.myNodeName()
 
 	candidates := make([]string, 0, len(r.nodeStatus))
-	usedSpace := make(map[string]uint64)
+	usedSpace := make(map[string]float64)
 	capacity := make(map[string]uint64)
 	for name, status := range r.nodeStatus {
 		isDoing := false
@@ -641,7 +648,6 @@ func (r *Repo) determineWinnersHydraInternal(cmd *tlv.Command) []string {
 		reason = "selected_as_candidate"
 	}
 
-	// TODO: refactor LogDecisionMade because this doesn't make the decision; other parts do and then call doJob()
 	r.eventLogger.LogDecisionMade(
 		cmd.Target.String(),
 		shouldClaim,

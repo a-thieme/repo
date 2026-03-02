@@ -27,7 +27,7 @@ type NodeUpdate struct {
     NewCommand     *Command
     StorageCapacity uint64
     StorageUsed    uint64
-    JobRelease     []*InternalCommand  // unused
+    JobRelease     []*InternalCommand
     JobAssignments []*JobAssignment
 }
 ```

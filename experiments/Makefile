@@ -19,8 +19,8 @@ NODES            ?= 24
 PRODUCERS        ?= 1
 
 # Docker resources
-DOCKER_MEM       ?= 16g
-DOCKER_CPUS      ?= 8
+DOCKER_MEM       ?= 8g
+DOCKER_CPUS      ?= 4
 
 # Debug
 DEBUG            ?= false
