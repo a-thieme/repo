@@ -93,7 +93,12 @@ calibrate:
 
 # === Experiments ===
 
-run:
+# Generate a list of individual experiment targets (e.g., exp_24_1, exp_24_4)
+EXP_TARGETS = $(foreach n,$(NODE_COUNTS),$(foreach p,$(PRODUCER_COUNTS),exp_$(n)_$(p)))
+
+run: post_run
+
+pre_run:
 	@echo "=== NDN Repository Experiment Runner ==="
 	@echo "Node counts: $(NODE_COUNTS)"
 	@echo "Producer counts: $(PRODUCER_COUNTS)"
@@ -101,14 +106,18 @@ run:
 	@echo "Command count per producer: $(COMMAND_COUNT)"
 	@echo ""
 	@mkdir -p $(RESULTS_DIR)/run_$(TIMESTAMP)
-	@for nodes in $(NODE_COUNTS); do \
-		for producers in $(PRODUCER_COUNTS); do \
-			echo "Starting experiment: $$nodes nodes, $$producers producers"; \
-			$(MAKE) single NODES=$$nodes PRODUCERS=$$producers TIMESTAMP=$(TIMESTAMP) > /dev/null 2>&1 && \
-				echo "  ✓ $$nodes nodes, $$producers producers" || \
-				echo "  ✗ $$nodes nodes, $$producers producers (failed)"; \
-		done; \
-	done
+
+# Pattern rule to execute each experiment dynamically
+exp_%: pre_run
+	@nodes="$$(echo $* | cut -d_ -f1)"; \
+	prods="$$(echo $* | cut -d_ -f2)"; \
+	echo "Starting experiment: $$nodes nodes, $$prods producers"; \
+	$(MAKE) single NODES=$$nodes PRODUCERS=$$prods TIMESTAMP=$(TIMESTAMP) > /dev/null 2>&1 && \
+		echo "  ✓ $$nodes nodes, $$prods producers" || \
+		echo "  ✗ $$nodes nodes, $$prods producers (failed)"
+
+# Collect results after all dynamic targets finish
+post_run: $(EXP_TARGETS)
 	@echo ""
 	@echo "Collecting results..."
 	@python3 $(HELPERS_PY) collect $(RESULTS_DIR)/run_$(TIMESTAMP) \

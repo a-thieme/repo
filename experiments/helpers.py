@@ -96,6 +96,8 @@ def collect_results(
         }
         results.append(result)
 
+    results.sort(key=lambda r: (r["nodes"], r["producers"]))
+
     if csv_path:
         write_csv(results, csv_path)
 
