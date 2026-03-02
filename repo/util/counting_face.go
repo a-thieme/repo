@@ -80,84 +80,6 @@ func ParseTLVType(wire enc.Wire) uint8 {
 	return buf[0]
 }
 
-func parsePacketName(wire enc.Wire) string {
-	buf := wire.Join()
-	if len(buf) == 0 {
-		return ""
-	}
-	pktType := buf[0]
-	if pktType != TlvInterest && pktType != TlvData {
-		return ""
-	}
-	pos := 0
-	tlvType, tlvLen, newPos := parseTLV(buf, pos)
-	if tlvType == 0 {
-		return ""
-	}
-	pos = newPos
-	if pktType == TlvData {
-		for pos < len(buf) && pos < int(tlvLen)+newPos {
-			innerType, innerLen, innerStart := parseTLV(buf, pos)
-			if innerType == 0x07 && innerStart+int(innerLen) <= len(buf) {
-				if name, err := enc.NameFromBytes(buf[pos : innerStart+int(innerLen)]); err == nil {
-					return name.String()
-				}
-			}
-			pos = innerStart + int(innerLen)
-		}
-	} else {
-		if pos < len(buf) {
-			nameType, nameLen, nameStart := parseTLV(buf, pos)
-			if nameType == 0x07 && nameStart+int(nameLen) <= len(buf) {
-				if name, err := enc.NameFromBytes(buf[pos : nameStart+int(nameLen)]); err == nil {
-					return name.String()
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func parseTLV(buf []byte, pos int) (tlvType uint64, tlvLen uint64, newPos int) {
-	if pos >= len(buf) {
-		return 0, 0, pos
-	}
-
-	if buf[pos] < 0xFD {
-		tlvType = uint64(buf[pos])
-		pos++
-	} else {
-		tlvType = uint64(buf[pos] & 0x03)
-		pos++
-		for pos < len(buf) && buf[pos]&0x80 != 0 {
-			tlvType = (tlvType << 7) | uint64(buf[pos]&0x7F)
-			pos++
-		}
-	}
-
-	if pos >= len(buf) {
-		return 0, 0, pos
-	}
-
-	if buf[pos] < 0xFD {
-		tlvLen = uint64(buf[pos])
-		pos++
-	} else {
-		tlvLen = uint64(buf[pos] & 0x03)
-		pos++
-		for pos < len(buf) && buf[pos-1]&0x80 != 0 {
-			tlvLen = (tlvLen << 7) | uint64(buf[pos]&0x7F)
-			pos++
-		}
-	}
-
-	return tlvType, tlvLen, pos
-}
-
-func hasPrefix(name, prefix string) bool {
-	return len(name) >= len(prefix) && name[:len(prefix)] == prefix
-}
-
 func (f *CountingFace) OnPacket(onPkt func(frame []byte)) {
 	f.inner.OnPacket(func(frame []byte) {
 		pktType, name := ExtractPacketInfo(enc.Wire{frame})
@@ -218,7 +140,7 @@ func ExtractPacketInfo(wire enc.Wire) (pktType uint8, name string) {
 		endPos := startPos + int(tlvLen)
 		for pos < endPos && pos < len(buf) {
 			fieldType, fieldLen, fieldStart := parseTLV(buf, pos)
-			if fieldType == 0 {
+			if fieldType == 0 || fieldStart == len(buf) {
 				break
 			}
 			if fieldType == TlvFragment && fieldStart+int(fieldLen) <= len(buf) {
@@ -237,4 +159,88 @@ func ExtractPacketInfo(wire enc.Wire) (pktType uint8, name string) {
 		return pktType, parsePacketName(wire)
 	}
 	return pktType, ""
+}
+
+func parsePacketName(wire enc.Wire) string {
+	buf := wire.Join()
+	if len(buf) == 0 {
+		return ""
+	}
+	pktType := buf[0]
+	if pktType != TlvInterest && pktType != TlvData {
+		return ""
+	}
+	pos := 0
+	tlvType, tlvLen, newPos := parseTLV(buf, pos)
+	if tlvType == 0 || newPos == len(buf) {
+		return ""
+	}
+	pos = newPos
+	if pktType == TlvData {
+		for pos < len(buf) && pos < int(tlvLen)+newPos {
+			innerType, innerLen, innerStart := parseTLV(buf, pos)
+			if innerType == 0x07 && innerStart+int(innerLen) <= len(buf) {
+				if name, err := enc.NameFromBytes(buf[pos : innerStart+int(innerLen)]); err == nil {
+					return name.String()
+				}
+			}
+			pos = innerStart + int(innerLen)
+		}
+	} else {
+		if pos < len(buf) {
+			nameType, nameLen, nameStart := parseTLV(buf, pos)
+			if nameType == 0x07 && nameStart+int(nameLen) <= len(buf) {
+				if name, err := enc.NameFromBytes(buf[pos : nameStart+int(nameLen)]); err == nil {
+					return name.String()
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// readVarNum parses NDN TLV VAR-NUMBER format (1, 3, 5, or 9 bytes)
+func readVarNum(buf []byte, pos int) (uint64, int) {
+	if pos >= len(buf) {
+		return 0, -1
+	}
+	first := buf[pos]
+	if first < 253 {
+		return uint64(first), pos + 1
+	} else if first == 253 {
+		if pos+3 > len(buf) {
+			return 0, -1
+		}
+		val := uint64(buf[pos+1])<<8 | uint64(buf[pos+2])
+		return val, pos + 3
+	} else if first == 254 {
+		if pos+5 > len(buf) {
+			return 0, -1
+		}
+		val := uint64(buf[pos+1])<<24 | uint64(buf[pos+2])<<16 | uint64(buf[pos+3])<<8 | uint64(buf[pos+4])
+		return val, pos + 5
+	} else {
+		if pos+9 > len(buf) {
+			return 0, -1
+		}
+		val := uint64(buf[pos+1])<<56 | uint64(buf[pos+2])<<48 | uint64(buf[pos+3])<<40 | uint64(buf[pos+4])<<32 |
+			uint64(buf[pos+5])<<24 | uint64(buf[pos+6])<<16 | uint64(buf[pos+7])<<8 | uint64(buf[pos+8])
+		return val, pos + 9
+	}
+}
+
+func parseTLV(buf []byte, pos int) (tlvType uint64, tlvLen uint64, newPos int) {
+	tlvType, pos = readVarNum(buf, pos)
+	if pos == -1 {
+		return 0, 0, len(buf)
+	}
+	tlvLen, pos = readVarNum(buf, pos)
+	if pos == -1 {
+		return 0, 0, len(buf)
+	}
+	return tlvType, tlvLen, pos
+}
+
+func hasPrefix(name, prefix string) bool {
+	return len(name) >= len(prefix) && name[:len(prefix)] == prefix
 }
