@@ -121,30 +121,7 @@ func TestEventLogger_NodeUpdate(t *testing.T) {
 	}
 }
 
-func TestCountingFace_ParseTLVType(t *testing.T) {
-	tests := []struct {
-		name     string
-		wire     []byte
-		expected uint8
-	}{
-		{"empty", []byte{}, 0},
-		{"interest", []byte{0x05, 0x10}, 0x05},
-		{"data", []byte{0x06, 0x20}, 0x06},
-		{"other", []byte{0x07, 0x00}, 0x07},
-		{"lppacket", []byte{0x64, 0x10}, 0x64},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := util.ParseTLVType(enc.Wire{tt.wire})
-			if result != tt.expected {
-				t.Errorf("Expected %d, got %d", tt.expected, result)
-			}
-		})
-	}
-}
-
-func TestCountingFace_LpPacketDataName(t *testing.T) {
+func TestCountingFace_ExtractPacketInfo(t *testing.T) {
 	dataPkt := []byte{
 		0x06, 0x12,
 		0x07, 0x0b, 0x08, 0x03, 'n', 'd', 'n', 0x08, 0x04, 'd', 'a', 't', 'a',
@@ -161,12 +138,15 @@ func TestCountingFace_LpPacketDataName(t *testing.T) {
 	lpPkt = append(lpPkt, dataPkt...)
 	lpPkt[1] = byte(len(lpPkt) - 2)
 
-	name := util.ParseLpPacketDataName(enc.Wire{lpPkt})
+	pktType, name := util.ExtractPacketInfo(enc.Wire{lpPkt})
 	if name == "" {
 		t.Error("Expected to find data name in LpPacket, got empty string")
 	}
 	if name != "/ndn/data" {
 		t.Errorf("Expected /ndn/data, got %s", name)
+	}
+	if pktType != util.TlvData {
+		t.Errorf("Expected TlvData (%d), got %d", util.TlvData, pktType)
 	}
 }
 

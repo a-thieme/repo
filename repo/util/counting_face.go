@@ -33,31 +33,6 @@ func (f *CountingFace) IsLocal() bool {
 	return f.inner.IsLocal()
 }
 
-func (f *CountingFace) OnPacket(onPkt func(frame []byte)) {
-	f.inner.OnPacket(func(frame []byte) {
-		pktType := ParseTLVType(enc.Wire{frame})
-		switch pktType {
-		case TlvInterest:
-			atomic.AddUint64(&f.stats.InterestsReceived, 1)
-			if f.eventLogger != nil {
-				name := parsePacketName(enc.Wire{frame})
-				if name != "" {
-					f.eventLogger.LogInterestReceived(name, f.stats.InterestsReceived)
-				}
-			}
-		case TlvData:
-			atomic.AddUint64(&f.stats.DataPacketsReceived, 1)
-			if f.eventLogger != nil {
-				name := parsePacketName(enc.Wire{frame})
-				if name != "" {
-					f.eventLogger.LogDataReceived(name, f.stats.DataPacketsReceived)
-				}
-			}
-		}
-		onPkt(frame)
-	})
-}
-
 func (f *CountingFace) OnError(onError func(err error)) {
 	f.inner.OnError(onError)
 }
@@ -68,38 +43,6 @@ func (f *CountingFace) Open() error {
 
 func (f *CountingFace) Close() error {
 	return f.inner.Close()
-}
-
-func (f *CountingFace) Send(pkt enc.Wire) error {
-	pktType := ParseTLVType(pkt)
-	var name string
-
-	switch pktType {
-	case TlvInterest:
-		name = parsePacketName(pkt)
-		if name != "" && f.syncPrefix != "" && hasPrefix(name, f.syncPrefix) {
-			atomic.AddUint64(&f.stats.SyncInterestsSent, 1)
-			if f.eventLogger != nil {
-				f.eventLogger.LogSyncInterestSent(f.stats.SyncInterestsSent)
-			}
-		}
-	case TlvData:
-		atomic.AddUint64(&f.stats.DataPacketsSent, 1)
-		name = parsePacketName(pkt)
-		if f.eventLogger != nil && name != "" {
-			f.eventLogger.LogDataSent(name, f.stats.DataPacketsSent)
-		}
-	case TlvLpPacket:
-		name = ParseLpPacketDataName(pkt)
-		if name != "" {
-			atomic.AddUint64(&f.stats.DataPacketsSent, 1)
-			if f.eventLogger != nil {
-				f.eventLogger.LogDataSent(name, f.stats.DataPacketsSent)
-			}
-		}
-	}
-
-	return f.inner.Send(pkt)
 }
 
 func (f *CountingFace) OnUp(onUp func()) (cancel func()) {
@@ -175,55 +118,6 @@ func parsePacketName(wire enc.Wire) string {
 	return ""
 }
 
-func ParseLpPacketDataName(wire enc.Wire) string {
-	buf := wire.Join()
-	if len(buf) == 0 || buf[0] != TlvLpPacket {
-		return ""
-	}
-	pos := 0
-	tlvType, tlvLen, startPos := parseTLV(buf, pos)
-	if tlvType != TlvLpPacket {
-		return ""
-	}
-	pos = startPos
-	endPos := startPos + int(tlvLen)
-	for pos < endPos && pos < len(buf) {
-		fieldType, fieldLen, fieldStart := parseTLV(buf, pos)
-		if fieldType == 0 {
-			break
-		}
-		if fieldType == TlvFragment && fieldStart+int(fieldLen) <= len(buf) {
-			fragment := buf[fieldStart : fieldStart+int(fieldLen)]
-			if len(fragment) > 0 && fragment[0] == TlvData {
-				return parseDataName(fragment)
-			}
-		}
-		pos = fieldStart + int(fieldLen)
-	}
-	return ""
-}
-
-func parseDataName(buf []byte) string {
-	if len(buf) == 0 || buf[0] != TlvData {
-		return ""
-	}
-	tlvType, tlvLen, pos := parseTLV(buf, 0)
-	if tlvType != TlvData {
-		return ""
-	}
-	endPos := pos + int(tlvLen)
-	for pos < endPos && pos < len(buf) {
-		innerType, innerLen, innerStart := parseTLV(buf, pos)
-		if innerType == 0x07 && innerStart+int(innerLen) <= len(buf) {
-			if name, err := enc.NameFromBytes(buf[pos : innerStart+int(innerLen)]); err == nil {
-				return name.String()
-			}
-		}
-		pos = innerStart + int(innerLen)
-	}
-	return ""
-}
-
 func parseTLV(buf []byte, pos int) (tlvType uint64, tlvLen uint64, newPos int) {
 	if pos >= len(buf) {
 		return 0, 0, pos
@@ -262,4 +156,85 @@ func parseTLV(buf []byte, pos int) (tlvType uint64, tlvLen uint64, newPos int) {
 
 func hasPrefix(name, prefix string) bool {
 	return len(name) >= len(prefix) && name[:len(prefix)] == prefix
+}
+
+func (f *CountingFace) OnPacket(onPkt func(frame []byte)) {
+	f.inner.OnPacket(func(frame []byte) {
+		pktType, name := ExtractPacketInfo(enc.Wire{frame})
+		switch pktType {
+		case TlvInterest:
+			count := atomic.AddUint64(&f.stats.InterestsReceived, 1)
+			if f.eventLogger != nil && name != "" {
+				f.eventLogger.LogInterestReceived(name, count)
+			}
+		case TlvData:
+			count := atomic.AddUint64(&f.stats.DataPacketsReceived, 1)
+			if f.eventLogger != nil && name != "" {
+				f.eventLogger.LogDataReceived(name, count)
+			}
+		}
+		onPkt(frame)
+	})
+}
+
+func (f *CountingFace) Send(pkt enc.Wire) error {
+	pktType, name := ExtractPacketInfo(pkt)
+
+	switch pktType {
+	case TlvInterest:
+		if name != "" && f.syncPrefix != "" && hasPrefix(name, f.syncPrefix) {
+			count := atomic.AddUint64(&f.stats.SyncInterestsSent, 1)
+			if f.eventLogger != nil {
+				f.eventLogger.LogSyncInterestSent(count)
+			}
+		}
+	case TlvData:
+		if name != "" {
+			count := atomic.AddUint64(&f.stats.DataPacketsSent, 1)
+			if f.eventLogger != nil {
+				f.eventLogger.LogDataSent(name, count)
+			}
+		}
+	}
+
+	return f.inner.Send(pkt)
+}
+
+// ExtractPacketInfo unwraps LpPackets if necessary and returns the underlying
+// packet type (TlvInterest or TlvData) and its URI-encoded name string.
+func ExtractPacketInfo(wire enc.Wire) (pktType uint8, name string) {
+	buf := wire.Join()
+	if len(buf) == 0 {
+		return 0, ""
+	}
+	pktType = buf[0]
+	if pktType == TlvLpPacket {
+		pos := 0
+		tlvType, tlvLen, startPos := parseTLV(buf, pos)
+		if tlvType != TlvLpPacket {
+			return 0, ""
+		}
+		pos = startPos
+		endPos := startPos + int(tlvLen)
+		for pos < endPos && pos < len(buf) {
+			fieldType, fieldLen, fieldStart := parseTLV(buf, pos)
+			if fieldType == 0 {
+				break
+			}
+			if fieldType == TlvFragment && fieldStart+int(fieldLen) <= len(buf) {
+				fragment := buf[fieldStart : fieldStart+int(fieldLen)]
+				if len(fragment) > 0 {
+					innerType := fragment[0]
+					if innerType == TlvInterest || innerType == TlvData {
+						return innerType, parsePacketName(enc.Wire{fragment})
+					}
+				}
+			}
+			pos = fieldStart + int(fieldLen)
+		}
+		return 0, ""
+	} else if pktType == TlvInterest || pktType == TlvData {
+		return pktType, parsePacketName(wire)
+	}
+	return pktType, ""
 }
