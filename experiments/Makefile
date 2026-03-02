@@ -25,6 +25,12 @@ DOCKER_CPUS      ?= 8
 # Debug
 DEBUG            ?= false
 
+# Failure simulation settings
+FAILURE_COUNT    ?= 0
+FAILURE_NODES    ?=
+FAILURE_WAIT     ?= 0
+FAILURE_RECOVERY_TIMEOUT ?= 30
+
 # Paths
 MAKEFILE_DIR     := $(dir $(lastword $(MAKEFILE_LIST)))
 RESULTS_DIR      ?= $(MAKEFILE_DIR)results
@@ -72,7 +78,7 @@ calibrate:
 			-v /lib/modules:/lib/modules \
 			-v "$$(cd $$iter_dir && pwd)":/results \
 			mini-ndn-integration \
-			-c "python3 /usr/local/bin/runner.py --node-count $(CALIBRATE_NODES) --timeout 120 --replication-factor $(RF) --routing-wait $$routing_wait --results-dir /results --producer-count 1 --command-count 1 --command-rate 1 --svs-timeout 60 --replication-timeout 60" \
+			-c "python3 /usr/local/bin/runner.py --node-count $(CALIBRATE_NODES) --timeout 120 --replication-factor $(RF) --routing-wait $$routing_wait --results-dir /results --producer-count 1 --command-count 1 --command-rate 1" \
 			> "$$iter_dir/docker.log" 2>&1; \
 		if [ -f "$$iter_dir/metadata.json" ]; then \
 			echo "  Iteration $$i complete"; \
@@ -118,7 +124,7 @@ single:
 	routing_wait=$$((30 + ($(NODES) - 5) * 2)); \
 	cal_file="$(RESULTS_DIR)/calibration/latest_calibration.json"; \
 	if [ -f "$$cal_file" ]; then \
-		safe_interval=$$(python3 -c "import json; d=json.load(open('$$cal_file')); mv=d.get('max_values',{}); print(mv.get('safe_interval_ms', mv.get('replication_time_ms', 10)))" 2>/dev/null || echo "10"); \
+		safe_interval=$$(python3 -c "import json; d=json.load(open('$$cal_file')); mv=d.get('max_values',{}); print(mv.get('safe_interval_ms', mv.get('replication_time_p99_ms', mv.get('replication_time_ms', 10))))" 2>/dev/null || echo "10"); \
 		cmd_rate=$$(python3 -c "import math; print(max(1, int(1000 / ($$safe_interval * 1.25))))" 2>/dev/null || echo "80"); \
 	else \
 		cmd_rate=80; \
@@ -127,6 +133,9 @@ single:
 	[ "$$per_producer_rate" -lt 1 ] && per_producer_rate=1; \
 	debug_arg=""; \
 	[ "$(DEBUG)" = "true" ] && debug_arg=" --debug"; \
+	failure_args=""; \
+	[ "$(FAILURE_COUNT)" -gt 0 ] && failure_args=" --failure-count $(FAILURE_COUNT) --failure-wait $(FAILURE_WAIT) --failure-recovery-timeout $(FAILURE_RECOVERY_TIMEOUT)"; \
+	[ -n "$(FAILURE_NODES)" ] && failure_args="$$failure_args --failure-nodes '$(FAILURE_NODES)'"; \
 	docker run --rm --privileged \
 		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
 		-v /lib/modules:/lib/modules \
@@ -142,8 +151,8 @@ single:
 			--command-count $(COMMAND_COUNT) \
 			--command-rate $$per_producer_rate \
 			--command-type $(COMMAND_TYPE) \
-			--join-ratio $(JOIN_RATIO)$$debug_arg" \
-		> "$$result_dir/docker.log" 2>&1
+			--join-ratio $(JOIN_RATIO)$$debug_arg$$failure_args" \
+ 		> "$$result_dir/docker.log" 2>&1
 
 # === Debugging ===
 

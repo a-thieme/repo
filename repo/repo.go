@@ -2,6 +2,8 @@ package main
 
 import (
 	_ "embed"
+	"fmt"
+	"hash/fnv"
 	"slices"
 	"sort"
 	"strings"
@@ -26,6 +28,7 @@ import (
 // constants
 const NOTIFY = "notify"
 const DEFAULT_HEARTBEAT_INTERVAL = 5 * time.Second
+const HEARTBEAT_TIMEOUT = DEFAULT_HEARTBEAT_INTERVAL*3 + 500*time.Millisecond
 const STORAGE_TICK_TIME = 1 * time.Second
 
 //go:embed testbed-root.decoded
@@ -60,7 +63,7 @@ type Repo struct {
 	heartbeatInterval time.Duration
 
 	nodeTimers   map[string]*time.Timer
-	eventLogger  *util.EventLogger
+	eventLogger  util.Logger
 	countingFace *util.CountingFace
 }
 
@@ -69,16 +72,12 @@ type NodeStatus struct {
 	Used        uint64
 	LastUpdated time.Time
 	Jobs        []enc.Name
-	Alive       bool
 	TimerID     uint64
 }
 
 // utilities
-func (ns NodeStatus) FreeSpace() uint64 {
-	if ns.Used >= ns.Capacity {
-		return 0
-	}
-	return ns.Capacity - ns.Used
+func (ns NodeStatus) UsedSpace() uint64 {
+	return ns.Used / ns.Capacity
 }
 
 func (r *Repo) String() string {
@@ -92,15 +91,10 @@ func (r *Repo) myNodeName() string {
 func (r *Repo) amIDoingJob(target enc.Name) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, job := range r.jobs {
-		if job.Equal(target) {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(encNamesToStrings(r.jobs), target.String())
 }
 
-func (r *Repo) SetEventLogger(logger *util.EventLogger) {
+func (r *Repo) SetEventLogger(logger util.Logger) {
 	r.eventLogger = logger
 }
 
@@ -109,11 +103,16 @@ func (r *Repo) GetCountingFace() *util.CountingFace {
 }
 
 func hashFromString(s string) uint64 {
-	h := 0
-	for _, c := range s {
-		h = 31*h + int(c)
+	f := fnv.New64()
+	f.Write([]byte(s))
+	return f.Sum64()
+}
+func encNamesToStrings(names []enc.Name) []string {
+	result := make([]string, len(names))
+	for i, n := range names {
+		result[i] = n.String()
 	}
-	return uint64(h)
+	return result
 }
 
 func stringNamesToEncNames(names []string) []enc.Name {
@@ -127,9 +126,6 @@ func stringNamesToEncNames(names []string) []enc.Name {
 func (r *Repo) countReplication(target enc.Name) int {
 	count := 0
 	for _, status := range r.nodeStatus {
-		if !status.Alive {
-			continue
-		}
 		for _, job := range status.Jobs {
 			if job.Equal(target) {
 				count++
@@ -152,9 +148,12 @@ func (r *Repo) addCommand(cmd *tlv.Command) {
 	r.commands[cmd.Target.String()] = cmd
 }
 
-// Internal helper: assumes lock is held
 func (r *Repo) getCommandInternal(target enc.Name) *tlv.Command {
-	return r.commands[target.String()]
+	cmd := r.commands[target.String()]
+	if cmd == nil {
+		log.Warn(r, "getCommandInternal_nil", "target", target.String())
+	}
+	return cmd
 }
 
 func (r *Repo) getCommand(target enc.Name) *tlv.Command {
@@ -171,126 +170,33 @@ func (r *Repo) getMyJobs() []enc.Name {
 	return dst
 }
 
-func (r *Repo) publishNodeUpdate(jobAssignments []*tlv.JobAssignment) {
+func (r *Repo) publishNodeUpdate(update *tlv.NodeUpdate) {
+	if update == nil {
+		update = &tlv.NodeUpdate{}
+	}
 	capacity, used := r.getStorageStats()
-	myJobs := r.getMyJobs()
+	update.Jobs = r.getMyJobs()
+	update.StorageCapacity = capacity
+	update.StorageUsed = used
 
-	if !r.noRelease && used > capacity*75/100 {
-		r.mu.Lock()
-		jobToRelease := r.findJobToRelease()
-		if jobToRelease != nil {
-			r.mu.Unlock()
+	if update.NewCommand != nil {
+		r.eventLogger.LogCommandPublished(update.NewCommand.Target.String())
+	}
 
-			r.removeJobFromLocal(jobToRelease.Target)
-
-			update := &tlv.NodeUpdate{
-				Jobs:            myJobs,
-				StorageCapacity: capacity,
-				StorageUsed:     used,
-				NewCommand:      nil,
-				JobRelease:      jobToRelease,
-				JobAssignments:  jobAssignments,
-			}
-
-			_, _, err := r.groupSync.Publish(update.Encode())
-			if err != nil {
-				log.Fatal(r, "node_update_pub_failed", "err", err)
-			}
-
-			r.mu.Lock()
-			r.nodeStatus[r.myNodeName()] = NodeStatus{
-				Capacity:    capacity,
-				Used:        used,
-				Jobs:        myJobs,
-				LastUpdated: time.Now(),
-				Alive:       true,
-			}
-			r.mu.Unlock()
-		} else {
-			r.mu.Unlock()
-		}
+	_, _, err := r.groupSync.Publish(update.Encode())
+	if err != nil {
+		log.Fatal(r, "node_update_pub_failed", "err", err)
 	} else {
-		update := &tlv.NodeUpdate{
-			Jobs:            myJobs,
-			StorageCapacity: capacity,
-			StorageUsed:     used,
-			NewCommand:      nil,
-			JobAssignments:  jobAssignments,
-		}
-
-		_, _, err := r.groupSync.Publish(update.Encode())
-		if err != nil {
-			log.Fatal(r, "node_update_pub_failed", "err", err)
-		}
-
-		r.mu.Lock()
-		r.nodeStatus[r.myNodeName()] = NodeStatus{
-			Capacity:    capacity,
-			Used:        used,
-			Jobs:        myJobs,
-			LastUpdated: time.Now(),
-			Alive:       true,
-		}
-		r.mu.Unlock()
+		r.updateNodeStatus(r.myNodeName(), update)
 	}
 }
 
-func (r *Repo) findJobToRelease() *tlv.InternalCommand {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if len(r.jobs) == 0 {
-		return nil
-	}
-
-	target := r.jobs[len(r.jobs)-1]
-
-	cmd := r.getCommandInternal(target)
-	if cmd == nil {
-		return nil
-	}
-
-	releaseCmd := &tlv.InternalCommand{
-		Type:              cmd.Type,
-		Target:            target,
-		SnapshotThreshold: 0,
-	}
-
-	return releaseCmd
-}
-
-func (r *Repo) removeJobFromLocal(target enc.Name) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	newJobs := make([]enc.Name, 0)
-	for _, job := range r.jobs {
-		if job.String() != target.String() {
-			newJobs = append(newJobs, job)
-		}
-	}
-	r.jobs = newJobs
-
-	jobKey := target.String()
-	if r.jobStorageUsage != nil {
-		if used, exists := r.jobStorageUsage[jobKey]; exists {
-			r.storageUsed -= used
-			if r.storageUsed < 0 {
-				r.storageUsed = 0
-			}
-			delete(r.jobStorageUsage, jobKey)
-		}
-	}
-
-	if r.eventLogger != nil {
-		r.eventLogger.LogJobReleased(target.String())
-	}
+func (r *Repo) changeStorageUsed(delta uint64) {
+	r.storageUsed += delta
+	r.eventLogger.LogStorageChanged(r.storageUsed, delta)
 }
 
 func (r *Repo) publishCommand(newCmd *tlv.Command, winners []string) {
-	capacity, used := r.getStorageStats()
-	myJobs := r.getMyJobs()
-
 	var jobAssignments []*tlv.JobAssignment
 	if len(winners) > 0 {
 		jobAssignments = []*tlv.JobAssignment{{
@@ -300,11 +206,8 @@ func (r *Repo) publishCommand(newCmd *tlv.Command, winners []string) {
 	}
 
 	update := &tlv.NodeUpdate{
-		Jobs:            myJobs,
-		StorageCapacity: capacity,
-		StorageUsed:     used,
-		NewCommand:      newCmd,
-		JobAssignments:  jobAssignments,
+		NewCommand:     newCmd,
+		JobAssignments: jobAssignments,
 	}
 
 	_, _, err := r.groupSync.Publish(update.Encode())
@@ -312,152 +215,67 @@ func (r *Repo) publishCommand(newCmd *tlv.Command, winners []string) {
 		log.Fatal(r, "node_update_pub_failed", "err", err)
 	}
 
-	r.mu.Lock()
-	r.nodeStatus[r.myNodeName()] = NodeStatus{
-		Capacity:    capacity,
-		Used:        used,
-		Jobs:        myJobs,
-		LastUpdated: time.Now(),
-		Alive:       true,
+	r.updateNodeStatus(r.myNodeName(), update)
+}
+
+func (r *Repo) amAssignee(assignment *tlv.JobAssignment) bool {
+	myPrefix := r.myNodeName()
+	for _, a := range assignment.Assignees {
+		if a.String() == myPrefix {
+			return true
+		}
 	}
-	r.mu.Unlock()
+	return false
 }
 
 func (r *Repo) publishJobAssignments(assignments []*tlv.JobAssignment) {
-	capacity, used := r.getStorageStats()
-	myJobs := r.getMyJobs()
-
-	update := &tlv.NodeUpdate{
-		Jobs:            myJobs,
-		StorageCapacity: capacity,
-		StorageUsed:     used,
-		JobAssignments:  assignments,
-	}
-
-	_, _, err := r.groupSync.Publish(update.Encode())
-	if err != nil {
-		log.Fatal(r, "node_update_pub_failed", "err", err)
-	}
-
-	r.mu.Lock()
-	r.nodeStatus[r.myNodeName()] = NodeStatus{
-		Capacity:    capacity,
-		Used:        used,
-		Jobs:        myJobs,
-		LastUpdated: time.Now(),
-		Alive:       true,
-	}
-	r.mu.Unlock()
+	r.publishNodeUpdate(&tlv.NodeUpdate{
+		JobAssignments: assignments,
+	})
 }
 
-func (r *Repo) handleJobAssignment(assignment *tlv.JobAssignment) {
-	myPrefix := r.myNodeName()
-	target := assignment.Target
-
-	if r.amIDoingJob(target) {
-		return
-	}
-
-	amAssignee := false
-	for _, a := range assignment.Assignees {
-		if a.String() == myPrefix {
-			amAssignee = true
-			break
-		}
-	}
-	if !amAssignee {
-		return
-	}
-
-	cmd := r.getCommand(target)
-	if cmd == nil {
-		return
-	}
-
-	winners := r.determineWinnersHydra(cmd)
-	if winners == nil {
-		return
-	}
-
-	amWinner := slices.Contains(winners, myPrefix)
-	if amWinner {
-		r.claimJob(cmd)
-		return
-	}
-
-	r.publishJobAssignments([]*tlv.JobAssignment{{
-		Target:    target,
-		Assignees: stringNamesToEncNames(winners),
-	}})
-}
-
-func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) []enc.Name {
+func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	oldStatus, exists := r.nodeStatus[publisher]
-	var oldJobs []enc.Name
-	if exists {
-		oldJobs = oldStatus.Jobs
-	}
 
 	r.nodeStatus[publisher] = NodeStatus{
 		Capacity:    update.StorageCapacity,
 		Used:        update.StorageUsed,
 		LastUpdated: time.Now(),
 		Jobs:        update.Jobs,
-		Alive:       true,
 	}
 
-	r.resetNodeTimer(publisher)
-
-	dropped := make([]enc.Name, 0)
-	for _, oldJob := range oldJobs {
-		stillExists := slices.ContainsFunc(update.Jobs, func(n enc.Name) bool {
-			return oldJob.Equal(n)
-		})
-		if !stillExists {
-			dropped = append(dropped, oldJob)
-		}
-	}
-
-	return dropped
-}
-
-func (r *Repo) resetNodeTimer(nodeName string) {
-	if timer, exists := r.nodeTimers[nodeName]; exists {
-		timer.Stop()
-	}
-	status := r.nodeStatus[nodeName]
-	status.TimerID++
-	r.nodeStatus[nodeName] = status
-	timerID := status.TimerID
-	timeout := 3*r.heartbeatInterval + 500*time.Millisecond
-	r.nodeTimers[nodeName] = time.AfterFunc(timeout, func() {
-		r.onNodeTimeout(nodeName, timerID)
-	})
-}
-
-func (r *Repo) onNodeTimeout(nodeName string, expectedTimerID uint64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	status, exists := r.nodeStatus[nodeName]
-	if !exists || !status.Alive || status.TimerID != expectedTimerID {
+	// no timer for self
+	if publisher == r.myNodeName() {
 		return
 	}
 
-	status.Alive = false
-	r.nodeStatus[nodeName] = status
+	// reset node's timer
+	if timer, exists := r.nodeTimers[publisher]; exists {
+		timer.Reset(HEARTBEAT_TIMEOUT)
+	} else {
+		r.nodeTimers[publisher] = time.AfterFunc(HEARTBEAT_TIMEOUT, func() {
+			r.onHeartbeatTimeoutHydra(publisher)
+		})
+	}
+}
+
+func (r *Repo) onHeartbeatTimeoutHydra(nodeName string) {
+	myName := r.myNodeName()
+	r.mu.Lock()
+	status := r.nodeStatus[nodeName]
 
 	var assignments []*tlv.JobAssignment
+	addedJob := false
+
 	for _, target := range status.Jobs {
 		cmd := r.getCommandInternal(target)
-		if cmd == nil {
-			continue
-		}
 		winners := r.determineWinnersHydraInternal(cmd)
-		if winners != nil {
+
+		if slices.Contains(winners, myName) {
+			r.doJob(cmd)
+			addedJob = true
+		} else if winners != nil { // I'm not in it but there are other winners
 			assignments = append(assignments, &tlv.JobAssignment{
 				Target:    target,
 				Assignees: stringNamesToEncNames(winners),
@@ -466,14 +284,16 @@ func (r *Repo) onNodeTimeout(nodeName string, expectedTimerID uint64) {
 	}
 
 	delete(r.nodeTimers, nodeName)
+	delete(r.nodeStatus, nodeName)
+	r.mu.Unlock()
 
-	if len(assignments) > 0 {
-		go r.publishJobAssignments(assignments)
+	if addedJob || len(assignments) > 0 {
+		r.publishJobAssignments(assignments)
 	}
 }
 
 // initialization
-func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, replicationFactor int, noRelease bool, maxJoinGrowthRate uint64, heartbeatInterval time.Duration) *Repo {
+func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, replicationFactor int, noRelease bool, maxJoinGrowthRate uint64, heartbeatInterval time.Duration, eventLogger util.Logger) *Repo {
 	gp, _ := enc.NameFromStr(groupPrefix)
 	np, _ := enc.NameFromStr(nodePrefix)
 	si, _ := enc.NameFromStr(signingIdentity)
@@ -485,6 +305,10 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 
 	if heartbeatInterval == 0 {
 		heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL
+	}
+
+	if eventLogger == nil {
+		eventLogger = &util.NullEventLogger{}
 	}
 
 	r := &Repo{
@@ -501,6 +325,7 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 		maxJoinGrowthRate: maxJoinGrowthRate,
 		heartbeatInterval: heartbeatInterval,
 		nodeTimers:        make(map[string]*time.Timer),
+		eventLogger:       eventLogger,
 	}
 
 	return r
@@ -518,15 +343,10 @@ func (r *Repo) Start() (err error) {
 		Used:        r.storageUsed,
 		Jobs:        r.jobs,
 		LastUpdated: time.Now(),
-		Alive:       true,
 	}
 	r.mu.Unlock()
 
 	var face ndn.Face = engine.NewDefaultFace()
-	if r.eventLogger != nil {
-		r.countingFace = util.NewCountingFace(face, r.eventLogger)
-		face = r.countingFace
-	}
 
 	r.engine = engine.NewBasicEngine(face)
 	if err = r.engine.Start(); err != nil {
@@ -618,7 +438,6 @@ func (r *Repo) runStorageSimulation() {
 
 	for range ticker.C {
 		r.mu.Lock()
-		var delta uint64
 		for _, target := range r.jobs {
 			cmd := r.getCommandInternal(target)
 			if cmd != nil && cmd.Type == "JOIN" {
@@ -627,25 +446,14 @@ func (r *Repo) runStorageSimulation() {
 					r.jobStorageUsage = make(map[string]uint64)
 				}
 				growth := (hashFromString(cmd.Target.String()) % r.maxJoinGrowthRate)
-				if growth > 0 {
-					r.jobStorageUsage[jobKey] += growth
-					delta += growth
-				}
+				r.jobStorageUsage[jobKey] += growth
+				r.changeStorageUsed(growth)
 			}
 		}
-		r.storageUsed += delta
-		if r.storageUsed > r.storageCapacity {
-			r.storageUsed = r.storageCapacity
-		}
 		r.mu.Unlock()
-
-		if r.eventLogger != nil && delta > 0 {
-			r.eventLogger.LogStorageChanged(r.storageUsed, delta)
-		}
 	}
 }
 
-// handle external actions
 func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wire) error) {
 	cmd, err := tlv.ParseCommand(enc.NewWireView(content), false)
 	if err != nil {
@@ -653,10 +461,7 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 		return
 	}
 
-	if r.eventLogger != nil {
-		r.eventLogger.LogCommandReceived(cmd.Type, cmd.Target.String())
-	}
-
+	r.eventLogger.LogCommandReceived(cmd.Type, cmd.Target.String())
 	response := tlv.StatusResponse{
 		Target: cmd.Target,
 		Status: "received",
@@ -665,18 +470,19 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 
 	r.addCommand(cmd)
 
-	winners := r.determineWinnersHydra(cmd)
-	r.publishCommand(cmd, winners)
-
 	myPrefix := r.myNodeName()
-	if winners != nil {
-		for _, w := range winners {
-			if w == myPrefix {
-				r.claimJob(cmd)
-				break
-			}
-		}
+	winners := r.determineWinnersHydra(cmd)
+	if slices.Contains(winners, myPrefix) {
+		r.doJob(cmd)
 	}
+
+	r.publishNodeUpdate(&tlv.NodeUpdate{
+		NewCommand: cmd,
+		JobAssignments: []*tlv.JobAssignment{{
+			Target:    cmd.Target,
+			Assignees: stringNamesToEncNames(winners),
+		}},
+	})
 }
 
 func (r *Repo) onGroupSync(pub svs.SvsPub) {
@@ -687,63 +493,59 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 	}
 
 	publisherName := pub.Publisher.String()
-	droppedJobs := r.updateNodeStatus(publisherName, update)
-
-	if r.eventLogger != nil {
-		jobs := make([]string, len(update.Jobs))
-		for i, j := range update.Jobs {
-			jobs[i] = j.String()
-		}
-		r.eventLogger.LogNodeUpdate(publisherName, jobs, update.StorageCapacity, update.StorageUsed)
-	}
+	r.updateNodeStatus(publisherName, update)
+	r.eventLogger.LogNodeUpdate(publisherName, update.Jobs, update.StorageCapacity, update.StorageUsed)
 
 	if update.NewCommand != nil {
 		r.addCommand(update.NewCommand)
-		if r.eventLogger != nil {
-			r.eventLogger.LogCommandSynced(update.NewCommand.Type, update.NewCommand.Target.String(), publisherName)
-		}
+		r.eventLogger.LogCommandSynced(update.NewCommand.Type, update.NewCommand.Target.String(), publisherName)
 	}
 
+	addedJob := false
+	var reassignments []*tlv.JobAssignment
 	for _, assignment := range update.JobAssignments {
-		r.handleJobAssignment(assignment)
-	}
+		target := assignment.Target
+		targetStr := target.String()
+		assignees := encNamesToStrings(assignment.Assignees)
 
-	if update.JobRelease != nil {
-		r.mu.Lock()
-		cmd := r.getCommandInternal(update.JobRelease.Target)
-		r.mu.Unlock()
+		if r.amIDoingJob(target) {
+			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "skipped", "already_doing_job", assignees)
+			continue
+		}
 
-		if cmd != nil {
-			log.Info(r, "job_released_by_peer", "peer", publisherName, "target", update.JobRelease.Target)
+		if !slices.Contains(assignees, r.myNodeName()) {
+			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "skipped", "not_in_assignees", assignees)
+			continue
+		}
+
+		cmd := r.getCommand(target)
+		if cmd == nil {
+			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "pending", "command_not_received", assignees)
+			continue
+		}
+
+		// TODO: when we turn on job releases, we need to see if we should do a job (or are able) and then reassign if necessary
+		// ideally, the calculation that other nodes do should take into account this limit, so it should ideally be the same
+		// algorithm for internal calculation (the hydra one)
+		if r.doJob(cmd) {
+			addedJob = true
+		} else {
 			winners := r.determineWinnersHydra(cmd)
-			if winners != nil {
-				r.publishJobAssignments([]*tlv.JobAssignment{{
-					Target:    cmd.Target,
-					Assignees: stringNamesToEncNames(winners),
-				}})
-			}
+			reassignments = append(reassignments, &tlv.JobAssignment{Target: cmd.Target, Assignees: stringNamesToEncNames(winners)})
 		}
 	}
-
-	for _, target := range droppedJobs {
-		r.mu.Lock()
-		cmd := r.getCommandInternal(target)
-		r.mu.Unlock()
-
-		if cmd != nil {
-			log.Info(r, "job_dropped_by_peer_checking_replication", "peer", publisherName, "target", target)
-			winners := r.determineWinnersHydra(cmd)
-			if winners != nil {
-				r.publishJobAssignments([]*tlv.JobAssignment{{
-					Target:    cmd.Target,
-					Assignees: stringNamesToEncNames(winners),
-				}})
-			}
-		}
+	if addedJob || len(reassignments) > 0 {
+		r.publishNodeUpdate(&tlv.NodeUpdate{
+			JobAssignments: reassignments,
+		})
 	}
 }
 
-func (r *Repo) claimJob(cmd *tlv.Command) {
+func (r *Repo) doJob(cmd *tlv.Command) bool {
+	c, u := r.getStorageStats()
+	if u > 0 && float64(u/c) > 0.75 {
+		return false
+	}
 	r.mu.Lock()
 
 	r.jobs = append(r.jobs, cmd.Target)
@@ -751,9 +553,6 @@ func (r *Repo) claimJob(cmd *tlv.Command) {
 	if cmd.Type == "INSERT" {
 		cost := (hashFromString(cmd.Target.String()) % (500 * 1024 * 1024))
 		r.storageUsed += cost
-		if r.storageUsed > r.storageCapacity {
-			r.storageUsed = r.storageCapacity
-		}
 
 		jobKey := cmd.Target.String()
 		if r.jobStorageUsage == nil {
@@ -761,15 +560,12 @@ func (r *Repo) claimJob(cmd *tlv.Command) {
 		}
 		r.jobStorageUsage[jobKey] += cost
 	}
-
-	currentReplication := r.countReplication(cmd.Target)
 	r.mu.Unlock()
 
 	if r.eventLogger != nil {
-		r.eventLogger.LogJobClaimed(cmd.Target.String(), currentReplication)
+		r.eventLogger.LogJobClaimed(cmd.Target.String())
 	}
-
-	r.publishNodeUpdate(nil)
+	return true
 }
 
 func (r *Repo) determineWinnersHydra(cmd *tlv.Command) []string {
@@ -783,12 +579,9 @@ func (r *Repo) determineWinnersHydraInternal(cmd *tlv.Command) []string {
 	myPrefix := r.myNodeName()
 
 	candidates := make([]string, 0, len(r.nodeStatus))
-	freeSpace := make(map[string]uint64)
-
+	usedSpace := make(map[string]uint64)
+	capacity := make(map[string]uint64)
 	for name, status := range r.nodeStatus {
-		if !status.Alive {
-			continue
-		}
 		isDoing := false
 		for _, job := range status.Jobs {
 			if job.Equal(cmd.Target) {
@@ -796,34 +589,39 @@ func (r *Repo) determineWinnersHydraInternal(cmd *tlv.Command) []string {
 				break
 			}
 		}
-
 		if !isDoing {
-			candidates = append(candidates, name)
-			freeSpace[name] = status.FreeSpace()
+			us := float64(status.UsedSpace())
+			if us < .75 {
+				usedSpace[name] = status.UsedSpace()
+				candidates = append(candidates, name)
+				capacity[name] = status.Capacity
+			}
 		}
 	}
 
 	needed := r.rf - currentReplication
 
 	if needed <= 0 {
-		if r.eventLogger != nil {
-			r.eventLogger.LogReplicationDecision(
-				cmd.Target.String(),
-				false,
-				"replication_satisfied",
-				currentReplication,
-				needed,
-				candidates,
-				nil,
-				freeSpace,
-			)
-		}
+		r.eventLogger.LogDecisionMade(
+			cmd.Target.String(),
+			false,
+			"replication_satisfied",
+			fmt.Sprintf("current=%d needed=%d", currentReplication, needed),
+			currentReplication,
+			needed,
+			candidates,
+			nil,
+			nil,
+		)
 		return nil
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		if freeSpace[candidates[i]] != freeSpace[candidates[j]] {
-			return freeSpace[candidates[i]] > freeSpace[candidates[j]]
+		if usedSpace[candidates[i]] != usedSpace[candidates[j]] {
+			return usedSpace[candidates[i]] > usedSpace[candidates[j]]
+		}
+		if capacity[candidates[i]] != capacity[candidates[j]] {
+			return capacity[candidates[i]] > capacity[candidates[j]]
 		}
 		return strings.Compare(candidates[i], candidates[j]) < 0
 	})
@@ -831,28 +629,30 @@ func (r *Repo) determineWinnersHydraInternal(cmd *tlv.Command) []string {
 	limit := min(needed, len(candidates))
 	selectedCandidates := candidates[:limit]
 
-	shouldClaim := false
-	reason := "not_selected"
-	for _, c := range selectedCandidates {
-		if c == myPrefix {
-			shouldClaim = true
-			reason = "selected_as_candidate"
-			break
-		}
+	candidateScores := make(map[string]int)
+	for i, c := range candidates {
+		candidateScores[c] = len(candidates) - i
 	}
 
-	if r.eventLogger != nil {
-		r.eventLogger.LogReplicationDecision(
-			cmd.Target.String(),
-			shouldClaim,
-			reason,
-			currentReplication,
-			needed,
-			candidates,
-			selectedCandidates,
-			freeSpace,
-		)
+	shouldClaim := false
+	reason := "not_selected"
+	if slices.Contains(selectedCandidates, myPrefix) {
+		shouldClaim = true
+		reason = "selected_as_candidate"
 	}
+
+	// TODO: refactor LogDecisionMade because this doesn't make the decision; other parts do and then call doJob()
+	r.eventLogger.LogDecisionMade(
+		cmd.Target.String(),
+		shouldClaim,
+		reason,
+		fmt.Sprintf("current=%d needed=%d selected=%v", currentReplication, needed, selectedCandidates),
+		currentReplication,
+		needed,
+		candidates,
+		candidateScores,
+		selectedCandidates,
+	)
 	return selectedCandidates
 }
 

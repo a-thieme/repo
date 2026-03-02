@@ -28,7 +28,7 @@ func main() {
 	}
 
 	replicationFactor := 3
-	repo := NewRepo("/ndn/drepo", *nodePrefix, *signingIdentity, replicationFactor, *noRelease, *maxJoinGrowthRate, *heartbeatInterval)
+	repo := NewRepo("/ndn/drepo", *nodePrefix, *signingIdentity, replicationFactor, *noRelease, *maxJoinGrowthRate, *heartbeatInterval, nil)
 
 	eventLogger, err := util.NewEventLogger(*eventLogPath, repo.nodePrefix.String())
 	if err != nil {
@@ -44,4 +44,6 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
+
+	eventLogger.Flush()
 }

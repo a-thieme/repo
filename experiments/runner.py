@@ -75,9 +75,9 @@ def main():
     parser.add_argument('--debug', action='store_true', help='Enable verbose repo logging')
     parser.add_argument('--repo-bin', default='/usr/local/bin/repo', help='Path to repo binary')
     parser.add_argument('--producer-bin', default='/usr/local/bin/producer', help='Path to producer binary')
-    parser.add_argument('--svs-timeout', type=int, default=7, help='SVS health check timeout (seconds)')
-    parser.add_argument('--producer-timeout', type=int, default=5, help='Producer command timeout (seconds)')
-    parser.add_argument('--replication-timeout', type=int, default=30, help='Replication wait timeout (seconds)')
+    parser.add_argument('--svs-timeout', type=int, default=8, help='SVS health check timeout (seconds)')
+    parser.add_argument('--producer-timeout', type=int, default=1, help='Producer command timeout (seconds)')
+    parser.add_argument('--replication-timeout', type=int, default=1, help='Replication wait timeout (seconds)')
     parser.add_argument('--nfd-wait', type=int, default=3, help='NFD initialization wait (seconds)')
     parser.add_argument('--topology', default='', help='Path to topology file (overrides default)')
     parser.add_argument('--repo-count', type=int, default=0, help='Number of nodes to run repos (0=all nodes)')
@@ -86,6 +86,10 @@ def main():
     parser.add_argument('--join-ratio', type=float, default=0.5, help='Ratio of JOIN commands when type is both (0.0-1.0)')
     parser.add_argument('--no-release', action='store_true', help='Disable automatic job release when storage exceeds 75%')
     parser.add_argument('--max-join-growth-rate', type=int, default=10485760, help='Maximum JOIN storage growth per second in bytes')
+    parser.add_argument('--failure-count', type=int, default=0, help='Number of repos to kill (default: 0, no failure)')
+    parser.add_argument('--failure-nodes', type=str, default='', help='Comma-separated node names to kill (default: nodes with most claims)')
+    parser.add_argument('--failure-wait', type=int, default=0, help='Seconds to wait after replication before killing (default: 0 = immediately)')
+    parser.add_argument('--failure-recovery-timeout', type=int, default=30, help='Timeout for recovery after failure (seconds)')
     args = parser.parse_args()
 
     sys.argv = [sys.argv[0]]
@@ -94,6 +98,8 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     setLogLevel('info')
+    
+    experiment_start_time = time.time()
     
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -243,6 +249,12 @@ def main():
     else:
         producer_nodes = repo_hosts[:args.producer_count]
 
+    expected_commands = len(producer_nodes) * args.command_count
+    min_replication_time = (expected_commands / args.command_rate) * 1.5
+    if args.replication_timeout < min_replication_time:
+        args.replication_timeout = int(min_replication_time * 5) + 10
+        info(f'Auto-adjusted replication timeout to {args.replication_timeout}s (5x multiplier) for {expected_commands} commands\n')
+
     info(f'Running {len(producer_nodes)} producer(s)...\n')
     for producer_node in producer_nodes:
         info(f'  Starting producer on {producer_node.name}...\n')
@@ -251,26 +263,190 @@ def main():
         result = producer_node.cmd(f'timeout {args.producer_timeout}s {args.producer_bin} -count {args.command_count} -rate {args.command_rate}{cmd_type_flag}{join_ratio_flag} 2>&1')
         info(f'  Producer {producer_node.name} output: {result}\n')
 
-    expected_commands = len(producer_nodes) * args.command_count
     expected_claims = expected_commands * args.replication_factor
     
     info(f'Waiting for replication (timeout={args.replication_timeout}s, expecting {expected_commands} commands, {expected_claims} claims)...\n')
     start_time = time.time()
     replicated = False
     last_claim_count = 0
+    last_progress_time = time.time()
     
     while time.time() - start_time < args.replication_timeout:
         claim_count = count_job_claims(results_dir)
         if claim_count != last_claim_count:
             info(f'  Job claims: {claim_count}/{expected_claims}\n')
             last_claim_count = claim_count
+            last_progress_time = time.time()
         
-        if claim_count >= expected_claims:
+        # Check if we've achieved full replication
+        commands = build_replication_timeline(results_dir)
+        commands_at_rf = sum(1 for cmd in commands.values() if cmd['final_replication'] == args.replication_factor)
+        commands_under = sum(1 for cmd in commands.values() if cmd['final_replication'] < args.replication_factor)
+        
+        if commands_under == 0 and commands_at_rf == expected_commands:
             replicated = True
+            info(f'  All {expected_commands} commands achieved RF={args.replication_factor}\n')
             break
+        
+        # If no progress for 30s, break to avoid infinite loop
+        if time.time() - last_progress_time > 30:
+            info(f'  No progress for 30s, stopping at {commands_at_rf}/{expected_commands} commands at RF\n')
+            break
+            
         time.sleep(1)
+    
+    # Rebuild commands to get final counts
+    commands = build_replication_timeline(results_dir)
 
     replication_time = time.time() - start_time
+
+    failure_metadata = {'failure_enabled': False}
+    
+    if args.failure_count > 0 and replicated:
+        info(f'=== FAILURE SIMULATION ===\n')
+        info(f'Failure count: {args.failure_count}\n')
+        
+        commands_before_failure = build_replication_timeline(results_dir)
+        
+        node_claim_counts = {}
+        claimed = {}
+        
+        for log_file in Path(results_dir).glob('events-*.jsonl'):
+            node_name = log_file.stem.replace('events-', '')
+            try:
+                with open(log_file) as f:
+                    for line in f:
+                        try:
+                            event = json.loads(line.strip())
+                            if event.get('event') == 'job_claimed':
+                                target = event.get('target', '')
+                                if target:
+                                    if target not in claimed:
+                                        claimed[target] = set()
+                                    claimed[target].add(node_name)
+                        except json.JSONDecodeError:
+                            pass
+            except FileNotFoundError:
+                pass
+        
+        for target, nodes in claimed.items():
+            for node in nodes:
+                node_claim_counts[node] = node_claim_counts.get(node, 0) + 1
+        
+        info(f'Node claim counts: {node_claim_counts}\n')
+        
+        nodes_to_kill = []
+        if args.failure_nodes:
+            nodes_to_kill = [n.strip() for n in args.failure_nodes.split(',')]
+            info(f'Specified nodes to kill: {nodes_to_kill}\n')
+        else:
+            sorted_nodes = sorted(node_claim_counts.items(), key=lambda x: x[1], reverse=True)
+            nodes_to_kill = [n[0] for n in sorted_nodes[:args.failure_count]]
+            info(f'Auto-selected nodes to kill (by claim count): {nodes_to_kill}\n')
+        
+        affected_commands = {}
+        for target, nodes in claimed.items():
+            for node in nodes_to_kill:
+                if node in nodes:
+                    affected_commands[target] = commands_before_failure.get(target, {})
+                    break
+        
+        info(f'Commands affected by failure: {len(affected_commands)}\n')
+        
+        pre_failure_data = {
+            'commands_at_rf': sum(1 for c in commands_before_failure.values() if c['final_replication'] == args.replication_factor),
+            'commands_under': sum(1 for c in commands_before_failure.values() if c['final_replication'] < args.replication_factor),
+            'affected_commands': list(affected_commands.keys()),
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        }
+        
+        if args.failure_wait > 0:
+            info(f'Waiting {args.failure_wait}s before killing nodes...\n')
+            time.sleep(args.failure_wait)
+        
+        info(f'Killing repos on nodes: {nodes_to_kill}\n')
+        for node_name in nodes_to_kill:
+            for host in repo_hosts:
+                if host.name == node_name:
+                    host.cmd('pkill -9 -f "repo --event-log" 2>/dev/null || true')
+                    info(f'  Killed repo on {node_name}\n')
+                    break
+        
+        failure_time = time.time()
+        
+        info(f'Waiting for recovery (timeout={args.failure_recovery_timeout}s)...\n')
+        recovery_deadline = time.time() + args.failure_recovery_timeout
+        recovered = False
+        recovery_time_ms = 0
+        
+        while time.time() < recovery_deadline:
+            commands_after = build_replication_timeline(results_dir)
+            
+            all_recovered = True
+            for target in affected_commands:
+                if target in commands_after:
+                    if commands_after[target]['final_replication'] < args.replication_factor:
+                        all_recovered = False
+                        break
+                else:
+                    all_recovered = False
+                    break
+            
+            if all_recovered and len(affected_commands) > 0:
+                recovery_time_ms = (time.time() - failure_time) * 1000
+                recovered = True
+                info(f'Recovery achieved in {recovery_time_ms:.2f}ms\n')
+                break
+            
+            time.sleep(0.5)
+        
+        commands_after_failure = build_replication_timeline(results_dir)
+        
+        post_failure_commands_at_rf = sum(1 for c in commands_after_failure.values() if c['final_replication'] == args.replication_factor)
+        post_failure_commands_under = sum(1 for c in commands_after_failure.values() if c['final_replication'] < args.replication_factor)
+        
+        commands_recovered = 0
+        commands_lost = 0
+        for target in affected_commands:
+            if target in commands_after_failure:
+                if commands_after_failure[target]['final_replication'] >= args.replication_factor:
+                    commands_recovered += 1
+                else:
+                    commands_lost += 1
+            else:
+                commands_lost += 1
+        
+        recovery_data = {
+            'achieved': recovered,
+            'recovery_time_ms': recovery_time_ms,
+            'commands_recovered': commands_recovered,
+            'commands_lost': commands_lost,
+            'timeout': args.failure_recovery_timeout
+        }
+        
+        post_failure_data = {
+            'commands_at_rf': post_failure_commands_at_rf,
+            'commands_under': post_failure_commands_under,
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        }
+        
+        failure_metadata = {
+            'failure_enabled': True,
+            'failure_count': args.failure_count,
+            'failure_nodes': nodes_to_kill,
+            'failure_wait_seconds': args.failure_wait,
+            'pre_failure': pre_failure_data,
+            'recovery': recovery_data,
+            'post_failure': post_failure_data
+        }
+        
+        info(f'=== FAILURE RESULTS ===\n')
+        info(f'Recovery achieved: {recovered}\n')
+        info(f'Recovery time: {recovery_time_ms:.2f}ms\n')
+        info(f'Commands recovered: {commands_recovered}\n')
+        info(f'Commands lost: {commands_lost}\n')
+        
+        commands = commands_after_failure
 
     info('Waiting for event logs to flush (2s)...\n')
     time.sleep(2)
@@ -278,6 +454,8 @@ def main():
     sync_interests, data_packets = count_packet_stats(results_dir)
     
     commands = build_replication_timeline(results_dir)
+    command_count = build_command_timelines(results_dir)
+    info(f'Built {command_count} command timelines\n')
     
     commands_at_rf = 0
     commands_over = 0
@@ -311,6 +489,8 @@ def main():
     topology_source = str(topo_path) if topo_path else 'generated'
     producer_node_names = [h.name for h in producer_nodes]
     
+    total_duration = time.time() - experiment_start_time
+    
     metadata = {
         'nodes': actual_nodes,
         'node_count': args.node_count,
@@ -331,10 +511,14 @@ def main():
         'replication_time_max_ms': rep_stats['max'] * 1000 if rep_stats else None,
         'replication_time_avg_ms': rep_stats['avg'] * 1000 if rep_stats else None,
         'replication_time_median_ms': rep_stats['median'] * 1000 if rep_stats else None,
+        'replication_time_p95_ms': rep_stats['p95'] * 1000 if rep_stats and rep_stats.get('p95') else None,
+        'replication_time_p99_ms': rep_stats['p99'] * 1000 if rep_stats and rep_stats.get('p99') else None,
         'update_propagation_min_ms': prop_stats['min'] * 1000 if prop_stats else None,
         'update_propagation_max_ms': prop_stats['max'] * 1000 if prop_stats else None,
         'update_propagation_avg_ms': prop_stats['avg'] * 1000 if prop_stats else None,
         'update_propagation_median_ms': prop_stats['median'] * 1000 if prop_stats else None,
+        'update_propagation_p95_ms': prop_stats['p95'] * 1000 if prop_stats and prop_stats.get('p95') else None,
+        'update_propagation_p99_ms': prop_stats['p99'] * 1000 if prop_stats and prop_stats.get('p99') else None,
         'sync_interests': sync_interests,
         'data_packets': data_packets,
         'total_commands': total_commands,
@@ -342,6 +526,21 @@ def main():
         'commands_over': commands_over,
         'commands_under': commands_under,
         'any_ever_over_replicated': any_over_replicated,
+        'total_duration_seconds': total_duration,
+        'replication_wait_duration_seconds': replication_time,
+        'failure_enabled': failure_metadata.get('failure_enabled', False),
+        'failure_count': failure_metadata.get('failure_count', 0),
+        'failure_nodes': failure_metadata.get('failure_nodes', []),
+        'failure_wait_seconds': failure_metadata.get('failure_wait_seconds', 0),
+        'pre_failure_commands_at_rf': failure_metadata.get('pre_failure', {}).get('commands_at_rf', 0),
+        'pre_failure_commands_under': failure_metadata.get('pre_failure', {}).get('commands_under', 0),
+        'pre_failure_affected_commands': failure_metadata.get('pre_failure', {}).get('affected_commands', []),
+        'recovery_achieved': failure_metadata.get('recovery', {}).get('achieved', False),
+        'recovery_time_ms': failure_metadata.get('recovery', {}).get('recovery_time_ms', 0),
+        'recovery_commands_recovered': failure_metadata.get('recovery', {}).get('commands_recovered', 0),
+        'recovery_commands_lost': failure_metadata.get('recovery', {}).get('commands_lost', 0),
+        'post_failure_commands_at_rf': failure_metadata.get('post_failure', {}).get('commands_at_rf', 0),
+        'post_failure_commands_under': failure_metadata.get('post_failure', {}).get('commands_under', 0),
         'commands': commands
     }
     metadata_path = results_dir / 'metadata.json'
@@ -352,16 +551,17 @@ def main():
     info(f'Success: {success}\n')
     info(f'Commands: {total_commands} total, {commands_at_rf} at rf={args.replication_factor}, {commands_over} over, {commands_under} under\n')
     if rep_stats:
-        info(f'Replication time: max={rep_stats["max"]*1000:.2f}ms, avg={rep_stats["avg"]*1000:.2f}ms, median={rep_stats["median"]*1000:.2f}ms\n')
+        info(f'Replication time: max={rep_stats["max"]*1000:.2f}ms, avg={rep_stats["avg"]*1000:.2f}ms, median={rep_stats["median"]*1000:.2f}ms, p95={rep_stats["p95"]*1000:.2f}ms, p99={rep_stats["p99"]*1000:.2f}ms\n')
     else:
         info('Replication time: N/A\n')
     if prop_stats:
-        info(f'Update propagation: max={prop_stats["max"]*1000:.2f}ms, avg={prop_stats["avg"]*1000:.2f}ms, median={prop_stats["median"]*1000:.2f}ms\n')
+        info(f'Update propagation: max={prop_stats["max"]*1000:.2f}ms, avg={prop_stats["avg"]*1000:.2f}ms, median={prop_stats["median"]*1000:.2f}ms, p95={prop_stats["p95"]*1000:.2f}ms, p99={prop_stats["p99"]*1000:.2f}ms\n')
     else:
         info('Update propagation: N/A\n')
     info(f'Sync interests: {sync_interests}\n')
     info(f'Data packets: {data_packets}\n')
     info(f'Any ever over-replicated: {any_over_replicated}\n')
+    info(f'Total experiment duration: {total_duration:.2f}s\n')
 
     cleanup()
 
@@ -627,11 +827,24 @@ def calculate_replication_time(results_dir, replication_factor):
     if not rep_times:
         return None
     
+    sorted_times = sorted(rep_times)
+    n = len(sorted_times)
+    
+    def percentile(p):
+        if n == 0:
+            return None
+        idx = int(n * p / 100)
+        if idx >= n:
+            idx = n - 1
+        return sorted_times[idx]
+    
     return {
         'min': min(rep_times),
         'max': max(rep_times),
         'avg': statistics.mean(rep_times),
-        'median': statistics.median(rep_times)
+        'median': statistics.median(rep_times),
+        'p95': percentile(95) if n >= 20 else sorted_times[-1],
+        'p99': percentile(99) if n >= 100 else sorted_times[-1]
     }
 
 def calculate_update_propagation_time(results_dir, total_nodes):
@@ -738,12 +951,79 @@ def calculate_update_propagation_time(results_dir, total_nodes):
         return None
     
     import statistics
+    sorted_times = sorted(prop_times)
+    n = len(sorted_times)
+    
+    def percentile(p):
+        if n == 0:
+            return None
+        idx = int(n * p / 100)
+        if idx >= n:
+            idx = n - 1
+        return sorted_times[idx]
+    
     return {
         'min': min(prop_times),
         'max': max(prop_times),
         'avg': statistics.mean(prop_times),
-        'median': statistics.median(prop_times)
+        'median': statistics.median(prop_times),
+        'p95': percentile(95) if n >= 20 else sorted_times[-1],
+        'p99': percentile(99) if n >= 100 else sorted_times[-1]
     }
+
+def build_command_timelines(results_dir):
+    """Extract all events grouped by command target, sorted by timestamp.
+    Outputs JSON files to results/command_timelines/{sanitized_target}.json
+    """
+    import re
+    
+    all_events = []
+    
+    for log_file in Path(results_dir).glob('events-*.jsonl'):
+        node_name = log_file.stem.replace('events-', '')
+        try:
+            with open(log_file) as f:
+                for line in f:
+                    try:
+                        event = json.loads(line.strip())
+                        event['_node_name'] = node_name
+                        all_events.append(event)
+                    except json.JSONDecodeError:
+                        pass
+        except FileNotFoundError:
+            pass
+    
+    all_events.sort(key=lambda e: e.get('ts', ''))
+    
+    command_events = {}
+    
+    for event in all_events:
+        cmd_id = event.get('cmdId') or event.get('target', '')
+        if not cmd_id:
+            continue
+        
+        if cmd_id not in command_events:
+            command_events[cmd_id] = []
+        command_events[cmd_id].append(event)
+    
+    timelines_dir = Path(results_dir) / 'command_timelines'
+    timelines_dir.mkdir(exist_ok=True)
+    
+    def sanitize_filename(name):
+        return re.sub(r'[^a-zA-Z0-9]', '_', name)
+    
+    for cmd_id, events in command_events.items():
+        timeline = {
+            'commandId': cmd_id,
+            'eventCount': len(events),
+            'events': events
+        }
+        
+        filename = sanitize_filename(cmd_id) + '.json'
+        output_path = timelines_dir / filename
+        output_path.write_text(json.dumps(timeline, indent=2))
+    
+    return len(command_events)
 
 def get_command_timestamp(results_dir):
     """Get the timestamp of the first command received"""

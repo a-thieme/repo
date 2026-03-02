@@ -835,7 +835,9 @@ type NodeUpdateEncoder struct {
 	}
 	NewCommand_encoder CommandEncoder
 
-	JobRelease_encoder        InternalCommandEncoder
+	JobRelease_subencoder []struct {
+		JobRelease_encoder InternalCommandEncoder
+	}
 	JobAssignments_subencoder []struct {
 		JobAssignments_encoder JobAssignmentEncoder
 	}
@@ -879,8 +881,28 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 		encoder.NewCommand_encoder.Init(value.NewCommand)
 	}
 
-	if value.JobRelease != nil {
-		encoder.JobRelease_encoder.Init(value.JobRelease)
+	{
+		JobRelease_l := len(value.JobRelease)
+		encoder.JobRelease_subencoder = make([]struct {
+			JobRelease_encoder InternalCommandEncoder
+		}, JobRelease_l)
+		for i := 0; i < JobRelease_l; i++ {
+			pseudoEncoder := &encoder.JobRelease_subencoder[i]
+			pseudoValue := struct {
+				JobRelease *InternalCommand
+			}{
+				JobRelease: value.JobRelease[i],
+			}
+			{
+				encoder := pseudoEncoder
+				value := &pseudoValue
+				if value.JobRelease != nil {
+					encoder.JobRelease_encoder.Init(value.JobRelease)
+				}
+				_ = encoder
+				_ = value
+			}
+		}
 	}
 	{
 		JobAssignments_l := len(value.JobAssignments)
@@ -938,9 +960,25 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 	l += 3
 	l += uint(1 + enc.Nat(value.StorageUsed).EncodingLength())
 	if value.JobRelease != nil {
-		l += 3
-		l += uint(enc.TLNum(encoder.JobRelease_encoder.Length).EncodingLength())
-		l += encoder.JobRelease_encoder.Length
+		for seq_i, seq_v := range value.JobRelease {
+			pseudoEncoder := &encoder.JobRelease_subencoder[seq_i]
+			pseudoValue := struct {
+				JobRelease *InternalCommand
+			}{
+				JobRelease: seq_v,
+			}
+			{
+				encoder := pseudoEncoder
+				value := &pseudoValue
+				if value.JobRelease != nil {
+					l += 3
+					l += uint(enc.TLNum(encoder.JobRelease_encoder.Length).EncodingLength())
+					l += encoder.JobRelease_encoder.Length
+				}
+				_ = encoder
+				_ = value
+			}
+		}
 	}
 	if value.JobAssignments != nil {
 		for seq_i, seq_v := range value.JobAssignments {
@@ -1027,13 +1065,29 @@ func (encoder *NodeUpdateEncoder) EncodeInto(value *NodeUpdate, buf []byte) {
 	buf[pos] = byte(enc.Nat(value.StorageUsed).EncodeInto(buf[pos+1:]))
 	pos += uint(1 + buf[pos])
 	if value.JobRelease != nil {
-		buf[pos] = 253
-		binary.BigEndian.PutUint16(buf[pos+1:], uint16(660))
-		pos += 3
-		pos += uint(enc.TLNum(encoder.JobRelease_encoder.Length).EncodeInto(buf[pos:]))
-		if encoder.JobRelease_encoder.Length > 0 {
-			encoder.JobRelease_encoder.EncodeInto(value.JobRelease, buf[pos:])
-			pos += encoder.JobRelease_encoder.Length
+		for seq_i, seq_v := range value.JobRelease {
+			pseudoEncoder := &encoder.JobRelease_subencoder[seq_i]
+			pseudoValue := struct {
+				JobRelease *InternalCommand
+			}{
+				JobRelease: seq_v,
+			}
+			{
+				encoder := pseudoEncoder
+				value := &pseudoValue
+				if value.JobRelease != nil {
+					buf[pos] = 253
+					binary.BigEndian.PutUint16(buf[pos+1:], uint16(660))
+					pos += 3
+					pos += uint(enc.TLNum(encoder.JobRelease_encoder.Length).EncodeInto(buf[pos:]))
+					if encoder.JobRelease_encoder.Length > 0 {
+						encoder.JobRelease_encoder.EncodeInto(value.JobRelease, buf[pos:])
+						pos += encoder.JobRelease_encoder.Length
+					}
+				}
+				_ = encoder
+				_ = value
+			}
 		}
 	}
 	if value.JobAssignments != nil {
@@ -1177,7 +1231,21 @@ func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritic
 				if true {
 					handled = true
 					handled_JobRelease = true
-					value.JobRelease, err = context.JobRelease_context.Parse(reader.Delegate(int(l)), ignoreCritical)
+					if value.JobRelease == nil {
+						value.JobRelease = make([]*InternalCommand, 0)
+					}
+					{
+						pseudoValue := struct {
+							JobRelease *InternalCommand
+						}{}
+						{
+							value := &pseudoValue
+							value.JobRelease, err = context.JobRelease_context.Parse(reader.Delegate(int(l)), ignoreCritical)
+							_ = value
+						}
+						value.JobRelease = append(value.JobRelease, pseudoValue.JobRelease)
+					}
+					progress--
 				}
 			case 663:
 				if true {
@@ -1230,7 +1298,7 @@ func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritic
 		err = enc.ErrSkipRequired{Name: "StorageUsed", TypeNum: 659}
 	}
 	if !handled_JobRelease && err == nil {
-		value.JobRelease = nil
+		// sequence - skip
 	}
 	if !handled_JobAssignments && err == nil {
 		// sequence - skip

@@ -45,10 +45,14 @@ type Metadata struct {
 	ReplicationTimeMaxMs      *float64               `json:"replication_time_max_ms"`
 	ReplicationTimeAvgMs      *float64               `json:"replication_time_avg_ms"`
 	ReplicationTimeMedianMs   *float64               `json:"replication_time_median_ms"`
+	ReplicationTimeP95Ms      *float64               `json:"replication_time_p95_ms"`
+	ReplicationTimeP99Ms      *float64               `json:"replication_time_p99_ms"`
 	UpdatePropagationMinMs    *float64               `json:"update_propagation_min_ms"`
 	UpdatePropagationMaxMs    *float64               `json:"update_propagation_max_ms"`
 	UpdatePropagationAvgMs    *float64               `json:"update_propagation_avg_ms"`
 	UpdatePropagationMedianMs *float64               `json:"update_propagation_median_ms"`
+	UpdatePropagationP95Ms    *float64               `json:"update_propagation_p95_ms"`
+	UpdatePropagationP99Ms    *float64               `json:"update_propagation_p99_ms"`
 	JobClaims                 int                    `json:"job_claims"`
 	SyncInterests             uint64                 `json:"sync_interests"`
 	DataPackets               uint64                 `json:"data_packets"`

@@ -1,3 +1,4 @@
+TODO: remove repeated information, make it more concise
 # Distributed NDN Data Repository
 
 ## Overview
@@ -8,9 +9,9 @@ This project implements a distributed Named Data Networking (NDN) data repositor
 
 The system consists of three main components:
 
-- **Repo Component**: Main repository that manages storage commands, distributes jobs across nodes, and handles replication
-- **Producer Component**: Sends commands to the repository for processing
-- **TLV Component**: Defines data structures and protocols for command and node communication
+- **Repo**: Main repository that manages storage commands, distributes jobs across nodes, and handles replication
+- **Producer**: Sends commands to the repository for processing
+- **TLV**: Defines data structures and protocols for command and node communication
 
 ## Core Features
 
@@ -23,19 +24,13 @@ The system consists of three main components:
 
 ### Replication System
 - Replication factor management (default: 3)
-- Intelligent job claiming based on node availability
+- Job claiming based on node availability
 - Automatic redistribution when nodes go offline
-
-### Node Detection and Resilience
-- **Node Detection**: Detects nodes offline after 3 consecutive missed heartbeats
-- **Heartbeat Monitoring**: Continuous monitoring of node status through heartbeat mechanism
-- **Resilience**: System remains operational when nodes go offline
 
 ### Monitoring Mechanisms
 - **Heartbeat Monitoring System**: Background monitoring of node status
 - **Job Claim Monitoring**: Monitors job claim delays and triggers replication
 - **Storage Monitoring**: Continuous storage usage tracking and simulation
-- **Re-evaluation**: Re-evaluates replication decisions when needed
 
 ## Getting Started
 
@@ -47,17 +42,9 @@ The repository receives commands and distributes them as jobs across the node po
 - Jobs are distributed across nodes based on replication factor
 - Each node monitors its own storage usage and executes jobs it claims
 
-### Recent Implementation
-The system has been enhanced with:
-- Node detection mechanism (3 missed heartbeats detection)
-- Heartbeat monitoring system for resilience
-- Monitoring triggers for re-evaluation
-- Automatic job release mechanism (triggers at 75% capacity)
-- Deterministic storage simulation for testing
-
 ## Components
 
-### Repo Component
+### Repo
 Main repository implementation that handles:
 - Storage command distribution
 - Job execution management
@@ -67,13 +54,13 @@ Main repository implementation that handles:
 - Job release mechanism
 - Storage simulation
 
-### Producer Component
+### Producer
 Command sender that:
 - Sends commands to the repository
 - Uses TLV protocol for communication
 - Implements command sending and validation
 
-### TLV Component
+### TLV
 Defines data structures:
 - Command structure
 - NodeUpdate structure (with JobRelease field)
@@ -159,11 +146,11 @@ go test -v -run 'TestFailureRecovery' -timeout 5m ./repo/...
 # Build binaries and Docker image
 make -C experiments build
 
-# Calibrate timeouts (recommended first run)
-make -C experiments calibrate
+# Calibrate timeouts (recommended first run, use CALIBRATE_ITER=5 for accuracy)
+make -C experiments calibrate CALIBRATE_NODES=24 CALIBRATE_ITER=5
 
-# Run producer scaling experiments
-make -C experiments run
+# Run producer scaling experiments (use -j5 for parallel - 3.5x faster)
+make -C experiments run -j5
 
 # Custom configuration
 make -C experiments run NODE_COUNTS="24" PRODUCER_COUNTS="1 5 10 24"

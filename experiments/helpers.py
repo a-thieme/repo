@@ -84,6 +84,8 @@ def collect_results(run_dir: Path, csv_path: Optional[Path] = None, md_path: Opt
             'commands_over': meta.get('commands_over', 0),
             'commands_under': meta.get('commands_under', 0),
             'any_ever_over': meta.get('any_ever_over_replicated', False),
+            'total_duration_seconds': meta.get('total_duration_seconds', 0),
+            'replication_wait_duration_seconds': meta.get('replication_wait_duration_seconds', 0),
         }
         results.append(result)
     
@@ -104,7 +106,11 @@ def write_csv(results: List[Dict], csv_path: Path):
     with open(csv_path, 'w') as f:
         f.write('nodes,producers,replicated,rep_min_ms,rep_max_ms,rep_avg_ms,rep_med_ms,')
         f.write('prop_min_ms,prop_max_ms,prop_avg_ms,prop_med_ms,')
-        f.write('sync_interests,data_packets,total_commands,commands_at_rf,commands_over,commands_under,any_ever_over\n')
+        f.write('sync_interests,data_packets,total_commands,commands_at_rf,commands_over,commands_under,any_ever_over,')
+        f.write('total_duration_seconds,replication_wait_duration_seconds,')
+        f.write('failure_enabled,failure_count,failure_nodes,recovery_achieved,recovery_time_ms,')
+        f.write('pre_failure_commands_at_rf,pre_failure_commands_under,')
+        f.write('post_failure_commands_at_rf,post_failure_commands_under\n')
         
         for r in results:
             f.write(f"{r['nodes']},{r['producers']},{str(r['replicated']).lower()},")
@@ -112,7 +118,17 @@ def write_csv(results: List[Dict], csv_path: Path):
             f.write(f"{r['prop_min_ms']:.2f},{r['prop_max_ms']:.2f},{r['prop_avg_ms']:.2f},{r['prop_med_ms']:.2f},")
             f.write(f"{r['sync_interests']},{r['data_packets']},{r['total_commands']},")
             f.write(f"{r['commands_at_rf']},{r['commands_over']},{r['commands_under']},")
-            f.write(f"{str(r['any_ever_over']).lower()}\n")
+            f.write(f"{str(r['any_ever_over']).lower()},")
+            f.write(f"{r['total_duration_seconds']:.2f},{r['replication_wait_duration_seconds']:.2f},")
+            f.write(f"{str(r.get('failure_enabled', False)).lower()},")
+            f.write(f"{r.get('failure_count', 0)},")
+            f.write(f"'{r.get('failure_nodes', [])}',")
+            f.write(f"{str(r.get('recovery_achieved', False)).lower()},")
+            f.write(f"{r.get('recovery_time_ms', 0):.2f},")
+            f.write(f"{r.get('pre_failure_commands_at_rf', 0)},")
+            f.write(f"{r.get('pre_failure_commands_under', 0)},")
+            f.write(f"{r.get('post_failure_commands_at_rf', 0)},")
+            f.write(f"{r.get('post_failure_commands_under', 0)}\n")
 
 
 def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
@@ -121,17 +137,37 @@ def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
         f.write('# Experiment Results\n\n')
         f.write(f'**Run:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n\n')
         
-        f.write('## Results\n\n')
-        f.write('| Nodes | Producers | Replicated | Rep Max (ms) | Prop Max (ms) | ')
-        f.write('Total Cmds | At RF | Over | Under | Any Over |\n')
-        f.write('|-------|-----------|------------|--------------|---------------|')
-        f.write('------------|-------|------|-------|----------|\n')
+        has_failure = any(r.get('failure_enabled', False) for r in results)
         
-        for r in results:
-            f.write(f"| {r['nodes']} | {r['producers']} | {str(r['replicated']).lower()} | ")
-            f.write(f"{r['rep_max_ms']:.2f} | {r['prop_max_ms']:.2f} | ")
-            f.write(f"{r['total_commands']} | {r['commands_at_rf']} | {r['commands_over']} | ")
-            f.write(f"{r['commands_under']} | {str(r['any_ever_over']).lower()} |\n")
+        if has_failure:
+            f.write('## Results (with Failure Simulation)\n\n')
+            f.write('| Nodes | Producers | Replicated | Rep Max (ms) | Prop Max (ms) | ')
+            f.write('Total Cmds | At RF | Over | Under | Fail | Killed | Recov | Recov Time (ms) |\n')
+            f.write('|-------|-----------|------------|--------------|---------------|')
+            f.write('------------|-------|------|-------|------|--------|-------|----------------|\n')
+            
+            for r in results:
+                f.write(f"| {r['nodes']} | {r['producers']} | {str(r['replicated']).lower()} | ")
+                f.write(f"{r['rep_max_ms']:.2f} | {r['prop_max_ms']:.2f} | ")
+                f.write(f"{r['total_commands']} | {r['commands_at_rf']} | {r['commands_over']} | ")
+                f.write(f"{r['commands_under']} | ")
+                f.write(f"{str(r.get('failure_enabled', False)).lower()} | ")
+                f.write(f"{r.get('failure_count', 0)} | ")
+                f.write(f"{str(r.get('recovery_achieved', False)).lower()} | ")
+                f.write(f"{r.get('recovery_time_ms', 0):.2f} |\n")
+        else:
+            f.write('## Results\n\n')
+            f.write('| Nodes | Producers | Replicated | Rep Max (ms) | Prop Max (ms) | ')
+            f.write('Total Cmds | At RF | Over | Under | Any Over | Duration (s) |\n')
+            f.write('|-------|-----------|------------|--------------|---------------|')
+            f.write('------------|-------|------|-------|----------|---------------|\n')
+            
+            for r in results:
+                f.write(f"| {r['nodes']} | {r['producers']} | {str(r['replicated']).lower()} | ")
+                f.write(f"{r['rep_max_ms']:.2f} | {r['prop_max_ms']:.2f} | ")
+                f.write(f"{r['total_commands']} | {r['commands_at_rf']} | {r['commands_over']} | ")
+                f.write(f"{r['commands_under']} | {str(r['any_ever_over']).lower()} | ")
+                f.write(f"{r['total_duration_seconds']:.2f} |\n")
 
 
 def print_summary(results: List[Dict]):
@@ -140,14 +176,32 @@ def print_summary(results: List[Dict]):
         print("No results found.")
         return
     
-    print("\n=== EXPERIMENT RESULTS ===\n")
-    print(f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} {'RepMax':<10} {'PropMax':<10} {'Total':<6} {'AtRF':<5} {'Over':<5} {'Under':<6}")
-    print("-" * 75)
+    has_failure = any(r.get('failure_enabled', False) for r in results)
     
-    for r in results:
-        print(f"{r['nodes']:<6} {r['producers']:<6} {str(r['replicated']).lower():<8} "
-              f"{r['rep_max_ms']:<10.2f} {r['prop_max_ms']:<10.2f} "
-              f"{r['total_commands']:<6} {r['commands_at_rf']:<5} {r['commands_over']:<5} {r['commands_under']:<6}")
+    if has_failure:
+        print("\n=== EXPERIMENT RESULTS (with Failure Simulation) ===\n")
+        print(f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} {'RepMax':<10} {'PropMax':<10} {'Total':<6} {'AtRF':<5} {'Fail':<5} {'Killed':<7} {'Recov':<6} {'RecovTime':<10}")
+        print("-" * 90)
+        
+        for r in results:
+            recov_time = r.get('recovery_time_ms', 0)
+            recov_str = f"{recov_time:.0f}ms" if recov_time > 0 else "N/A"
+            print(f"{r['nodes']:<6} {r['producers']:<6} {str(r['replicated']).lower():<8} "
+                  f"{r['rep_max_ms']:<10.2f} {r['prop_max_ms']:<10.2f} "
+                  f"{r['total_commands']:<6} {r['commands_at_rf']:<5} "
+                  f"{str(r.get('failure_enabled', False)).lower():<5} "
+                  f"{r.get('failure_count', 0):<7} "
+                  f"{str(r.get('recovery_achieved', False)).lower():<6} "
+                  f"{recov_str:<10}")
+    else:
+        print("\n=== EXPERIMENT RESULTS ===\n")
+        print(f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} {'RepMax':<10} {'PropMax':<10} {'Total':<6} {'AtRF':<5} {'Over':<5} {'Under':<6}")
+        print("-" * 75)
+        
+        for r in results:
+            print(f"{r['nodes']:<6} {r['producers']:<6} {str(r['replicated']).lower():<8} "
+                  f"{r['rep_max_ms']:<10.2f} {r['prop_max_ms']:<10.2f} "
+                  f"{r['total_commands']:<6} {r['commands_at_rf']:<5} {r['commands_over']:<5} {r['commands_under']:<6}")
 
 
 def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any]:
@@ -164,6 +218,7 @@ def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any
     svs_times = []
     rep_times = []
     prop_times = []
+    meta_values = []
     
     for iter_dir in sorted(calibration_dir.iterdir()):
         if not iter_dir.is_dir():
@@ -174,6 +229,7 @@ def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any
             try:
                 with open(metadata_file) as f:
                     meta = json.load(f)
+                    meta_values.append(meta)
                 if meta.get('replication_time_max_ms'):
                     rep_times.append(meta['replication_time_max_ms'])
             except (json.JSONDecodeError, IOError):
@@ -188,12 +244,20 @@ def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any
             prop_times.append(prop_time)
     
     max_svs = max(svs_times) if svs_times else 0
+    rep_p99 = max([meta.get('replication_time_p99_ms', 0) for meta in meta_values]) if meta_values else 0
+    prop_p99 = max([meta.get('update_propagation_p99_ms', 0) for meta in meta_values]) if meta_values else 0
     max_rep = max(rep_times) if rep_times else 0
     max_prop = max(prop_times) if prop_times else 0
-    safe_interval = max_rep + max_prop
+    
+    rep_p99_safe = rep_p99 * 1.5 if rep_p99 else 0
+    prop_p99_safe = prop_p99 * 1.5 if prop_p99 else 0
+    if rep_p99_safe and prop_p99_safe:
+        safe_interval = rep_p99_safe + prop_p99_safe
+    else:
+        safe_interval = max_rep + max_prop
     
     recommended_svs = int((max_svs * 1.25 / 1000) + 1)
-    recommended_rep = int((safe_interval * 1.25 / 1000) + 1)
+    recommended_rep = int((safe_interval / 1000) + 1)
     
     result = {
         'node_count': node_count,
@@ -201,12 +265,16 @@ def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any
         'measurements': {
             'svs_convergence_ms': svs_times,
             'replication_time_ms': rep_times,
+            'replication_time_p99_ms': rep_p99,
             'update_propagation_ms': prop_times,
+            'update_propagation_p99_ms': prop_p99,
         },
         'max_values': {
             'svs_convergence_ms': max_svs,
             'replication_time_ms': max_rep,
+            'replication_time_p99_ms': rep_p99,
             'update_propagation_ms': max_prop,
+            'update_propagation_p99_ms': prop_p99,
             'safe_interval_ms': safe_interval,
         },
         'recommended_timeouts': {

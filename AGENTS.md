@@ -13,6 +13,7 @@ This is a Go project implementing a distributed Named Data Networking (NDN) data
 # Build binaries
 make build              # Builds ./bin/repo and ./bin/producer
 make clean              # Remove built binaries
+go fmt ./...            # Format all Go code before committing
 
 # All tests
 make test               # Run all tests (5m timeout)
@@ -31,6 +32,29 @@ make test-mini-ndn      # Mini-NDN Docker tests
 # Run a single test manually
 go test -v -run 'TestEventLogger_WriteAndParse' -timeout 30s ./repo/...
 go test -v -run 'TestFailureRecovery' -timeout 5m ./repo/...
+```
+
+### Experiment Commands (in experiments/)
+
+```bash
+# Build + copy keys + build Docker image
+make -C experiments build
+
+# Run timeout calibration (outputs to experiments/results/calibration/)
+# Use CALIBRATE_ITER=5 for more accurate measurements
+make -C experiments calibrate CALIBRATE_NODES=24 CALIBRATE_ITER=5
+
+# Run single experiment
+make -C experiments single NODES=24 PRODUCERS=1
+
+# Run single experiment with failure simulation (kill 1 node after replication)
+make -C experiments single NODES=24 PRODUCERS=1 COMMAND_COUNT=20 FAILURE_COUNT=1
+
+# Run experiment suite (use -j5 for parallel - 3.5x faster, identical results)
+make -C experiments run NODE_COUNTS="5 24" PRODUCER_COUNTS="1 4" -j5
+
+# Interactive debugging shell
+make -C experiments shell NODES=5
 ```
 
 ## Code Style Guidelines
@@ -192,4 +216,32 @@ make build
 # Or manually:
 go build -o bin/repo ./repo
 go build -o bin/producer ./producer
+```
+
+### Timeout Configuration
+Default timeouts are calibrated for the testbed topology (real link delays):
+- `--svs-timeout`: 8s (SVS health check)
+- `--producer-timeout`: 1s (Producer command timeout)
+- `--replication-timeout`: 1s (Replication wait timeout)
+
+Run calibration to measure realistic values:
+```bash
+make test-timing  # Uses Docker/mini-ndn
+# Or in experiments/:
+make calibrate CALIBRATE_NODES=24 CALIBRATE_ITER=5
+```
+
+Calibration now uses 99th percentile + 50% buffer for recommended timeouts. Results include:
+- `replication_time_p95_ms`, `replication_time_p99_ms`
+- `update_propagation_p95_ms`, `update_propagation_p99_ms`
+
+### Topology Files
+The project includes mini-ndn topology configurations in `experiments/`:
+- `testbed_topology.conf` - Real NDN testbed topology with 24 nodes and actual link latencies
+- `full_mesh_topology.conf` - Full mesh topology for testing (all 10ms links)
+
+The testbed topology uses real link delays (RTT/2 in ms) from the NDN testbed. Delays MUST include the `ms` suffix:
+```ini
+UCLA:FRANKFURT delay=75ms   # Correct
+UCLA:FRANKFURT delay=75     # Wrong - will be ignored!
 ```

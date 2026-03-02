@@ -14,10 +14,11 @@ import (
 )
 
 var (
-	failureNodeCount    = flag.Int("failure-nodes", 5, "node count for failure tests")
+	failureNodeCount    = flag.Int("failure-nodes", 7, "node count for failure tests")
 	failureRF           = flag.Int("failure-rf", 3, "replication factor for failure tests")
 	failureCount        = flag.Int("failure-count", 1, "number of repos to kill (default: 1)")
 	failureRecoveryWait = flag.Duration("failure-recovery-timeout", 30*time.Second, "timeout to wait for recovery after failure")
+	failureCommandCount = flag.Int("failure-commands", 20, "number of commands to send before failure")
 )
 
 type failureTestConfig struct {
@@ -26,6 +27,7 @@ type failureTestConfig struct {
 	replicationFactor int
 	failureCount      int
 	commandType       string
+	commandCount      int
 }
 
 func TestFailureRecovery_SingleRepoDown(t *testing.T) {
@@ -35,6 +37,7 @@ func TestFailureRecovery_SingleRepoDown(t *testing.T) {
 		replicationFactor: *failureRF,
 		failureCount:      1,
 		commandType:       "insert",
+		commandCount:      *failureCommandCount,
 	})
 }
 
@@ -48,6 +51,7 @@ func TestFailureRecovery_MultipleReposDown(t *testing.T) {
 		replicationFactor: *failureRF,
 		failureCount:      2,
 		commandType:       "insert",
+		commandCount:      *failureCommandCount,
 	})
 }
 
@@ -78,10 +82,15 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 		t.Log("WARNING: SVS not healthy - node updates not exchanged between all peers")
 	}
 
-	t.Logf("Running producer to send command (timeout=%v)...", *producerTimeout)
-	ctx, cancel := context.WithTimeout(context.Background(), *producerTimeout)
+	minProducerTime := time.Duration(cfg.commandCount) * 200 * time.Millisecond
+	actualProducerTimeout := *producerTimeout
+	if actualProducerTimeout < minProducerTime {
+		actualProducerTimeout = minProducerTime + 5*time.Second
+	}
+	t.Logf("Running producer to send %d commands (timeout=%v)...", cfg.commandCount, actualProducerTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), actualProducerTimeout)
 	defer cancel()
-	producerCmd := exec.CommandContext(ctx, producerBinary, "-type", cfg.commandType)
+	producerCmd := exec.CommandContext(ctx, producerBinary, "-type", cfg.commandType, "-count", fmt.Sprintf("%d", cfg.commandCount))
 	producerOutput, err := producerCmd.CombinedOutput()
 	if err != nil {
 		t.Logf("Producer error: %v", err)
@@ -104,8 +113,37 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 		t.Logf("  %s: claimed by %v", target, nodes)
 	}
 
-	reposToKill := repos[len(repos)-cfg.failureCount:]
-	t.Logf("Killing %d repo(s) to simulate failure...", cfg.failureCount)
+	nodeClaimCounts := make(map[string]int)
+	for _, nodes := range commandsBeforeFailure {
+		for _, node := range nodes {
+			nodeClaimCounts[node]++
+		}
+	}
+
+	var reposToKill []*repoProcess
+	if cfg.failureCount == 1 {
+		maxClaims := 0
+		var nodeToKill string
+		for node, count := range nodeClaimCounts {
+			if count > maxClaims {
+				maxClaims = count
+				nodeToKill = node
+			}
+		}
+		if nodeToKill != "" {
+			for _, r := range repos {
+				if r.nodeID == nodeToKill {
+					reposToKill = []*repoProcess{r}
+					break
+				}
+			}
+		}
+	}
+	if reposToKill == nil {
+		reposToKill = repos[:cfg.failureCount]
+	}
+
+	t.Logf("Killing %d repo(s) to simulate failure...", len(reposToKill))
 	for _, r := range reposToKill {
 		t.Logf("  Killing repo %s", r.nodeID)
 		r.cmd.Process.Kill()
@@ -357,6 +395,7 @@ func TestFailureRecovery_CascadingFailures(t *testing.T) {
 		replicationFactor: 3,
 		failureCount:      2,
 		commandType:       "insert",
+		commandCount:      *failureCommandCount,
 	}
 
 	restore := setupCSCache(false)
@@ -381,10 +420,15 @@ func TestFailureRecovery_CascadingFailures(t *testing.T) {
 		t.Log("WARNING: SVS not healthy")
 	}
 
-	t.Logf("Running producer to send command...")
-	ctx, cancel := context.WithTimeout(context.Background(), *producerTimeout)
+	minProducerTime := time.Duration(cfg.commandCount) * 200 * time.Millisecond
+	actualProducerTimeout := *producerTimeout
+	if actualProducerTimeout < minProducerTime {
+		actualProducerTimeout = minProducerTime + 5*time.Second
+	}
+	t.Logf("Running producer to send %d commands (timeout=%v)...", cfg.commandCount, actualProducerTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), actualProducerTimeout)
 	defer cancel()
-	producerCmd := exec.CommandContext(ctx, producerBinary, "-type", cfg.commandType)
+	producerCmd := exec.CommandContext(ctx, producerBinary, "-type", cfg.commandType, "-count", fmt.Sprintf("%d", cfg.commandCount))
 	producerOutput, err := producerCmd.CombinedOutput()
 	if err != nil {
 		t.Logf("Producer error: %v", err)

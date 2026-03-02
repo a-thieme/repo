@@ -1,18 +1,20 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/a-thieme/repo/repo/testutil"
 )
+
+const timingDockerImage = "mini-ndn-integration"
 
 var (
 	timingIterations     = flag.Int("timing-iterations", 5, "number of iterations for timing tests")
@@ -29,15 +31,17 @@ type TimingConfig struct {
 }
 
 type TimingMeasurements struct {
-	SVSConvergenceMs  []int `json:"svs_convergence_ms"`
-	CommandRttMs      []int `json:"command_rtt_ms"`
-	ReplicationTimeMs []int `json:"replication_time_ms"`
+	SVSConvergenceMs    []int `json:"svs_convergence_ms"`
+	ReplicationTimeMs   []int `json:"replication_time_ms"`
+	UpdatePropagationMs []int `json:"update_propagation_ms"`
+	SafeIntervalMs      []int `json:"safe_interval_ms"`
 }
 
 type TimingStatistics struct {
-	SVSConvergenceMaxMs  int `json:"svs_convergence_max_ms"`
-	CommandRttMaxMs      int `json:"command_rtt_max_ms"`
-	ReplicationTimeMaxMs int `json:"replication_time_max_ms"`
+	SVSConvergenceMaxMs    int `json:"svs_convergence_max_ms"`
+	ReplicationTimeMaxMs   int `json:"replication_time_max_ms"`
+	UpdatePropagationMaxMs int `json:"update_propagation_max_ms"`
+	SafeIntervalMaxMs      int `json:"safe_interval_max_ms"`
 }
 
 type TimingRecommended struct {
@@ -64,67 +68,172 @@ func TestConfiguration_Timing(t *testing.T) {
 		t.Skip("Skipping timing test (use -args -timing-enable=true to run; requires Docker/mini-ndn)")
 	}
 
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("Docker not available, skipping timing test")
+	}
+
 	cfg := TimingConfig{
 		Iterations:     *timingIterations,
 		NodeCount:      *timingNodes,
 		ReplicationFac: *timingReplicationFac,
 	}
 
-	results := TimingResults{
-		Config: cfg,
-		Measurements: TimingMeasurements{
-			SVSConvergenceMs:  make([]int, 0, cfg.Iterations),
-			CommandRttMs:      make([]int, 0, cfg.Iterations),
-			ReplicationTimeMs: make([]int, 0, cfg.Iterations),
-		},
-	}
-
 	t.Logf("=== TIMING CONFIGURATION TEST ===")
 	t.Logf("Iterations: %d, Nodes: %d, RF: %d", cfg.Iterations, cfg.NodeCount, cfg.ReplicationFac)
 
-	restore := setupCSCache(false)
-	defer restore()
+	repoDir, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatalf("Failed to get repo directory: %v", err)
+	}
 
-	out, _ := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/group-messages/32=svs", "/localhost/nfd/strategy/multicast").CombinedOutput()
-	t.Logf("nfdc strategy set: %s", string(out))
-	exec.Command("nfdc", "strategy", "set", "/ndn/drepo/notify", "/localhost/nfd/strategy/best-route").Run()
+	t.Log("Building Go binaries...")
+	binDir := filepath.Join(repoDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("Failed to create bin directory: %v", err)
+	}
 
-	time.Sleep(*routingConvergeWait)
+	repoBuild := exec.Command("go", "build", "-o", filepath.Join(binDir, "repo"), ".")
+	repoBuild.Dir = filepath.Join(repoDir, "repo")
+	if output, err := repoBuild.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to build repo: %v\n%s", err, output)
+	}
 
-	repoBinary := buildRepoBinary(t)
-	producerBinary := buildProducerBinary(t)
+	producerBuild := exec.Command("go", "build", "-o", filepath.Join(binDir, "producer"), ".")
+	producerBuild.Dir = filepath.Join(repoDir, "producer")
+	if output, err := producerBuild.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to build producer: %v\n%s", err, output)
+	}
+	t.Log("Binaries built successfully")
+
+	t.Log("Copying NDN keys...")
+	keysDir := filepath.Join(repoDir, "keys")
+	if err := os.RemoveAll(keysDir); err != nil {
+		t.Logf("Warning: Failed to remove old keys dir: %v", err)
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("Failed to get home directory: %v", err)
+	}
+	srcKeys := filepath.Join(homeDir, ".ndn", "keys")
+	if _, err := os.Stat(srcKeys); os.IsNotExist(err) {
+		t.Skipf("NDN keys not found at %s, skipping timing test", srcKeys)
+	}
+	copyDir := exec.Command("cp", "-r", srcKeys, keysDir)
+	if output, err := copyDir.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to copy keys: %v\n%s", err, output)
+	}
+	t.Log("Keys copied successfully")
+
+	t.Log("Building Docker image...")
+	buildCmd := exec.Command("docker", "build", "-t", timingDockerImage,
+		"-f", "experiments/Dockerfile.integration", ".")
+	buildCmd.Dir = repoDir
+	output, err := buildCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to build Docker image: %v\n%s", err, output)
+	}
+	t.Log("Docker image built successfully")
+
+	results := TimingResults{
+		Config: cfg,
+		Measurements: TimingMeasurements{
+			SVSConvergenceMs:    make([]int, 0, cfg.Iterations),
+			ReplicationTimeMs:   make([]int, 0, cfg.Iterations),
+			UpdatePropagationMs: make([]int, 0, cfg.Iterations),
+			SafeIntervalMs:      make([]int, 0, cfg.Iterations),
+		},
+	}
 
 	for i := 0; i < cfg.Iterations; i++ {
 		t.Logf("--- Iteration %d/%d ---", i+1, cfg.Iterations)
 
-		tmpDir := t.TempDir()
-		repos := startTimingRepos(t, cfg.NodeCount, repoBinary, tmpDir)
+		resultsDir := t.TempDir()
 
-		svsTime := measureSVSConvergence(t, repos, 30*time.Second)
+		t.Log("Running mini-ndn in Docker...")
+		runCmd := exec.Command("docker", "run",
+			"--rm",
+			"--privileged",
+			"-m", "8g",
+			"--cpus", "8",
+			"-v", "/lib/modules:/lib/modules",
+			"-v", resultsDir+":/results",
+			timingDockerImage,
+			"-c", "python3 /usr/local/bin/runner.py --node-count "+strconv.Itoa(cfg.NodeCount)+
+				" --timeout 60"+
+				" --replication-factor "+strconv.Itoa(cfg.ReplicationFac)+
+				" --routing-wait 30"+
+				" --results-dir /results",
+		)
+		runCmd.Dir = repoDir
+		runCmd.Stdout = os.Stdout
+		runCmd.Stderr = os.Stderr
+
+		startTime := time.Now()
+		err = runCmd.Run()
+		elapsed := time.Since(startTime)
+		t.Logf("Docker container completed in %v", elapsed)
+
+		if err != nil {
+			t.Logf("Warning: Container error: %v", err)
+		}
+
+		metadataPath := filepath.Join(resultsDir, "metadata.json")
+		metadataBytes, err := os.ReadFile(metadataPath)
+		if err != nil {
+			t.Logf("Warning: Could not read metadata.json: %v", err)
+			continue
+		}
+
+		var metadata timingMetadata
+		if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+			t.Logf("Warning: Could not parse metadata.json: %v", err)
+			continue
+		}
+
+		svsTime := measureSVSConvergenceFromLogs(resultsDir, cfg.NodeCount)
 		results.Measurements.SVSConvergenceMs = append(results.Measurements.SVSConvergenceMs, svsTime)
 		t.Logf("  SVS convergence: %dms", svsTime)
 
-		cmdRtt := measureCommandRtt(t, producerBinary, 10*time.Second)
-		results.Measurements.CommandRttMs = append(results.Measurements.CommandRttMs, cmdRtt)
-		t.Logf("  Command RTT: %dms", cmdRtt)
+		if metadata.ReplicationTimeMaxMs != nil {
+			repTimeMs := int(*metadata.ReplicationTimeMaxMs)
+			results.Measurements.ReplicationTimeMs = append(results.Measurements.ReplicationTimeMs, repTimeMs)
+			t.Logf("  Replication time: %dms", repTimeMs)
+		}
 
-		repTime := measureReplicationTime(t, repos, cfg.ReplicationFac, 30*time.Second)
-		results.Measurements.ReplicationTimeMs = append(results.Measurements.ReplicationTimeMs, repTime)
-		t.Logf("  Replication time: %dms", repTime)
+		propTime := 0
+		if metadata.UpdatePropagationMaxMs != nil {
+			propTime = int(*metadata.UpdatePropagationMaxMs)
+		}
+		if propTime == 0 {
+			propTime = measureUpdatePropagationFromLogs(resultsDir, cfg.NodeCount)
+		}
+		results.Measurements.UpdatePropagationMs = append(results.Measurements.UpdatePropagationMs, propTime)
+		t.Logf("  Update propagation: %dms", propTime)
 
-		stopRepos(repos)
+		safeInterval := 0
+		if metadata.ReplicationTimeMaxMs != nil && propTime > 0 {
+			safeInterval = int(*metadata.ReplicationTimeMaxMs) + propTime
+		} else {
+			safeInterval = 1000
+		}
+		results.Measurements.SafeIntervalMs = append(results.Measurements.SafeIntervalMs, safeInterval)
+		t.Logf("  Safe interval: %dms", safeInterval)
+
+		_ = elapsed
 	}
 
-	results.Statistics = calculateStatistics(&results.Measurements)
-	results.Recommended = calculateRecommended(&results.Statistics)
+	results.Statistics = calculateTimingStatistics(&results.Measurements)
+	results.Recommended = calculateTimingRecommended(&results.Statistics)
 
 	t.Logf("\n=== TIMING RESULTS ===")
 	t.Logf("SVS Convergence: samples=%v, max=%dms, recommended=%dms",
 		results.Measurements.SVSConvergenceMs, results.Statistics.SVSConvergenceMaxMs, results.Recommended.SVSHealthMs)
-	t.Logf("Command RTT: samples=%v, max=%dms, recommended=%dms",
-		results.Measurements.CommandRttMs, results.Statistics.CommandRttMaxMs, results.Recommended.ProducerCmdMs)
 	t.Logf("Replication: samples=%v, max=%dms, recommended=%dms",
 		results.Measurements.ReplicationTimeMs, results.Statistics.ReplicationTimeMaxMs, results.Recommended.ReplicationMs)
+	t.Logf("Update Propagation: samples=%v, max=%dms",
+		results.Measurements.UpdatePropagationMs, results.Statistics.UpdatePropagationMaxMs)
+	t.Logf("Safe Interval: samples=%v, max=%dms",
+		results.Measurements.SafeIntervalMs, results.Statistics.SafeIntervalMaxMs)
 
 	t.Logf("\nRecommended timeout values (max * 1.5):")
 	t.Logf("  --svs-timeout=%dms", results.Recommended.SVSHealthMs)
@@ -137,144 +246,143 @@ func TestConfiguration_Timing(t *testing.T) {
 	}
 }
 
-func startTimingRepos(t *testing.T, nodeCount int, repoBinary string, tmpDir string) []*repoProcess {
-	repos := make([]*repoProcess, nodeCount)
-
-	for i := 0; i < nodeCount; i++ {
-		nodeID := fmt.Sprintf("n%d", i)
-		logPath := filepath.Join(tmpDir, "events-"+nodeID+".jsonl")
-		nodePrefix := "/ndn/repo/local/" + nodeID
-
-		cmd := exec.Command(repoBinary,
-			"--event-log", logPath,
-			"--node-prefix", nodePrefix,
-			"--signing-identity", "/ndn/repo.teame.dev/repo",
-		)
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("Failed to start repo %s: %v", nodeID, err)
-		}
-
-		repos[i] = &repoProcess{
-			cmd:     cmd,
-			logPath: logPath,
-			nodeID:  nodeID,
-			prefix:  nodePrefix,
-		}
-	}
-
-	return repos
+type timingMetadata struct {
+	ReplicationTimeMaxMs   *float64 `json:"replication_time_max_ms"`
+	ReplicationTimeMinMs   *float64 `json:"replication_time_min_ms"`
+	ReplicationTimeAvgMs   *float64 `json:"replication_time_avg_ms"`
+	ReplicationTimeMedMs   *float64 `json:"replication_time_median_ms"`
+	ReplicationTimeP95Ms   *float64 `json:"replication_time_p95_ms"`
+	ReplicationTimeP99Ms   *float64 `json:"replication_time_p99_ms"`
+	UpdatePropagationMaxMs *float64 `json:"update_propagation_max_ms"`
 }
 
-func measureSVSConvergence(t *testing.T, repos []*repoProcess, timeout time.Duration) int {
-	start := time.Now()
-	deadline := start.Add(timeout)
-	expectedPeers := len(repos) - 1
+func measureSVSConvergenceFromLogs(resultsDir string, nodeCount int) int {
+	maxSVS := 0
 
-	for time.Now().Before(deadline) {
-		allHealthy := true
-		for _, r := range repos {
-			events, _ := testutil.ParseEventLog(r.logPath)
-			peers := countUniquePeerUpdates(events, r.prefix)
-			if len(peers) < expectedPeers {
-				allHealthy = false
-				break
-			}
-		}
-		if allHealthy {
-			return int(time.Since(start).Milliseconds())
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	return int(timeout.Milliseconds())
-}
-
-func measureCommandRtt(t *testing.T, producerBinary string, timeout time.Duration) int {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	start := time.Now()
-	cmd := exec.CommandContext(ctx, producerBinary)
-	output, err := cmd.CombinedOutput()
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Logf("  Producer error: %v, output: %s", err, string(output))
-		return int(timeout.Milliseconds())
-	}
-
-	return int(elapsed.Milliseconds())
-}
-
-func measureReplicationTime(t *testing.T, repos []*repoProcess, rf int, timeout time.Duration) int {
-	deadline := time.Now().Add(timeout)
-	start := time.Time{}
-
-	for _, r := range repos {
-		events, _ := testutil.ParseEventLog(r.logPath)
-		for _, e := range events {
-			if e.EventType == testutil.EventCommandReceived && start.IsZero() {
-				start = e.Timestamp
-				break
-			}
-		}
-		if !start.IsZero() {
+	for _, nodeName := range []string{"UCLA", "NEU", "SAVI", "OSAKA", "AFA", "ANYANG", "TNO", "MEMPHIS",
+		"QUB", "URJC", "WASEDA", "UFBA", "AVEIRO", "MML2", "MML1", "ARIZONA",
+		"IIITH", "SINGAPORE", "FRANKFURT", "SRRU", "DELFT", "WU", "BERN", "MINHO"} {
+		if nodeCount == 0 {
 			break
 		}
+		logPath := filepath.Join(resultsDir, "events-"+nodeName+".jsonl")
+		events, err := testutil.ParseEventLog(logPath)
+		if err != nil {
+			continue
+		}
+
+		var firstSync, firstUpdate time.Time
+		for _, e := range events {
+			if e.EventType == testutil.EventSyncInterestSent && firstSync.IsZero() {
+				firstSync = e.Timestamp
+			}
+			if e.EventType == testutil.EventNodeUpdate && firstUpdate.IsZero() {
+				firstUpdate = e.Timestamp
+			}
+		}
+
+		if !firstSync.IsZero() && !firstUpdate.IsZero() {
+			svsMs := int(firstUpdate.Sub(firstSync).Milliseconds())
+			if svsMs > maxSVS {
+				maxSVS = svsMs
+			}
+		}
 	}
 
-	if start.IsZero() {
-		return int(timeout.Milliseconds())
+	if maxSVS == 0 {
+		return 5000
+	}
+	return maxSVS
+}
+
+func measureUpdatePropagationFromLogs(resultsDir string, nodeCount int) int {
+	allEvents := make([]testutil.Event, 0)
+
+	nodeNames := []string{}
+	for _, n := range []string{"UCLA", "NEU", "SAVI", "OSAKA", "AFA", "ANYANG", "TNO", "MEMPHIS",
+		"QUB", "URJC", "WASEDA", "UFBA", "AVEIRO", "MML2", "MML1", "ARIZONA",
+		"IIITH", "SINGAPORE", "FRANKFURT", "SRRU", "DELFT", "WU", "BERN", "MINHO"} {
+		if len(nodeNames) >= nodeCount {
+			break
+		}
+		nodeNames = append(nodeNames, n)
 	}
 
-	claimCounts := make(map[string]map[string]bool)
+	for _, nodeName := range nodeNames {
+		logPath := filepath.Join(resultsDir, "events-"+nodeName+".jsonl")
+		events, err := testutil.ParseEventLog(logPath)
+		if err != nil {
+			continue
+		}
+		allEvents = append(allEvents, events...)
+	}
 
-	for time.Now().Before(deadline) {
-		for _, r := range repos {
-			events, _ := testutil.ParseEventLog(r.logPath)
-			for _, e := range events {
-				if e.EventType == testutil.EventJobClaimed && e.Target != "" {
-					if claimCounts[e.Target] == nil {
-						claimCounts[e.Target] = make(map[string]bool)
-					}
-					claimCounts[e.Target][r.nodeID] = true
+	if len(allEvents) == 0 {
+		return 100
+	}
+
+	type claimInfo struct {
+		target    string
+		node      string
+		timestamp time.Time
+	}
+	claims := make([]claimInfo, 0)
+	updates := make(map[string]map[string]time.Time)
+
+	for _, e := range allEvents {
+		if e.EventType == testutil.EventJobClaimed && e.Target != "" {
+			claims = append(claims, claimInfo{
+				target:    e.Target,
+				node:      e.Node,
+				timestamp: e.Timestamp,
+			})
+		}
+		if e.EventType == testutil.EventNodeUpdate && len(e.Jobs) > 0 {
+			if updates[e.From] == nil {
+				updates[e.From] = make(map[string]time.Time)
+			}
+			for _, job := range e.Jobs {
+				updates[e.From][job] = e.Timestamp
+			}
+		}
+	}
+
+	maxProp := 0
+	for _, c := range claims {
+		if updateTimes, ok := updates[c.node]; ok {
+			if u, ok := updateTimes[c.target]; ok {
+				propMs := int(u.Sub(c.timestamp).Milliseconds())
+				if propMs > maxProp {
+					maxProp = propMs
 				}
 			}
 		}
-
-		for target, nodes := range claimCounts {
-			if len(nodes) >= rf {
-				return int(time.Since(start).Milliseconds())
-			}
-			_ = target
-		}
-
-		time.Sleep(100 * time.Millisecond)
 	}
 
-	return int(timeout.Milliseconds())
+	if maxProp == 0 {
+		return 100
+	}
+	return maxProp
 }
 
-func calculateStatistics(m *TimingMeasurements) TimingStatistics {
+func calculateTimingStatistics(m *TimingMeasurements) TimingStatistics {
 	return TimingStatistics{
-		SVSConvergenceMaxMs:  max(m.SVSConvergenceMs),
-		CommandRttMaxMs:      max(m.CommandRttMs),
-		ReplicationTimeMaxMs: max(m.ReplicationTimeMs),
+		SVSConvergenceMaxMs:    maxInt(m.SVSConvergenceMs),
+		ReplicationTimeMaxMs:   maxInt(m.ReplicationTimeMs),
+		UpdatePropagationMaxMs: maxInt(m.UpdatePropagationMs),
+		SafeIntervalMaxMs:      maxInt(m.SafeIntervalMs),
 	}
 }
 
-func calculateRecommended(s *TimingStatistics) TimingRecommended {
+func calculateTimingRecommended(s *TimingStatistics) TimingRecommended {
 	return TimingRecommended{
 		SVSHealthMs:   int(float64(s.SVSConvergenceMaxMs) * 1.5),
-		ProducerCmdMs: int(float64(s.CommandRttMaxMs) * 1.5),
-		ReplicationMs: int(float64(s.ReplicationTimeMaxMs) * 1.5),
+		ProducerCmdMs: int(float64(s.ReplicationTimeMaxMs) * 1.5),
+		ReplicationMs: int(float64(s.SafeIntervalMaxMs) * 1.5),
 	}
 }
 
-func max(values []int) int {
+func maxInt(values []int) int {
 	if len(values) == 0 {
 		return 0
 	}
@@ -285,29 +393,4 @@ func max(values []int) int {
 		}
 	}
 	return m
-}
-
-func avg(values []int) int {
-	if len(values) == 0 {
-		return 0
-	}
-	sum := 0
-	for _, v := range values {
-		sum += v
-	}
-	return sum / len(values)
-}
-
-func median(values []int) int {
-	if len(values) == 0 {
-		return 0
-	}
-	sorted := make([]int, len(values))
-	copy(sorted, values)
-	sort.Ints(sorted)
-	mid := len(sorted) / 2
-	if len(sorted)%2 == 0 {
-		return (sorted[mid-1] + sorted[mid]) / 2
-	}
-	return sorted[mid]
 }

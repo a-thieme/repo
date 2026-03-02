@@ -21,7 +21,7 @@ func TestEventLogger_WriteAndParse(t *testing.T) {
 	}
 
 	logger.LogCommandReceived("INSERT", "/ndn/test/target")
-	logger.LogJobClaimed("/ndn/test/target", 1)
+	logger.LogJobClaimed("/ndn/test/target")
 	logger.LogStorageChanged(1000, 100)
 
 	if err := logger.Close(); err != nil {
@@ -49,7 +49,7 @@ func TestEventLogger_WriteAndParse(t *testing.T) {
 	if len(claimEvents) != 1 {
 		t.Fatalf("Expected 1 claim event, got %d", len(claimEvents))
 	}
-	if claimEvents[0].Replication != 1 {
+	if claimEvents[0].Replication != 0 {
 		t.Errorf("Expected replication 1, got %d", claimEvents[0].Replication)
 	}
 }
@@ -95,7 +95,9 @@ func TestEventLogger_NodeUpdate(t *testing.T) {
 		t.Fatalf("Failed to create event logger: %v", err)
 	}
 
-	logger.LogNodeUpdate("node-b", []string{"/ndn/job/1", "/ndn/job/2"}, 1e9, 5e8)
+	jobOne, _ := enc.NameFromStr("/ndn/job/1")
+	jobTwo, _ := enc.NameFromStr("/ndn/job/2")
+	logger.LogNodeUpdate("node-b", []enc.Name{jobOne, jobTwo}, 1e9, 5e8)
 
 	if err := logger.Close(); err != nil {
 		t.Fatalf("Failed to close logger: %v", err)
@@ -169,14 +171,13 @@ func TestCountingFace_LpPacketDataName(t *testing.T) {
 }
 
 func TestRepo_ReplicationLogic(t *testing.T) {
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0)
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, nil)
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
 		Jobs:     []enc.Name{},
 		Capacity: 1000000000,
 		Used:     0,
-		Alive:    true,
 	}
 	repo.mu.Unlock()
 
@@ -193,7 +194,7 @@ func TestRepo_ReplicationLogic(t *testing.T) {
 }
 
 func TestRepo_ReplicationAlreadySatisfied(t *testing.T) {
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 2, false, 10*1024*1024, 0)
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 2, false, 10*1024*1024, 0, nil)
 
 	target, _ := enc.NameFromStr("/ndn/target/1")
 	cmd := &tlv.Command{
@@ -203,12 +204,10 @@ func TestRepo_ReplicationAlreadySatisfied(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus["other-node-1"] = NodeStatus{
-		Jobs:  []enc.Name{target},
-		Alive: true,
+		Jobs: []enc.Name{target},
 	}
 	repo.nodeStatus["other-node-2"] = NodeStatus{
-		Jobs:  []enc.Name{target},
-		Alive: true,
+		Jobs: []enc.Name{target},
 	}
 	repo.mu.Unlock()
 
@@ -244,7 +243,7 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 		t.Errorf("Target mismatch: expected %s, got %s", target, parsed.NewCommand.Target)
 	}
 
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0)
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, nil)
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
@@ -252,14 +251,12 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 		Capacity:    1000000000,
 		Used:        0,
 		LastUpdated: time.Now(),
-		Alive:       true,
 	}
 	repo.nodeStatus["peer-node"] = NodeStatus{
 		Jobs:        []enc.Name{},
 		Capacity:    1000000000,
 		Used:        0,
 		LastUpdated: time.Now(),
-		Alive:       true,
 	}
 	repo.mu.Unlock()
 
@@ -289,14 +286,13 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 	repos := make([]*Repo, nodeCount)
 
 	for i := 0; i < nodeCount; i++ {
-		repo := NewRepo("/ndn/drepo", nodeNames[i], "/ndn/repo.teame.dev/repo", replicationFactor, false, 10*1024*1024, 0)
+		repo := NewRepo("/ndn/drepo", nodeNames[i], "/ndn/repo.teame.dev/repo", replicationFactor, false, 10*1024*1024, 0, nil)
 		repo.mu.Lock()
 		repo.storageCapacity = 1000000000
 		repo.nodeStatus[repo.myNodeName()] = NodeStatus{
 			Jobs:     []enc.Name{},
 			Capacity: 1000000000,
 			Used:     0,
-			Alive:    true,
 		}
 		repo.mu.Unlock()
 		repos[i] = repo
@@ -319,7 +315,6 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 					Capacity:    1000000000,
 					Used:        0,
 					LastUpdated: time.Now(),
-					Alive:       true,
 				}
 				repos[i].mu.Unlock()
 			}

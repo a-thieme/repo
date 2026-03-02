@@ -46,8 +46,8 @@ type NodeUpdate struct {
 	StorageCapacity uint64 `tlv:"0x292"`
 	//+field:natural
 	StorageUsed uint64 `tlv:"0x293"`
-	//+field:struct:InternalCommand
-	JobRelease *InternalCommand `tlv:"0x294"`
+	//+field:sequence:*InternalCommand:struct:InternalCommand
+	JobRelease []*InternalCommand `tlv:"0x294"`
 	//+field:sequence:*JobAssignment:struct:JobAssignment
 	JobAssignments []*JobAssignment `tlv:"0x297"`
 }

@@ -339,7 +339,7 @@ func TestEventLog_JobReleaseFlow(t *testing.T) {
 	}
 
 	logger.LogCommandReceived("INSERT", "/ndn/target/release-test")
-	logger.LogJobClaimed("/ndn/target/release-test", 1)
+	logger.LogJobClaimed("/ndn/target/release-test")
 	logger.LogStorageChanged(800000000, 100000000)
 	logger.LogStorageChanged(900000000, 100000000)
 	logger.LogJobReleased("/ndn/target/release-test")
@@ -370,9 +370,11 @@ func TestEventLog_NodeUpdateFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create event logger: %v", err)
 	}
+	jobOne, _ := enc.NameFromStr("/ndn/job/1")
+	jobTwo, _ := enc.NameFromStr("/ndn/job/2")
 
-	logger.LogNodeUpdate("/ndn/repo/node-b", []string{"/ndn/job/1", "/ndn/job/2"}, 1e9, 5e8)
-	logger.LogNodeUpdate("/ndn/repo/node-c", []string{"/ndn/job/1"}, 2e9, 1e9)
+	logger.LogNodeUpdate("/ndn/repo/node-b", []enc.Name{jobOne, jobTwo}, 1e9, 5e8)
+	logger.LogNodeUpdate("/ndn/repo/node-c", []enc.Name{jobOne}, 2e9, 1e9)
 
 	logger.Close()
 

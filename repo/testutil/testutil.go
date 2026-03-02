@@ -14,13 +14,19 @@ type EventType string
 const (
 	EventSyncInterestSent EventType = "sync_interest_sent"
 	EventDataSent         EventType = "data_sent"
+	EventInterestReceived EventType = "interest_received"
+	EventDataReceived     EventType = "data_received"
 	EventCommandReceived  EventType = "command_received"
 	EventCommandSynced    EventType = "command_synced"
+	EventCommandPublished EventType = "command_published"
+	EventDecisionStarted  EventType = "decision_started"
+	EventDecisionMade     EventType = "decision_made"
 	EventJobClaimed       EventType = "job_claimed"
 	EventJobReleased      EventType = "job_released"
 	EventNodeUpdate       EventType = "node_update"
 	EventReplicationCheck EventType = "replication_check"
 	EventStorageChanged   EventType = "storage_changed"
+	EventJobAssignment    EventType = "job_assignment"
 )
 
 type Event struct {
@@ -29,6 +35,8 @@ type Event struct {
 	Node               string            `json:"node,omitempty"`
 	Name               string            `json:"name,omitempty"`
 	Target             string            `json:"target,omitempty"`
+	CommandID          string            `json:"cmdId,omitempty"`
+	SequenceNum        uint64            `json:"seq,omitempty"`
 	Type               string            `json:"type,omitempty"`
 	From               string            `json:"from,omitempty"`
 	To                 string            `json:"to,omitempty"`
@@ -39,13 +47,16 @@ type Event struct {
 	Replication        int               `json:"replication,omitempty"`
 	ShouldClaim        bool              `json:"shouldClaim,omitempty"`
 	Reason             string            `json:"reason,omitempty"`
+	DecisionDetails    string            `json:"decisionDetails,omitempty"`
 	Total              uint64            `json:"total,omitempty"`
 	Count              int               `json:"count,omitempty"`
 	CurrentReplication int               `json:"currentReplication,omitempty"`
 	NeededReplication  int               `json:"neededReplication,omitempty"`
 	Candidates         []string          `json:"candidates,omitempty"`
+	CandidateScores    map[string]int    `json:"candidateScores,omitempty"`
 	SelectedCandidates []string          `json:"selectedCandidates,omitempty"`
 	FreeSpace          map[string]uint64 `json:"freeSpace,omitempty"`
+	Assignees          []string          `json:"assignees,omitempty"`
 }
 
 func ParseEventLog(path string) ([]Event, error) {

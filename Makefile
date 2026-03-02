@@ -27,7 +27,7 @@ test-edge:
 test-all-local: test-unit test-integration test-concurrent test-multi test-edge test-failure
 
 test-timing:
-	go test -v -run 'TestConfiguration_Timing' -timeout 10m ./repo/... -args -timing-enable=true
+	go test -v -run 'TestConfiguration_Timing' -timeout 15m ./repo/... -args -timing-enable=true
 
 test-mini-ndn:
 	go test -v -run 'TestMiniNDN' -timeout 15m ./repo/...
