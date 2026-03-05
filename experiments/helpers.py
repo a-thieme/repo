@@ -70,6 +70,10 @@ def collect_results(
         except (json.JSONDecodeError, IOError):
             continue
 
+        total_cmds = meta.get("total_commands", 0)
+        sync_interests = meta.get("sync_interests", 0)
+        data_packets = meta.get("data_packets", 0)
+
         result = {
             "nodes": meta.get("node_count", 0),
             "producers": meta.get("producer_count", 0),
@@ -82,9 +86,11 @@ def collect_results(
             "prop_max_ms": meta.get("update_propagation_max_ms") or 0,
             "prop_avg_ms": meta.get("update_propagation_avg_ms") or 0,
             "prop_med_ms": meta.get("update_propagation_median_ms") or 0,
-            "sync_interests": meta.get("sync_interests", 0),
-            "data_packets": meta.get("data_packets", 0),
-            "total_commands": meta.get("total_commands", 0),
+            "sync_interests": sync_interests,
+            "data_packets": data_packets,
+            "sync_per_cmd": sync_interests / total_cmds if total_cmds > 0 else 0,
+            "data_per_cmd": data_packets / total_cmds if total_cmds > 0 else 0,
+            "total_commands": total_cmds,
             "commands_at_rf": meta.get("commands_at_rf", 0),
             "commands_over": meta.get("commands_over", 0),
             "commands_under": meta.get("commands_under", 0),
@@ -93,9 +99,19 @@ def collect_results(
             "replication_wait_duration_seconds": meta.get(
                 "replication_wait_duration_seconds", 0
             ),
+            "failure_enabled": meta.get("failure_enabled", False),
+            "failure_count": meta.get("failure_count", 0),
+            "failure_nodes": meta.get("failure_nodes", []),
+            "recovery_achieved": meta.get("recovery_achieved", False),
+            "recovery_time_ms": meta.get("recovery_time_ms", 0),
+            "pre_failure_commands_at_rf": meta.get("pre_failure_commands_at_rf", 0),
+            "pre_failure_commands_under": meta.get("pre_failure_commands_under", 0),
+            "post_failure_commands_at_rf": meta.get("post_failure_commands_at_rf", 0),
+            "post_failure_commands_under": meta.get("post_failure_commands_under", 0),
         }
         results.append(result)
 
+    # Sort the results primarily by node count, then by producer count
     results.sort(key=lambda r: (r["nodes"], r["producers"]))
 
     if csv_path:
@@ -118,7 +134,7 @@ def write_csv(results: List[Dict], csv_path: Path):
         )
         f.write("prop_min_ms,prop_max_ms,prop_avg_ms,prop_med_ms,")
         f.write(
-            "sync_interests,data_packets,total_commands,commands_at_rf,commands_over,commands_under,any_ever_over,"
+            "sync_interests,data_packets,sync_per_cmd,data_per_cmd,total_commands,commands_at_rf,commands_over,commands_under,any_ever_over,"
         )
         f.write("total_duration_seconds,replication_wait_duration_seconds,")
         f.write(
@@ -135,7 +151,9 @@ def write_csv(results: List[Dict], csv_path: Path):
             f.write(
                 f"{r['prop_min_ms']:.2f},{r['prop_max_ms']:.2f},{r['prop_avg_ms']:.2f},{r['prop_med_ms']:.2f},"
             )
-            f.write(f"{r['sync_interests']},{r['data_packets']},{r['total_commands']},")
+            f.write(
+                f"{r['sync_interests']},{r['data_packets']},{r.get('sync_per_cmd', 0):.2f},{r.get('data_per_cmd', 0):.2f},{r['total_commands']},"
+            )
             f.write(
                 f"{r['commands_at_rf']},{r['commands_over']},{r['commands_under']},"
             )
@@ -168,11 +186,11 @@ def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
                 "| Nodes | Producers | Replicated | Rep Max (ms) | Prop Max (ms) | "
             )
             f.write(
-                "Total Cmds | At RF | Over | Under | Fail | Killed | Recov | Recov Time (ms) |\n"
+                "Total Cmds | At RF | Over | Under | Sync/Cmd | Data/Cmd | Fail | Killed | Recov | Recov Time (ms) |\n"
             )
             f.write("|-------|-----------|------------|--------------|---------------|")
             f.write(
-                "------------|-------|------|-------|------|--------|-------|----------------|\n"
+                "------------|-------|------|-------|----------|----------|------|--------|-------|----------------|\n"
             )
 
             for r in results:
@@ -184,6 +202,9 @@ def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
                     f"{r['total_commands']} | {r['commands_at_rf']} | {r['commands_over']} | "
                 )
                 f.write(f"{r['commands_under']} | ")
+                f.write(
+                    f"{r.get('sync_per_cmd', 0):.1f} | {r.get('data_per_cmd', 0):.1f} | "
+                )
                 f.write(f"{str(r.get('failure_enabled', False)).lower()} | ")
                 f.write(f"{r.get('failure_count', 0)} | ")
                 f.write(f"{str(r.get('recovery_achieved', False)).lower()} | ")
@@ -193,9 +214,13 @@ def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
             f.write(
                 "| Nodes | Producers | Replicated | Rep Max (ms) | Prop Max (ms) | "
             )
-            f.write("Total Cmds | At RF | Over | Under | Any Over | Duration (s) |\n")
+            f.write(
+                "Total Cmds | At RF | Over | Under | Sync/Cmd | Data/Cmd | Any Over | Duration (s) |\n"
+            )
             f.write("|-------|-----------|------------|--------------|---------------|")
-            f.write("------------|-------|------|-------|----------|---------------|\n")
+            f.write(
+                "------------|-------|------|-------|----------|----------|----------|---------------|\n"
+            )
 
             for r in results:
                 f.write(
@@ -205,7 +230,11 @@ def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
                 f.write(
                     f"{r['total_commands']} | {r['commands_at_rf']} | {r['commands_over']} | "
                 )
-                f.write(f"{r['commands_under']} | {str(r['any_ever_over']).lower()} | ")
+                f.write(f"{r['commands_under']} | ")
+                f.write(
+                    f"{r.get('sync_per_cmd', 0):.1f} | {r.get('data_per_cmd', 0):.1f} | "
+                )
+                f.write(f"{str(r.get('any_ever_over', False)).lower()} | ")
                 f.write(f"{r['total_duration_seconds']:.2f} |\n")
 
 
@@ -220,9 +249,9 @@ def print_summary(results: List[Dict]):
     if has_failure:
         print("\n=== EXPERIMENT RESULTS (with Failure Simulation) ===\n")
         print(
-            f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} {'RepMax':<10} {'PropMax':<10} {'Total':<6} {'AtRF':<5} {'Sync':<8} {'Data':<8} {'Fail':<5} {'Killed':<7} {'Recov':<6} {'RecovTime':<10}"
+            f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} {'RepMax':<10} {'PropMax':<10} {'Total':<6} {'AtRF':<5} {'Sync':<8} {'Data':<8} {'S/Cmd':<7} {'D/Cmd':<7} {'Fail':<5} {'Killed':<7} {'Recov':<6} {'RecovTime':<10}"
         )
-        print("-" * 110)
+        print("-" * 126)
 
         for r in results:
             recov_time = r.get("recovery_time_ms", 0)
@@ -232,6 +261,7 @@ def print_summary(results: List[Dict]):
                 f"{r['rep_max_ms']:<10.2f} {r['prop_max_ms']:<10.2f} "
                 f"{r['total_commands']:<6} {r['commands_at_rf']:<5} "
                 f"{r.get('sync_interests', 0):<8} {r.get('data_packets', 0):<8} "
+                f"{r.get('sync_per_cmd', 0):<7.1f} {r.get('data_per_cmd', 0):<7.1f} "
                 f"{str(r.get('failure_enabled', False)).lower():<5} "
                 f"{r.get('failure_count', 0):<7} "
                 f"{str(r.get('recovery_achieved', False)).lower():<6} "
@@ -240,16 +270,17 @@ def print_summary(results: List[Dict]):
     else:
         print("\n=== EXPERIMENT RESULTS ===\n")
         print(
-            f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} {'RepMax':<10} {'PropMax':<10} {'Total':<6} {'AtRF':<5} {'Over':<5} {'Under':<6} {'Sync':<8} {'Data':<8}"
+            f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} {'RepMax':<10} {'PropMax':<10} {'Total':<6} {'AtRF':<5} {'Over':<5} {'Under':<6} {'Sync':<8} {'Data':<8} {'S/Cmd':<7} {'D/Cmd':<7}"
         )
-        print("-" * 95)
+        print("-" * 111)
 
         for r in results:
             print(
                 f"{r['nodes']:<6} {r['producers']:<6} {str(r['replicated']).lower():<8} "
                 f"{r['rep_max_ms']:<10.2f} {r['prop_max_ms']:<10.2f} "
                 f"{r['total_commands']:<6} {r['commands_at_rf']:<5} {r['commands_over']:<5} {r['commands_under']:<6} "
-                f"{r.get('sync_interests', 0):<8} {r.get('data_packets', 0):<8}"
+                f"{r.get('sync_interests', 0):<8} {r.get('data_packets', 0):<8} "
+                f"{r.get('sync_per_cmd', 0):<7.1f} {r.get('data_per_cmd', 0):<7.1f}"
             )
 
 

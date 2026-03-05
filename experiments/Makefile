@@ -62,31 +62,43 @@ image:
 
 # === Calibration ===
 
-calibrate:
+# Generate a list of individual iteration targets (e.g., cal_iter_1, cal_iter_2)
+CAL_ITERATIONS = $(shell seq 1 $(CALIBRATE_ITER))
+CAL_TARGETS = $(foreach i,$(CAL_ITERATIONS),cal_iter_$(i))
+
+calibrate: post_calibrate
+
+pre_calibrate:
 	@echo "=== Timeout Calibration ==="
 	@echo "Node count: $(CALIBRATE_NODES)"
 	@echo "Iterations: $(CALIBRATE_ITER)"
 	@echo ""
 	@mkdir -p $(RESULTS_DIR)/calibration/run_$(TIMESTAMP)
-	@for i in $$(seq 1 $(CALIBRATE_ITER)); do \
-		echo "--- Iteration $$i/$(CALIBRATE_ITER) ---"; \
-		iter_dir="$(RESULTS_DIR)/calibration/run_$(TIMESTAMP)/iter_$$i"; \
-		mkdir -p "$$iter_dir"; \
-		routing_wait=$$((30 + ($(CALIBRATE_NODES) - 5) * 2)); \
-		docker run --rm --privileged \
-			-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
-			-v /lib/modules:/lib/modules \
-			-v "$$(cd $$iter_dir && pwd)":/results \
-			mini-ndn-integration \
-			-c "python3 /usr/local/bin/runner.py --node-count $(CALIBRATE_NODES) --timeout 120 --replication-factor $(RF) --routing-wait $$routing_wait --results-dir /results --producer-count 1 --command-count 1 --command-rate 1" \
-			> "$$iter_dir/docker.log" 2>&1; \
-		if [ -f "$$iter_dir/metadata.json" ]; then \
-			echo "  Iteration $$i complete"; \
-		else \
-			echo "  Iteration $$i failed (no metadata.json)"; \
-		fi; \
-	done
+
+# Pattern rule to execute each iteration dynamically
+cal_iter_%: pre_calibrate
+	@i=$*; \
+	echo "--- Starting Iteration $$i/$(CALIBRATE_ITER) ---"; \
+	iter_dir="$(RESULTS_DIR)/calibration/run_$(TIMESTAMP)/iter_$$i"; \
+	mkdir -p "$$iter_dir"; \
+	routing_wait=$$((30 + ($(CALIBRATE_NODES) - 5) * 2)); \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$$(cd $$iter_dir && pwd)":/results \
+		mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py --node-count $(CALIBRATE_NODES) --timeout 120 --replication-factor $(RF) --routing-wait $$routing_wait --results-dir /results --producer-count 1 --command-count 1 --command-rate 1" \
+		> "$$iter_dir/docker.log" 2>&1; \
+	if [ -f "$$iter_dir/metadata.json" ]; then \
+		echo "  ✓ Iteration $$i complete"; \
+	else \
+		echo "  ✗ Iteration $$i failed (no metadata.json)"; \
+	fi
+
+# Collect and analyze after all iteration targets finish
+post_calibrate: $(CAL_TARGETS)
 	@echo ""
+	@echo "Analyzing calibration results..."
 	@python3 $(HELPERS_PY) calibrate $(RESULTS_DIR)/calibration/run_$(TIMESTAMP) \
 		--node-count $(CALIBRATE_NODES) \
 		--output $(RESULTS_DIR)/calibration/run_$(TIMESTAMP)/calibration.json
