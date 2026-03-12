@@ -1,0 +1,123 @@
+================================================================================
+Auction Distribution Mechanism
+================================================================================
+
+1. Introduction
+
+This document specifies the message formats, processing rules, and collision
+resolution semantics for the auction-based distribution mechanism in the
+distributed repository.
+
+2. Terminology
+
+ResultsName
+	The Interest name where auction results are published. Format:
+	/<auctioneer-node-prefix>/results/v=<timestamp>
+
+Bid Interest Name
+	The Interest name on which MetricRequest is sent to peers. Format:
+	/<peer-node-prefix>/bid/v=<timestamp>
+
+Auction Timestamp
+	A 64-bit nanosecond timestamp that, when combined with the node name,
+	uniquely identifies an auction instance and provides ordering for collision
+	resolution.
+
+3. Message Formats
+
+3.1 MetricRequest
+
+Carried in Bid Interest application parameters:
+
+	0x298:	Target		enc.Name	(Job target identifier)
+	0x29A:	Timestamp	uint64		(64-bit nanosecond timestamp)
+	0x299:	ResultsName	enc.Name	(Results Interest Name)
+
+3.2 MetricResponse
+
+Sent as Data in response to Bid Interest:
+
+	0x292:	Capacity	uint64		(Node's storage capacity in bytes)
+	0x293:	Used		uint64		(Node's used storage in bytes)
+	0x29B:	Delay		bool		(True if peer requests delay)
+
+4. Auction Initiation
+
+When a node determines that a job is under-replicated, it initiates an auction
+by generating a 64-bit nanosecond timestamp representing the current time. This
+timestamp, combined with the node name, uniquely identifies the auction instance
+and provides canonical ordering for collision resolution.
+
+5. Collision Resolution
+
+When multiple nodes initiate auctions simultaneously, the following rules ensure
+exactly one auction proceeds.
+
+5.1 Timestamp Ordering
+
+When a node receives a MetricRequest:
+
+	If the Target matches a locally-initiated auction:
+
+		If incoming timestamp < local timestamp:
+			The incoming auction is EARLIER. Cancel and reschedule local auction.
+
+		If incoming timestamp > local timestamp:
+			The incoming auction is LATER. Set Delay=true in MetricResponse.
+
+		If timestamps are equal:
+			Use lexicographic comparison of node names. The node with the lesser
+			name wins. Set Delay=(auctioneer_name > local_node_name). If false,
+			cancel and reschedule local auction.
+
+	If targets differ:
+		No timestamp comparison needed. Proceed with local auction and set
+		Delay=false in MetricResponse.
+
+5.2 Delay Flag Semantics
+
+A Delay value of true RECOMMENDS that the receiving auctioneer cancel and
+reschedule its auction. Upon receiving any MetricResponse with Delay=true, the
+auctioneer MUST:
+
+	1. Cancel its current auction
+	2. Publish JobAssignment with empty Assignees
+	3. Reschedule the auction
+
+5.3 Rescheduled Auctions
+
+Rescheduled auctions SHOULD allow time for ongoing auctions to complete and for
+NodeUpdates to propagate. The node MUST check for under-replication when the
+reschedule timer expires and MAY cancel earlier if the target is no longer
+under-replicated.
+
+6. Processing Rules
+
+6.1 Auctioneer
+
+The auctioneer MUST:
+
+	1. Generate a unique timestamp and construct the ResultsName
+	2. Send MetricRequest to all peers excluding self and nodes already assigned
+	3. Wait for responses or timeout
+	4. If any response has Delay=true, publish empty JobAssignment and cancel
+	5. Otherwise determine winners per shared-spec Section 8 and publish JobAssignment
+	6. Schedule a follow-up auction (cancelled if target is no longer
+	   under-replicated)
+
+6.2 Peer
+
+Upon receiving a MetricRequest, a node MUST:
+
+	1. Determine Delay flag per Section 5
+	2. Send MetricResponse with local storage metrics and computed Delay value
+	3. Subscribe to ResultsName
+
+6.3 Results Handling
+
+Upon receiving JobAssignment:
+
+	- If Assignees is empty: should schedule a new auction if still
+	  under-replicated
+	- If node is in Assignees and has received command: claim job
+	- If target remains under-replicated: should schedule an additional auction

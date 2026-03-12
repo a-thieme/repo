@@ -1,0 +1,47 @@
+================================================================================
+Hydra Distribution Mechanism
+================================================================================
+
+1. Introduction
+
+This document specifies the Hydra distribution mechanism, a synchronous
+single-step distribution protocol for the distributed repository. Hydra
+distributes jobs by embedding job assignments directly in SVS-published
+NodeUpdate messages.
+
+2. Terminology
+
+See shared-spec.
+
+3. Command Processing
+
+When a node receives a command from the producer and determines the job is
+under-replicated:
+
+	1. Compute winners per shared-spec Section 8
+	2. If this node is in winners, claim the job
+	3. Publish NodeUpdate to SVS group containing:
+	   - NewCommand: the command
+	   - JobAssignments: [{ Target: target, Assignees: winners }]
+
+4. Job Assignment Processing
+
+Upon receiving a NodeUpdate containing JobAssignments:
+
+	1. For each JobAssignment:
+	   a. If this node is already performing the job, skip
+	   b. If this node's name is in Assignees and the command is available,
+	      claim the job
+
+	2. See shared-spec Section 9 for ordering semantics.
+
+5. Failure Recovery
+
+When a node's heartbeat times out (per shared-spec Section 5.3):
+
+	1. Retrieve the offline node's last Jobs state
+	2. For each job the offline node was performing:
+	   a. Check current replication count
+	   b. If count < ReplicationFactor, compute winners per shared-spec Section 8
+	3. If this node is in winners, claim the job
+	4. Publish NodeUpdate with JobAssignments for redistribution

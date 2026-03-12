@@ -99,7 +99,7 @@ Defines data structures:
 
 This project implements a distributed NDN data repository with resilient operation. The system automatically handles node failures and maintains operation through intelligent monitoring and re-evaluation mechanisms.
 
-For detailed technical information, see README-TECHNICAL.md.
+For detailed technical information, see docs/architecture/README-TECHNICAL.md.
 
 ## Testing
 
@@ -186,4 +186,4 @@ make -C experiments single NODES=24 PRODUCERS=1
 | 5 | Over-replicated (max > rf) |
 | 6 | Under-replicated (final < rf) |
 
-See `experiments/README_EXPERIMENT.md` for details.
+See `docs/experiments/README_EXPERIMENT.md` for details.

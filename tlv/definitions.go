@@ -51,3 +51,23 @@ type NodeUpdate struct {
 	//+field:sequence:*JobAssignment:struct:JobAssignment
 	JobAssignments []*JobAssignment `tlv:"0x297"`
 }
+
+type MetricRequest struct {
+	//+field:name
+	Target enc.Name `tlv:"0x298"`
+	//+field:name
+	ResultsName enc.Name `tlv:"0x299"`
+	//+field:natural
+	Timestamp uint64 `tlv:"0x29A"`
+}
+
+type MetricResponse struct {
+	//+field:natural
+	Capacity uint64 `tlv:"0x292"`
+	//+field:natural
+	Used uint64 `tlv:"0x293"`
+	//+field:natural
+	Timestamp uint64 `tlv:"0x29A"`
+	//+field:bool
+	Delay bool `tlv:"0x29B"`
+}

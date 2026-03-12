@@ -18,6 +18,8 @@ func main() {
 	noRelease := flag.Bool("no-release", false, "Disable automatic job release when storage exceeds 75%")
 	maxJoinGrowthRate := flag.Uint64("max-join-growth-rate", 10*1024*1024, "Maximum JOIN storage growth per second in bytes")
 	heartbeatInterval := flag.Duration("heartbeat-interval", 5*time.Second, "Heartbeat interval for node status updates")
+	distribution := flag.String("distribution", "hydra", "Distribution mechanism: hydra, auction")
+	auctionTimeout := flag.Duration("auction-timeout", 1750*time.Millisecond, "Auction timeout for waiting for bid responses")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 
@@ -28,7 +30,7 @@ func main() {
 	}
 
 	replicationFactor := 3
-	repo := NewRepo("/ndn/drepo", *nodePrefix, *signingIdentity, replicationFactor, *noRelease, *maxJoinGrowthRate, *heartbeatInterval, nil)
+	repo := NewRepo("/ndn/drepo", *nodePrefix, *signingIdentity, replicationFactor, *noRelease, *maxJoinGrowthRate, *heartbeatInterval, *distribution, nil, *auctionTimeout)
 
 	eventLogger, err := util.NewEventLogger(*eventLogPath, repo.nodePrefix.String())
 	if err != nil {

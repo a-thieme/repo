@@ -151,7 +151,7 @@ func TestCountingFace_ExtractPacketInfo(t *testing.T) {
 }
 
 func TestRepo_ReplicationLogic(t *testing.T) {
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, nil)
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
@@ -174,7 +174,7 @@ func TestRepo_ReplicationLogic(t *testing.T) {
 }
 
 func TestRepo_ReplicationAlreadySatisfied(t *testing.T) {
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 2, false, 10*1024*1024, 0, nil)
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 2, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
 
 	target, _ := enc.NameFromStr("/ndn/target/1")
 	cmd := &tlv.Command{
@@ -223,7 +223,7 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 		t.Errorf("Target mismatch: expected %s, got %s", target, parsed.NewCommand.Target)
 	}
 
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, nil)
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
@@ -266,7 +266,7 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 	repos := make([]*Repo, nodeCount)
 
 	for i := 0; i < nodeCount; i++ {
-		repo := NewRepo("/ndn/drepo", nodeNames[i], "/ndn/repo.teame.dev/repo", replicationFactor, false, 10*1024*1024, 0, nil)
+		repo := NewRepo("/ndn/drepo", nodeNames[i], "/ndn/repo.teame.dev/repo", replicationFactor, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
 		repo.mu.Lock()
 		repo.storageCapacity = 1000000000
 		repo.nodeStatus[repo.myNodeName()] = NodeStatus{

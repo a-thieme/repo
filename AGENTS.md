@@ -156,6 +156,31 @@ func TestEventLogger_WriteAndParse(t *testing.T) {
 }
 ```
 
+### Running Integration Tests
+
+Integration tests require a local NFD instance to be running:
+
+```bash
+# Check if NFD is running
+pgrep nfd
+
+# Start NFD if not running
+nfd &
+
+# Run integration tests
+go test -v -timeout 120s ./repo/...
+```
+
+**Requirements:**
+- NFD must be installed and running locally
+- No special routes needed - tests create their own prefixes under `/ndn/drepo`
+- Tests automatically set multicast strategies for SVS sync prefixes
+
+**Test Configuration:**
+- Tests set multicast strategy for `/ndn/drepo/group-messages/32=svs` (all modes)
+- In auction mode, tests also set `/ndn/drepo/heartbeat/32=svs`
+- Tests use `-short` flag to skip integration tests
+
 ### TLV Definitions
 - TLV structs use struct tags for code generation
 - Follow pattern in `tlv/definitions.go`
@@ -245,3 +270,27 @@ The testbed topology uses real link delays (RTT/2 in ms) from the NDN testbed. D
 UCLA:FRANKFURT delay=75ms   # Correct
 UCLA:FRANKFURT delay=75     # Wrong - will be ignored!
 ```
+
+### Auction Distribution Mechanism
+
+The project includes an alternative distribution mechanism called "auction" (see `docs/specs/auction-spec` for full specification).
+
+**Key Terms (see docs/specs/auction-spec GLOSSARY for complete list):**
+- **Job Target (Target)**: The command identifier to be replicated (e.g., `/ndn/producer/mytarget/t=123`)
+- **Bid Interest Name**: `/<peer-node-prefix>/bid/v=<timestamp>` - where bids are sent
+- **Results Interest Name**: `/<auctioneer-node-prefix>/results/v=<timestamp>` - where results are published
+
+**Running experiments with auction:**
+```bash
+# Calibrate for auction mode
+make -C experiments calibrate CALIBRATE_NODES=24 CALIBRATE_ITER=5 DISTRIBUTION=auction
+
+# Run experiments with auction
+make -C experiments run NODE_COUNTS="4 8 12" PRODUCER_COUNTS="1" -j5 DISTRIBUTION=auction
+```
+
+**Important:** When debugging auction issues, reference `docs/specs/auction-spec` first. The spec includes:
+- Complete flow diagram with examples
+- TLV definitions
+- Timestamp collision resolution
+- Pending assignment buffer handling

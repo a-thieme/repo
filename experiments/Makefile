@@ -9,6 +9,7 @@ COMMAND_COUNT    ?= 1
 COMMAND_TYPE     ?= insert
 JOIN_RATIO       ?= 0.5
 TIMEOUT          ?= 120
+DISTRIBUTION     ?= hydra
 
 # Calibration settings
 CALIBRATE_NODES  ?= 24
@@ -72,14 +73,15 @@ pre_calibrate:
 	@echo "=== Timeout Calibration ==="
 	@echo "Node count: $(CALIBRATE_NODES)"
 	@echo "Iterations: $(CALIBRATE_ITER)"
+	@echo "Distribution: $(DISTRIBUTION)"
 	@echo ""
-	@mkdir -p $(RESULTS_DIR)/calibration/run_$(TIMESTAMP)
+	@mkdir -p $(RESULTS_DIR)/calibration/run_$(TIMESTAMP)_$(DISTRIBUTION)
 
 # Pattern rule to execute each iteration dynamically
 cal_iter_%: pre_calibrate
 	@i=$*; \
 	echo "--- Starting Iteration $$i/$(CALIBRATE_ITER) ---"; \
-	iter_dir="$(RESULTS_DIR)/calibration/run_$(TIMESTAMP)/iter_$$i"; \
+	iter_dir="$(RESULTS_DIR)/calibration/run_$(TIMESTAMP)_$(DISTRIBUTION)/iter_$$i"; \
 	mkdir -p "$$iter_dir"; \
 	routing_wait=$$((30 + ($(CALIBRATE_NODES) - 5) * 2)); \
 	docker run --rm --privileged \
@@ -87,7 +89,7 @@ cal_iter_%: pre_calibrate
 		-v /lib/modules:/lib/modules \
 		-v "$$(cd $$iter_dir && pwd)":/results \
 		mini-ndn-integration \
-		-c "python3 /usr/local/bin/runner.py --node-count $(CALIBRATE_NODES) --timeout 120 --replication-factor $(RF) --routing-wait $$routing_wait --results-dir /results --producer-count 1 --command-count 1 --command-rate 1" \
+		-c "python3 /usr/local/bin/runner.py --node-count $(CALIBRATE_NODES) --timeout 120 --replication-factor $(RF) --routing-wait $$routing_wait --results-dir /results --producer-count 1 --command-count 1 --command-rate 1 --distribution $(DISTRIBUTION)" \
 		> "$$iter_dir/docker.log" 2>&1; \
 	if [ -f "$$iter_dir/metadata.json" ]; then \
 		echo "  ✓ Iteration $$i complete"; \
@@ -99,9 +101,10 @@ cal_iter_%: pre_calibrate
 post_calibrate: $(CAL_TARGETS)
 	@echo ""
 	@echo "Analyzing calibration results..."
-	@python3 $(HELPERS_PY) calibrate $(RESULTS_DIR)/calibration/run_$(TIMESTAMP) \
+	@python3 $(HELPERS_PY) calibrate $(RESULTS_DIR)/calibration/run_$(TIMESTAMP)_$(DISTRIBUTION) \
 		--node-count $(CALIBRATE_NODES) \
-		--output $(RESULTS_DIR)/calibration/run_$(TIMESTAMP)/calibration.json
+		--distribution $(DISTRIBUTION) \
+		--output $(RESULTS_DIR)/calibration/run_$(TIMESTAMP)_$(DISTRIBUTION)/calibration.json
 
 # === Experiments ===
 
@@ -143,7 +146,7 @@ single:
 	@mkdir -p $(RESULTS_DIR)/run_$(TIMESTAMP)/nodes_$(NODES)_producers_$(PRODUCERS)
 	@result_dir="$$(cd $(RESULTS_DIR)/run_$(TIMESTAMP)/nodes_$(NODES)_producers_$(PRODUCERS) && pwd)"; \
 	routing_wait=$$((30 + ($(NODES) - 5) * 2)); \
-	cal_file="$(RESULTS_DIR)/calibration/latest_calibration.json"; \
+	cal_file="$(RESULTS_DIR)/calibration/latest_calibration_$(DISTRIBUTION).json"; \
 	if [ -f "$$cal_file" ]; then \
 		safe_interval=$$(python3 -c "import json; d=json.load(open('$$cal_file')); mv=d.get('max_values',{}); print(mv.get('safe_interval_ms', mv.get('replication_time_p99_ms', mv.get('replication_time_ms', 10))))" 2>/dev/null || echo "10"); \
 		cmd_rate=$$(python3 -c "import math; print(max(1, int(1000 / ($$safe_interval * 1.25))))" 2>/dev/null || echo "80"); \
@@ -172,7 +175,8 @@ single:
 			--command-count $(COMMAND_COUNT) \
 			--command-rate $$per_producer_rate \
 			--command-type $(COMMAND_TYPE) \
-			--join-ratio $(JOIN_RATIO)$$debug_arg$$failure_args" \
+			--join-ratio $(JOIN_RATIO) \
+			--distribution $(DISTRIBUTION)$${debug_arg}$${failure_args}" \
  		> "$$result_dir/docker.log" 2>&1
 
 # === Debugging ===
@@ -240,6 +244,7 @@ help:
 	@echo "  COMMAND_COUNT    Commands per producer (default: 1)"
 	@echo "  COMMAND_TYPE     Command type: insert, join, both (default: insert)"
 	@echo "  TIMEOUT          Timeout per experiment in seconds (default: 120)"
+	@echo "  DISTRIBUTION     Distribution mechanism: hydra, auction (default: hydra)"
 	@echo "  CALIBRATE_NODES  Node count for calibration (default: 24)"
 	@echo "  CALIBRATE_ITER   Calibration iterations (default: 3)"
 	@echo "  NODES            Node count for 'single' (default: 24)"

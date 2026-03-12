@@ -1326,3 +1326,422 @@ func ParseNodeUpdate(reader enc.WireView, ignoreCritical bool) (*NodeUpdate, err
 	context.Init()
 	return context.Parse(reader, ignoreCritical)
 }
+
+type MetricRequestEncoder struct {
+	Length uint
+
+	Target_length      uint
+	ResultsName_length uint
+}
+
+type MetricRequestParsingContext struct {
+}
+
+func (encoder *MetricRequestEncoder) Init(value *MetricRequest) {
+	if value.Target != nil {
+		encoder.Target_length = 0
+		for _, c := range value.Target {
+			encoder.Target_length += uint(c.EncodingLength())
+		}
+	}
+	if value.ResultsName != nil {
+		encoder.ResultsName_length = 0
+		for _, c := range value.ResultsName {
+			encoder.ResultsName_length += uint(c.EncodingLength())
+		}
+	}
+
+	l := uint(0)
+	if value.Target != nil {
+		l += 3
+		l += uint(enc.TLNum(encoder.Target_length).EncodingLength())
+		l += encoder.Target_length
+	}
+	if value.ResultsName != nil {
+		l += 3
+		l += uint(enc.TLNum(encoder.ResultsName_length).EncodingLength())
+		l += encoder.ResultsName_length
+	}
+	l += 3
+	l += uint(1 + enc.Nat(value.Timestamp).EncodingLength())
+	encoder.Length = l
+
+}
+
+func (context *MetricRequestParsingContext) Init() {
+
+}
+
+func (encoder *MetricRequestEncoder) EncodeInto(value *MetricRequest, buf []byte) {
+
+	pos := uint(0)
+
+	if value.Target != nil {
+		buf[pos] = 253
+		binary.BigEndian.PutUint16(buf[pos+1:], uint16(664))
+		pos += 3
+		pos += uint(enc.TLNum(encoder.Target_length).EncodeInto(buf[pos:]))
+		for _, c := range value.Target {
+			pos += uint(c.EncodeInto(buf[pos:]))
+		}
+	}
+	if value.ResultsName != nil {
+		buf[pos] = 253
+		binary.BigEndian.PutUint16(buf[pos+1:], uint16(665))
+		pos += 3
+		pos += uint(enc.TLNum(encoder.ResultsName_length).EncodeInto(buf[pos:]))
+		for _, c := range value.ResultsName {
+			pos += uint(c.EncodeInto(buf[pos:]))
+		}
+	}
+	buf[pos] = 253
+	binary.BigEndian.PutUint16(buf[pos+1:], uint16(666))
+	pos += 3
+
+	buf[pos] = byte(enc.Nat(value.Timestamp).EncodeInto(buf[pos+1:]))
+	pos += uint(1 + buf[pos])
+}
+
+func (encoder *MetricRequestEncoder) Encode(value *MetricRequest) enc.Wire {
+
+	wire := make(enc.Wire, 1)
+	wire[0] = make([]byte, encoder.Length)
+	buf := wire[0]
+	encoder.EncodeInto(value, buf)
+
+	return wire
+}
+
+func (context *MetricRequestParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*MetricRequest, error) {
+
+	var handled_Target bool = false
+	var handled_ResultsName bool = false
+	var handled_Timestamp bool = false
+
+	progress := -1
+	_ = progress
+
+	value := &MetricRequest{}
+	var err error
+	var startPos int
+	for {
+		startPos = reader.Pos()
+		if startPos >= reader.Length() {
+			break
+		}
+		typ := enc.TLNum(0)
+		l := enc.TLNum(0)
+		typ, err = reader.ReadTLNum()
+		if err != nil {
+			return nil, enc.ErrFailToParse{TypeNum: 0, Err: err}
+		}
+		l, err = reader.ReadTLNum()
+		if err != nil {
+			return nil, enc.ErrFailToParse{TypeNum: 0, Err: err}
+		}
+
+		err = nil
+		if handled := false; true {
+			switch typ {
+			case 664:
+				if true {
+					handled = true
+					handled_Target = true
+					delegate := reader.Delegate(int(l))
+					value.Target, err = delegate.ReadName()
+				}
+			case 665:
+				if true {
+					handled = true
+					handled_ResultsName = true
+					delegate := reader.Delegate(int(l))
+					value.ResultsName, err = delegate.ReadName()
+				}
+			case 666:
+				if true {
+					handled = true
+					handled_Timestamp = true
+					value.Timestamp = uint64(0)
+					{
+						for i := 0; i < int(l); i++ {
+							x := byte(0)
+							x, err = reader.ReadByte()
+							if err != nil {
+								if err == io.EOF {
+									err = io.ErrUnexpectedEOF
+								}
+								break
+							}
+							value.Timestamp = uint64(value.Timestamp<<8) | uint64(x)
+						}
+					}
+				}
+			default:
+				if !ignoreCritical && ((typ <= 31) || ((typ & 1) == 1)) {
+					return nil, enc.ErrUnrecognizedField{TypeNum: typ}
+				}
+				handled = true
+				err = reader.Skip(int(l))
+			}
+			if err == nil && !handled {
+			}
+			if err != nil {
+				return nil, enc.ErrFailToParse{TypeNum: typ, Err: err}
+			}
+		}
+	}
+
+	startPos = reader.Pos()
+	err = nil
+
+	if !handled_Target && err == nil {
+		value.Target = nil
+	}
+	if !handled_ResultsName && err == nil {
+		value.ResultsName = nil
+	}
+	if !handled_Timestamp && err == nil {
+		err = enc.ErrSkipRequired{Name: "Timestamp", TypeNum: 666}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return value, nil
+}
+
+func (value *MetricRequest) Encode() enc.Wire {
+	encoder := MetricRequestEncoder{}
+	encoder.Init(value)
+	return encoder.Encode(value)
+}
+
+func (value *MetricRequest) Bytes() []byte {
+	return value.Encode().Join()
+}
+
+func ParseMetricRequest(reader enc.WireView, ignoreCritical bool) (*MetricRequest, error) {
+	context := MetricRequestParsingContext{}
+	context.Init()
+	return context.Parse(reader, ignoreCritical)
+}
+
+type MetricResponseEncoder struct {
+	Length uint
+}
+
+type MetricResponseParsingContext struct {
+}
+
+func (encoder *MetricResponseEncoder) Init(value *MetricResponse) {
+
+	l := uint(0)
+	l += 3
+	l += uint(1 + enc.Nat(value.Capacity).EncodingLength())
+	l += 3
+	l += uint(1 + enc.Nat(value.Used).EncodingLength())
+	l += 3
+	l += uint(1 + enc.Nat(value.Timestamp).EncodingLength())
+	if value.Delay {
+		l += 3
+		l += 1
+	}
+	encoder.Length = l
+
+}
+
+func (context *MetricResponseParsingContext) Init() {
+
+}
+
+func (encoder *MetricResponseEncoder) EncodeInto(value *MetricResponse, buf []byte) {
+
+	pos := uint(0)
+
+	buf[pos] = 253
+	binary.BigEndian.PutUint16(buf[pos+1:], uint16(658))
+	pos += 3
+
+	buf[pos] = byte(enc.Nat(value.Capacity).EncodeInto(buf[pos+1:]))
+	pos += uint(1 + buf[pos])
+	buf[pos] = 253
+	binary.BigEndian.PutUint16(buf[pos+1:], uint16(659))
+	pos += 3
+
+	buf[pos] = byte(enc.Nat(value.Used).EncodeInto(buf[pos+1:]))
+	pos += uint(1 + buf[pos])
+	buf[pos] = 253
+	binary.BigEndian.PutUint16(buf[pos+1:], uint16(666))
+	pos += 3
+
+	buf[pos] = byte(enc.Nat(value.Timestamp).EncodeInto(buf[pos+1:]))
+	pos += uint(1 + buf[pos])
+	if value.Delay {
+		buf[pos] = 253
+		binary.BigEndian.PutUint16(buf[pos+1:], uint16(667))
+		pos += 3
+		buf[pos] = byte(0)
+		pos += 1
+	}
+}
+
+func (encoder *MetricResponseEncoder) Encode(value *MetricResponse) enc.Wire {
+
+	wire := make(enc.Wire, 1)
+	wire[0] = make([]byte, encoder.Length)
+	buf := wire[0]
+	encoder.EncodeInto(value, buf)
+
+	return wire
+}
+
+func (context *MetricResponseParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*MetricResponse, error) {
+
+	var handled_Capacity bool = false
+	var handled_Used bool = false
+	var handled_Timestamp bool = false
+	var handled_Delay bool = false
+
+	progress := -1
+	_ = progress
+
+	value := &MetricResponse{}
+	var err error
+	var startPos int
+	for {
+		startPos = reader.Pos()
+		if startPos >= reader.Length() {
+			break
+		}
+		typ := enc.TLNum(0)
+		l := enc.TLNum(0)
+		typ, err = reader.ReadTLNum()
+		if err != nil {
+			return nil, enc.ErrFailToParse{TypeNum: 0, Err: err}
+		}
+		l, err = reader.ReadTLNum()
+		if err != nil {
+			return nil, enc.ErrFailToParse{TypeNum: 0, Err: err}
+		}
+
+		err = nil
+		if handled := false; true {
+			switch typ {
+			case 658:
+				if true {
+					handled = true
+					handled_Capacity = true
+					value.Capacity = uint64(0)
+					{
+						for i := 0; i < int(l); i++ {
+							x := byte(0)
+							x, err = reader.ReadByte()
+							if err != nil {
+								if err == io.EOF {
+									err = io.ErrUnexpectedEOF
+								}
+								break
+							}
+							value.Capacity = uint64(value.Capacity<<8) | uint64(x)
+						}
+					}
+				}
+			case 659:
+				if true {
+					handled = true
+					handled_Used = true
+					value.Used = uint64(0)
+					{
+						for i := 0; i < int(l); i++ {
+							x := byte(0)
+							x, err = reader.ReadByte()
+							if err != nil {
+								if err == io.EOF {
+									err = io.ErrUnexpectedEOF
+								}
+								break
+							}
+							value.Used = uint64(value.Used<<8) | uint64(x)
+						}
+					}
+				}
+			case 666:
+				if true {
+					handled = true
+					handled_Timestamp = true
+					value.Timestamp = uint64(0)
+					{
+						for i := 0; i < int(l); i++ {
+							x := byte(0)
+							x, err = reader.ReadByte()
+							if err != nil {
+								if err == io.EOF {
+									err = io.ErrUnexpectedEOF
+								}
+								break
+							}
+							value.Timestamp = uint64(value.Timestamp<<8) | uint64(x)
+						}
+					}
+				}
+			case 667:
+				if true {
+					handled = true
+					handled_Delay = true
+					value.Delay = true
+					err = reader.Skip(int(l))
+				}
+			default:
+				if !ignoreCritical && ((typ <= 31) || ((typ & 1) == 1)) {
+					return nil, enc.ErrUnrecognizedField{TypeNum: typ}
+				}
+				handled = true
+				err = reader.Skip(int(l))
+			}
+			if err == nil && !handled {
+			}
+			if err != nil {
+				return nil, enc.ErrFailToParse{TypeNum: typ, Err: err}
+			}
+		}
+	}
+
+	startPos = reader.Pos()
+	err = nil
+
+	if !handled_Capacity && err == nil {
+		err = enc.ErrSkipRequired{Name: "Capacity", TypeNum: 658}
+	}
+	if !handled_Used && err == nil {
+		err = enc.ErrSkipRequired{Name: "Used", TypeNum: 659}
+	}
+	if !handled_Timestamp && err == nil {
+		err = enc.ErrSkipRequired{Name: "Timestamp", TypeNum: 666}
+	}
+	if !handled_Delay && err == nil {
+		value.Delay = false
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return value, nil
+}
+
+func (value *MetricResponse) Encode() enc.Wire {
+	encoder := MetricResponseEncoder{}
+	encoder.Init(value)
+	return encoder.Encode(value)
+}
+
+func (value *MetricResponse) Bytes() []byte {
+	return value.Encode().Join()
+}
+
+func ParseMetricResponse(reader enc.WireView, ignoreCritical bool) (*MetricResponse, error) {
+	context := MetricResponseParsingContext{}
+	context.Init()
+	return context.Parse(reader, ignoreCritical)
+}

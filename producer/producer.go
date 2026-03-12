@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/a-thieme/repo/tlv"
@@ -19,7 +20,13 @@ import (
 	"github.com/named-data/ndnd/std/security/signer"
 )
 
-func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, callback func(enc.Wire, error)) {
+const (
+	defaultRetries   = 3
+	retryBaseDelayMs = 100
+	maxRetryDelayMs  = 1000
+)
+
+func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, maxRetries int, callback func(enc.Wire, error)) {
 	signer := c.SuggestSigner(name)
 	if signer == nil {
 		callback(nil, fmt.Errorf("no signer found for command: %s", name))
@@ -33,35 +40,84 @@ func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, ca
 		return
 	}
 
-	c.ExpressR(ndn.ExpressRArgs{
-		Name: dest,
-		Config: &ndn.InterestConfig{
-			CanBePrefix: false,
-			MustBeFresh: true,
-		},
-		AppParam: data.Wire,
-		Retries:  0,
-		Callback: func(args ndn.ExpressCallbackArgs) {
-			if args.Result != ndn.InterestResultData {
-				callback(nil, fmt.Errorf("command failed: %s", args.Result))
-				return
-			}
-			c.Validate(args.Data, data.Wire, func(valid bool, err error) {
-				// if !valid {
-				// 	callback(nil, fmt.Errorf("command data validation failed: %w", err))
-				// }
-				callback(args.Data.Content(), nil)
-			})
-		},
-	})
+	var mu sync.Mutex
+	resultCh := make(chan struct {
+		wire enc.Wire
+		err  error
+	}, maxRetries)
+	success := make(chan struct{})
+
+	var attemptExpr func(data *ndn.EncodedData, attempt int)
+	attemptExpr = func(thisData *ndn.EncodedData, attempt int) {
+		c.ExpressR(ndn.ExpressRArgs{
+			Name: dest,
+			Config: &ndn.InterestConfig{
+				CanBePrefix: false,
+				MustBeFresh: true,
+			},
+			AppParam: thisData.Wire,
+			Retries:  0,
+			Callback: func(args ndn.ExpressCallbackArgs) {
+				if args.Result != ndn.InterestResultData {
+					if attempt < maxRetries-1 {
+						delayMs := retryBaseDelayMs * (1 << attempt)
+						if delayMs > maxRetryDelayMs {
+							delayMs = maxRetryDelayMs
+						}
+						time.Sleep(time.Duration(delayMs) * time.Millisecond)
+						attemptExpr(thisData, attempt+1)
+					} else {
+						resultCh <- struct {
+							wire enc.Wire
+							err  error
+						}{nil, fmt.Errorf("command failed after %d retries: %s", maxRetries, args.Result)}
+					}
+					return
+				}
+				c.Validate(args.Data, thisData.Wire, func(valid bool, err error) {
+					mu.Lock()
+					select {
+					case <-success:
+						mu.Unlock()
+						return
+					default:
+					}
+					close(success)
+					mu.Unlock()
+
+					resultCh <- struct {
+						wire enc.Wire
+						err  error
+					}{args.Data.Content(), nil}
+				})
+			},
+		})
+	}
+
+	go attemptExpr(data, 0)
+
+	select {
+	case result := <-resultCh:
+		callback(result.wire, result.err)
+	case <-time.After(10 * time.Second):
+		mu.Lock()
+		select {
+		case <-success:
+			mu.Unlock()
+			return
+		default:
+		}
+		close(success)
+		mu.Unlock()
+		callback(nil, fmt.Errorf("command timed out after %d retries", maxRetries))
+	}
 }
 
-// BasicSchema allows all data and suggests the first matching key in the keychain.
 type BasicSchema struct{}
 
 func (s *BasicSchema) Check(pkt enc.Name, cert enc.Name) bool {
 	fmt.Println("checking data", pkt.Clone().String())
-	return true // Trust everything (matching NullSchema behavior)
+	return true
 }
 
 func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
@@ -76,12 +132,14 @@ func (s *BasicSchema) Suggest(name enc.Name, kc ndn.KeyChain) ndn.Signer {
 
 	return signer.NewSha256Signer()
 }
+
 func main() {
 	count := flag.Int("count", 1, "number of commands to send")
 	rate := flag.Int("rate", 1, "commands per second")
 	timeout := flag.Duration("timeout", 10*time.Second, "command response timeout")
 	cmdType := flag.String("type", "insert", "command type: insert, join, or both")
 	joinRatio := flag.Float64("join-ratio", 0.5, "ratio of JOIN commands when type is both (0.0-1.0)")
+	retries := flag.Int("retries", defaultRetries, "max retries for failed commands")
 	flag.Parse()
 
 	validTypes := map[string]bool{"insert": true, "join": true, "both": true}
@@ -155,7 +213,7 @@ func main() {
 		done := make(chan struct{})
 
 		fmt.Printf("Sending command %d/%d (type=%s)...\n", i+1, *count, commandType)
-		ExpressCommand(client, notify, target, command.Encode(),
+		ExpressCommand(client, notify, target, command.Encode(), *retries,
 			func(w enc.Wire, e error) {
 				defer close(done)
 				if e != nil {

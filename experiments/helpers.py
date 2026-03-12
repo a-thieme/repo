@@ -284,13 +284,14 @@ def print_summary(results: List[Dict]):
             )
 
 
-def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any]:
+def analyze_calibration(calibration_dir: Path, node_count: int, distribution: str = "hydra") -> Dict[str, Any]:
     """
     Analyze calibration results from event logs.
 
     Args:
         calibration_dir: Directory containing iteration subdirectories
         node_count: Expected node count
+        distribution: Distribution mechanism (hydra, auction)
 
     Returns:
         Dict with calibration measurements and recommended timeouts
@@ -298,6 +299,7 @@ def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any
     svs_times = []
     rep_times = []
     prop_times = []
+    prop_rtt_times = []
     meta_values = []
 
     for iter_dir in sorted(calibration_dir.iterdir()):
@@ -310,8 +312,9 @@ def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any
                 with open(metadata_file) as f:
                     meta = json.load(f)
                     meta_values.append(meta)
-                if meta.get("replication_time_max_ms"):
-                    rep_times.append(meta["replication_time_max_ms"])
+                rep_time_max = meta.get("replication_time_max_ms")
+                if rep_time_max is not None:
+                    rep_times.append(rep_time_max)
             except (json.JSONDecodeError, IOError):
                 pass
 
@@ -319,23 +322,22 @@ def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any
         if svs_time > 0:
             svs_times.append(svs_time)
 
-        prop_time = measure_update_propagation(iter_dir, node_count)
+        prop_time, prop_rtt = measure_update_propagation(iter_dir, node_count)
         if prop_time > 0:
             prop_times.append(prop_time)
+        if prop_rtt > 0:
+            prop_rtt_times.append(prop_rtt)
 
     max_svs = max(svs_times) if svs_times else 0
-    rep_p99 = (
-        max([meta.get("replication_time_p99_ms", 0) for meta in meta_values])
-        if meta_values
-        else 0
-    )
-    prop_p99 = (
-        max([meta.get("update_propagation_p99_ms", 0) for meta in meta_values])
-        if meta_values
-        else 0
-    )
+    rep_p99 = max(
+        [meta.get("replication_time_p99_ms") or 0 for meta in meta_values]
+    ) if meta_values else 0
+    prop_p99 = max(
+        [meta.get("update_propagation_p99_ms") or 0 for meta in meta_values]
+    ) if meta_values else 0
     max_rep = max(rep_times) if rep_times else 0
     max_prop = max(prop_times) if prop_times else 0
+    max_rtt = max(prop_rtt_times) if prop_rtt_times else 0.0
 
     rep_p99_safe = rep_p99 * 1.5 if rep_p99 else 0
     prop_p99_safe = prop_p99 * 1.5 if prop_p99 else 0
@@ -348,6 +350,7 @@ def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any
     recommended_rep = int((safe_interval / 1000) + 1)
 
     result = {
+        "distribution": distribution,
         "node_count": node_count,
         "iterations": len(rep_times),
         "measurements": {
@@ -355,6 +358,7 @@ def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any
             "replication_time_ms": rep_times,
             "replication_time_p99_ms": rep_p99,
             "update_propagation_ms": prop_times,
+            "update_propagation_rtt": prop_rtt_times,
             "update_propagation_p99_ms": prop_p99,
         },
         "max_values": {
@@ -362,6 +366,7 @@ def analyze_calibration(calibration_dir: Path, node_count: int) -> Dict[str, Any
             "replication_time_ms": max_rep,
             "replication_time_p99_ms": rep_p99,
             "update_propagation_ms": max_prop,
+            "update_propagation_rtt": max_rtt,
             "update_propagation_p99_ms": prop_p99,
             "safe_interval_ms": safe_interval,
         },
@@ -413,8 +418,78 @@ def measure_svs_convergence(results_dir: Path) -> int:
     return max_svs
 
 
-def measure_update_propagation(results_dir: Path, node_count: int) -> int:
-    """Measure update propagation time from event logs."""
+def parse_topology_delays(topo_path: Path) -> tuple:
+    """Parse link delays from topology file.
+    Returns: ({(node1_lower, node2_lower): delay_ms}, median_delay_ms)
+    """
+    delays = {}
+    median_delays = []
+    
+    if not topo_path.exists():
+        return delays, None
+    
+    try:
+        with open(topo_path) as f:
+            in_links = False
+            for line in f:
+                line = line.strip()
+                if line == '[links]':
+                    in_links = True
+                    continue
+                if line.startswith('[') and in_links:
+                    break
+                if in_links and ':' in line and 'delay' in line:
+                    parts = line.split()
+                    node_part = parts[0]
+                    delay_part = [p for p in parts if 'delay' in p][0]
+                    
+                    nodes = node_part.split(':')
+                    if len(nodes) != 2:
+                        continue
+                    
+                    node1, node2 = nodes[0].lower(), nodes[1].lower()
+                    delay_str = delay_part.split('=')[1].rstrip('ms')
+                    try:
+                        delay_ms = float(delay_str)
+                        delays[(node1, node2)] = delay_ms
+                        delays[(node2, node1)] = delay_ms
+                        median_delays.append(delay_ms)
+                    except (ValueError, IndexError):
+                        continue
+    except IOError:
+        pass
+    
+    median = statistics.median(median_delays) if median_delays else None
+    return delays, median
+
+
+def get_link_delay(node1: str, node2: str, delays: dict, fallback_ms: float) -> float:
+    """Get one-way link delay between two nodes.
+    Uses direct link if available, otherwise returns fallback.
+    """
+    key = (node1.lower(), node2.lower())
+    return delays.get(key, fallback_ms)
+
+
+def measure_update_propagation(results_dir: Path, node_count: int, topology_path: str = None) -> tuple:
+    """Measure update propagation time from event logs.
+    Returns: (max_propagation_ms, list_of_normalized_rtts)
+    """
+    # Load topology delays
+    delays = {}
+    fallback_delay = 10.0  # default for generated topologies
+    if topology_path:
+        topo_path = Path(topology_path)
+    else:
+        # Try to find topology in results directory
+        topo_path = results_dir / 'topology.conf'
+        if not topo_path.exists():
+            topo_path = Path('/usr/local/share/testbed_topology.conf')
+    
+    delays, median_delay = parse_topology_delays(topo_path)
+    if median_delay:
+        fallback_delay = median_delay
+    
     all_events = []
 
     for log_file in results_dir.glob("events-*.jsonl"):
@@ -467,6 +542,8 @@ def measure_update_propagation(results_dir: Path, node_count: int) -> int:
                             update_received[key][receiving_node] = ts
 
     max_prop_ms = 0
+    normalized_rtts = []
+    
     for target, claims in claim_times.items():
         for claiming_node, claim_ts in claims.items():
             key = (target, claiming_node)
@@ -486,8 +563,16 @@ def measure_update_propagation(results_dir: Path, node_count: int) -> int:
                             prop_time = (latest - claim_time).total_seconds() * 1000
                             if prop_time > max_prop_ms:
                                 max_prop_ms = int(prop_time)
+                            
+                            # Calculate normalized RTT
+                            link_delay = get_link_delay(claiming_node, node, delays, fallback_delay)
+                            expected_rtt = 2 * link_delay  # RTT = 2 * one-way delay
+                            if expected_rtt > 0:
+                                normalized_rtt = prop_time / expected_rtt
+                                normalized_rtts.append(normalized_rtt)
 
-    return max_prop_ms
+    max_normalized = max(normalized_rtts) if normalized_rtts else 0.0
+    return max_prop_ms, max_normalized
 
 
 def cmd_collect(args):
@@ -507,20 +592,23 @@ def cmd_collect(args):
 def cmd_calibrate(args):
     """Handle 'calibrate' subcommand."""
     cal_dir = Path(args.calibration_dir)
+    distribution = getattr(args, 'distribution', 'hydra')
 
     if not cal_dir.exists():
         print(f"Error: Calibration directory not found: {cal_dir}", file=sys.stderr)
         sys.exit(1)
 
-    result = analyze_calibration(cal_dir, args.node_count)
+    result = analyze_calibration(cal_dir, args.node_count, distribution)
 
     print(f"\n=== CALIBRATION RESULTS ===\n")
+    print(f"Distribution: {result.get('distribution', 'unknown')}")
     print(f"Node count: {result['node_count']}")
     print(f"Iterations: {result['iterations']}")
     print(f"\nMax values:")
     print(f"  SVS convergence: {result['max_values']['svs_convergence_ms']}ms")
     print(f"  Replication time: {result['max_values']['replication_time_ms']}ms")
     print(f"  Update propagation: {result['max_values']['update_propagation_ms']}ms")
+    print(f"  Update propagation (RTT): {result['max_values']['update_propagation_rtt']:.2f} RTTs")
     print(f"  Safe interval: {result['max_values']['safe_interval_ms']}ms")
     print(f"\nRecommended timeouts:")
     print(f"  --svs-timeout={result['recommended_timeouts']['svs_timeout_s']}s")
@@ -535,7 +623,7 @@ def cmd_calibrate(args):
             json.dump(result, f, indent=2)
         print(f"\nCalibration JSON written to: {output_path}")
 
-        latest_link = output_path.parent / "latest_calibration.json"
+        latest_link = output_path.parent / f"latest_calibration_{distribution}.json"
         if output_path.exists():
             latest_link.unlink(missing_ok=True)
             latest_link.symlink_to(output_path.name)
@@ -569,6 +657,9 @@ def main():
     )
     calibrate_parser.add_argument(
         "--node-count", type=int, default=24, help="Expected node count"
+    )
+    calibrate_parser.add_argument(
+        "--distribution", type=str, default="hydra", help="Distribution mechanism (hydra, auction)"
     )
     calibrate_parser.add_argument("--output", help="Path to write calibration JSON")
     calibrate_parser.set_defaults(func=cmd_calibrate)

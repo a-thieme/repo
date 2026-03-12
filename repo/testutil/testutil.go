@@ -27,36 +27,44 @@ const (
 	EventReplicationCheck EventType = "replication_check"
 	EventStorageChanged   EventType = "storage_changed"
 	EventJobAssignment    EventType = "job_assignment"
+
+	// Auction-specific events
+	EventAuctionStarted EventType = "auction_started"
+	EventAuctionWinners EventType = "auction_winners"
+	EventAuctionResults EventType = "auction_results"
+	EventAuctionBid     EventType = "auction_bid"
+	EventAuctionDelayed EventType = "auction_delayed"
 )
 
 type Event struct {
-	Timestamp          time.Time         `json:"ts"`
-	EventType          EventType         `json:"event"`
-	Node               string            `json:"node,omitempty"`
-	Name               string            `json:"name,omitempty"`
-	Target             string            `json:"target,omitempty"`
-	CommandID          string            `json:"cmdId,omitempty"`
-	SequenceNum        uint64            `json:"seq,omitempty"`
-	Type               string            `json:"type,omitempty"`
-	From               string            `json:"from,omitempty"`
-	To                 string            `json:"to,omitempty"`
-	Jobs               []string          `json:"jobs,omitempty"`
-	Capacity           uint64            `json:"capacity,omitempty"`
-	Used               uint64            `json:"used,omitempty"`
-	Delta              uint64            `json:"delta,omitempty"`
-	Replication        int               `json:"replication,omitempty"`
-	ShouldClaim        bool              `json:"shouldClaim,omitempty"`
-	Reason             string            `json:"reason,omitempty"`
-	DecisionDetails    string            `json:"decisionDetails,omitempty"`
-	Total              uint64            `json:"total,omitempty"`
-	Count              int               `json:"count,omitempty"`
-	CurrentReplication int               `json:"currentReplication,omitempty"`
-	NeededReplication  int               `json:"neededReplication,omitempty"`
-	Candidates         []string          `json:"candidates,omitempty"`
-	CandidateScores    map[string]int    `json:"candidateScores,omitempty"`
-	SelectedCandidates []string          `json:"selectedCandidates,omitempty"`
-	FreeSpace          map[string]uint64 `json:"freeSpace,omitempty"`
-	Assignees          []string          `json:"assignees,omitempty"`
+	Timestamp          time.Time          `json:"ts"`
+	EventType          EventType          `json:"event"`
+	Node               string             `json:"node,omitempty"`
+	Name               string             `json:"name,omitempty"`
+	Target             string             `json:"target,omitempty"`
+	CommandID          string             `json:"cmdId,omitempty"`
+	SequenceNum        uint64             `json:"seq,omitempty"`
+	Type               string             `json:"type,omitempty"`
+	From               string             `json:"from,omitempty"`
+	To                 string             `json:"to,omitempty"`
+	Jobs               []string           `json:"jobs,omitempty"`
+	Capacity           uint64             `json:"capacity,omitempty"`
+	Used               uint64             `json:"used,omitempty"`
+	Delta              uint64             `json:"delta,omitempty"`
+	Replication        int                `json:"replication,omitempty"`
+	ShouldClaim        bool               `json:"shouldClaim,omitempty"`
+	Reason             string             `json:"reason,omitempty"`
+	DecisionDetails    string             `json:"decisionDetails,omitempty"`
+	Total              uint64             `json:"total,omitempty"`
+	Count              int                `json:"count,omitempty"`
+	CurrentReplication int                `json:"currentReplication,omitempty"`
+	NeededReplication  int                `json:"neededReplication,omitempty"`
+	Candidates         []string           `json:"candidates,omitempty"`
+	CandidateScores    map[string]int     `json:"candidateScores,omitempty"`
+	SelectedCandidates []string           `json:"selectedCandidates,omitempty"`
+	FreeSpace          map[string]float64 `json:"freeSpace,omitempty"`
+	Assignees          []string           `json:"assignees,omitempty"`
+	Nonce              uint64             `json:"nonce,omitempty"`
 }
 
 func ParseEventLog(path string) ([]Event, error) {

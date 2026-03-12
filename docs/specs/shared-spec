@@ -1,0 +1,161 @@
+================================================================================
+Shared Distribution Mechanism
+================================================================================
+
+1. Introduction
+
+This document specifies the message formats, processing rules, and shared
+semantics common to all distribution mechanisms in the distributed repository.
+
+2. Terminology
+
+Job Target (Target)
+	The identifier for a job to be performed. This is the command target name
+	from the producer (e.g., /ndn/producer/mytarget/t=123). Nodes "perform"
+	the job by executing the command (simulated INSERT or JOIN operation).
+
+	Appears in: Command, JobAssignment, NodeUpdate
+
+JobAssignment
+	A TLV structure notifying nodes of job assignments. Contains:
+	- Target: enc.Name (job identifier)
+	- Assignees: []enc.Name (list of node names assigned to perform the job)
+
+NodeUpdate
+	An SVS-published structure containing node state. Contains:
+	- Jobs: []enc.Name (list of job targets currently being performed)
+	- NewCommand: *Command (optional new command from producer)
+	- StorageCapacity: uint64 (node's total storage capacity in bytes)
+	- StorageUsed: uint64 (node's current storage usage in bytes)
+	- JobRelease: []*InternalCommand (optional job release signals)
+	- JobAssignments: []*JobAssignment (optional redistribution assignments)
+
+Command
+	A command received from the producer. Contains:
+	- Type: string (INSERT or JOIN)
+	- Target: enc.Name (job identifier)
+	- SnapshotThreshold: uint64
+
+3. Constants
+
+HEARTBEAT_INTERVAL
+	Time between heartbeat publications. Configurable via --heartbeat-interval.
+	Default: 5 seconds.
+
+HEARTBEAT_TIMEOUT
+	Time before considering a node offline. RECOMMENDED: 3 × HEARTBEAT_INTERVAL + buffer
+	where buffer allows for network jitter and processing delay.
+
+STORAGE_THRESHOLD
+	Maximum storage utilization for job claiming. Nodes with storage usage
+	exceeding this threshold MUST NOT claim new jobs. Operator-defined,
+	RECOMMEND 75%.
+
+REPLICATION_FACTOR
+	Number of nodes that must perform each job. Operator-defined, MUST be
+	greater than 0.
+
+4. TLV Definitions
+
+JobAssignment
+
+	0x295:	Target			enc.Name		(job identifier)
+	0x296:	Assignees		[]enc.Name		(sequence of node names)
+
+NodeUpdate (published via SVS)
+
+	0x290:	Jobs			[]enc.Name		(sequence of job targets)
+	0x291:	NewCommand		*Command		(optional new command)
+	0x292:	StorageCapacity		uint64			(node's total capacity)
+	0x293:	StorageUsed		uint64			(node's used storage)
+	0x294:	JobRelease		[]*InternalCommand	(job release signals)
+	0x297:	JobAssignments		[]*JobAssignment	(redistribution assignments)
+
+Command (received from producer)
+
+	Type			string		(INSERT or JOIN)
+	Target			enc.Name		(job identifier)
+	SnapshotThreshold	uint64
+
+5. Heartbeat Mechanism
+
+Each node MUST publish heartbeats at regular intervals to maintain presence
+in the group.
+
+5.1 Publication
+
+The node MUST increase its SVS sequence number by 1 every HEARTBEAT_INTERVAL
+and publish a NodeUpdate containing its current Jobs list and storage metrics.
+
+5.2 Reception
+
+Upon receiving a heartbeat (NodeUpdate) from another node, the node MUST
+reset that peer's timeout timer to HEARTBEAT_TIMEOUT.
+
+5.3 Timeout
+
+When a peer's heartbeat times out:
+
+	1. Retrieve the offline node's last Jobs state
+	2. For each job, check if replication is satisfied
+	3. If any job is under-replicated, invoke the distribution mechanism
+
+6. Replication Check
+
+The system MUST verify that each job has sufficient replication.
+
+6.1 Triggers
+
+Replication checks are performed:
+
+	1. On command receipt from producer
+	2. On Jobs Update from another node
+	3. On heartbeat timeout (when a node is detected offline)
+
+6.2 Algorithm
+
+For each known job target:
+
+	1. Count the number of nodes currently performing the job
+	2. If count < ReplicationFactor, the job is under-replicated
+	3. Under-replicated jobs MUST trigger the distribution mechanism
+
+7. Command Processing
+
+When a node receives a command from the producer, it MUST:
+
+	1. Parse the command (Type: INSERT or JOIN, Target: enc.Name)
+	2. Send StatusResponse to producer with status "received"
+	3. Store the command internally
+	4. Publish NodeUpdate to group sync with NewCommand set to the command
+	5. Perform replication check per Section 6
+	6. If under-replicated, invoke the distribution mechanism
+
+8. Winner Determination
+
+When a node determines that a job is under-replicated, it MUST compute winners
+as follows:
+
+8.1 Filter
+
+Exclude any node that:
+	- Is already assigned the job
+	- Has storage utilization exceeding STORAGE_THRESHOLD
+
+8.2 Sort
+
+Sort remaining candidates by:
+	Primary:   Storage utilization percentage ascending
+	Secondary: Capacity descending			(larger capacity first)
+	Tertiary:  Node name ascending		(lexicographic)
+
+8.3 Select
+
+Select top N candidates where N = ReplicationFactor - CurrentReplicationCount
+
+9. Ordering Semantics
+
+JobAssignment and command NewCommand may arrive in any order via SVS. A node
+MUST NOT claim a job before receiving the corresponding command. If
+JobAssignment arrives first, the node MUST buffer the assignment to process
+upon receiving the command.
