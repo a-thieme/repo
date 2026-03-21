@@ -66,6 +66,10 @@ func selectLeader(nodeStatus map[string]NodeStatus) string {
 	return names[0]
 }
 
+func (r *Repo) amILeader() bool {
+	return r.myNodeName() == selectLeader(r.nodeStatus)
+}
+
 func (r *Repo) String() string {
 	return "repo"
 }

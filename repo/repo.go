@@ -421,30 +421,29 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 		r.addCommand(update.NewCommand)
 		r.eventLogger.LogCommandSynced(update.NewCommand.Type, update.NewCommand.Target.String(), publisherName)
 
-		if r.distributionMechanism == "auction" {
-			targetStr := update.NewCommand.Target.String()
-			r.mu.Lock()
-			// FIXME: this section checking the assignments should be done in both auction and hydra
-			if pending, ok := r.pendingAssignments[targetStr]; ok {
-				log.Info(r, "onGroupSync_pending_assignment_found", "target", targetStr)
-				assignees := encNamesToStrings(pending.Assignees)
-				if slices.Contains(assignees, r.myNodeName()) {
-					r.doCmd(update.NewCommand)
-					r.publishNodeUpdate(&tlv.NodeUpdate{
-						Jobs: r.getMyJobs(),
-					})
-				}
-				delete(r.pendingAssignments, targetStr)
+		targetStr := update.NewCommand.Target.String()
+		r.mu.Lock()
+		if pending, ok := r.pendingAssignments[targetStr]; ok {
+			log.Info(r, "onGroupSync_pending_assignment_found", "target", targetStr)
+			assignees := encNamesToStrings(pending.Assignees)
+			if slices.Contains(assignees, r.myNodeName()) {
+				r.doCmd(update.NewCommand)
+				r.publishNodeUpdate(&tlv.NodeUpdate{
+					Jobs: r.getMyJobs(),
+				})
 			}
-			r.mu.Unlock()
+			delete(r.pendingAssignments, targetStr)
+		}
+		r.mu.Unlock()
 
-			// FIXME: (continued) this check should be in both auction and hydra
-			currentReplication := r.countReplication(update.NewCommand.Target)
-			needed := r.rf - currentReplication
-			if needed > 0 {
-				// FIXME: (continued) this should run different functions based on distributionMechanism
+		currentReplication := r.countReplication(update.NewCommand.Target)
+		needed := r.rf - currentReplication
+		if needed > 0 {
+			if r.distributionMechanism == "auction" {
 				go r.runAuctionIfNeeded(update.NewCommand.Target)
 			}
+			// For Hydra: don't recompute winners here - the node that received from producer
+			// already computed and published them. Non-leaders should ignore.
 		}
 	}
 
@@ -457,68 +456,7 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 		return
 	}
 
-	addedJob := false
-	var reassignments []*tlv.JobAssignment
-	log.Debug(r, "onGroupSync_job_assignments", "count", len(update.JobAssignments), "from", publisherName)
-	for _, assignment := range update.JobAssignments {
-		target := assignment.Target
-		targetStr := target.String()
-		assignees := encNamesToStrings(assignment.Assignees)
-
-		r.redistMu.Lock()
-		if _, exists := r.scheduledRedistributions[targetStr]; exists {
-			r.scheduleHydraReevaluation(target)
-		}
-		r.redistMu.Unlock()
-
-		if r.amIDoingJob(target) {
-			log.Info(r, "onGroupSync_assignment_skipped", "reason", "already_doing_job", "target", targetStr)
-			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "skipped", "already_doing_job", assignees)
-			currentRep := r.countReplication(target)
-			if currentRep >= r.rf {
-				r.cancelHydraReevaluation(target)
-			}
-			continue
-		}
-
-		if !slices.Contains(assignees, r.myNodeName()) {
-			log.Info(r, "onGroupSync_assignment_skipped", "reason", "not_in_assignees", "target", targetStr, "assignees", assignees, "myNode", r.myNodeName())
-			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "skipped", "not_in_assignees", assignees)
-			continue
-		}
-
-		cmd := r.getCommand(target)
-		if cmd == nil {
-			log.Info(r, "onGroupSync_assignment_pending", "reason", "command_not_received", "target", targetStr)
-			r.mu.Lock()
-			r.pendingAssignments[targetStr] = assignment
-			r.mu.Unlock()
-			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "pending", "command_not_received", assignees)
-			continue
-		}
-
-		log.Info(r, "onGroupSync_will_do_job", "target", targetStr, "myNode", r.myNodeName())
-		if r.doTarget(target) {
-			addedJob = true
-			r.clearRetryDelay(targetStr)
-			currentRep := r.countReplication(target)
-			if currentRep >= r.rf {
-				r.cancelHydraReevaluation(target)
-			}
-		} else {
-			delay := r.advanceRetryDelay(targetStr)
-			log.Info(r, "onGroupSync_job_failed_will_retry", "target", targetStr, "delay", delay.String())
-			go func() {
-				time.Sleep(delay)
-				r.retryJobAssignment(target, "hydra")
-			}()
-		}
-	}
-	if addedJob || len(reassignments) > 0 {
-		r.publishNodeUpdate(&tlv.NodeUpdate{
-			JobAssignments: reassignments,
-		})
-	}
+	r.handleHydraJobAssignments(update.JobAssignments, publisherName)
 }
 
 func (r *Repo) retryJobAssignment(target enc.Name, mechanism string) {
@@ -667,6 +605,71 @@ func (r *Repo) handleAuctionJobAssignments(assignments []*tlv.JobAssignment, pub
 	}
 }
 
+func (r *Repo) handleHydraJobAssignments(assignments []*tlv.JobAssignment, publisherName string) {
+	addedJob := false
+	var reassignments []*tlv.JobAssignment
+
+	for _, assignment := range assignments {
+		target := assignment.Target
+		targetStr := target.String()
+		assignees := encNamesToStrings(assignment.Assignees)
+
+		r.redistMu.Lock()
+		if _, exists := r.scheduledRedistributions[targetStr]; exists {
+			r.scheduleHydraReevaluation(target)
+		}
+		r.redistMu.Unlock()
+
+		if r.amIDoingJob(target) {
+			log.Info(r, "handleHydraJobAssignments_skipped", "reason", "already_doing_job", "target", targetStr)
+			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "skipped", "already_doing_job", assignees)
+			currentRep := r.countReplication(target)
+			if currentRep >= r.rf {
+				r.cancelHydraReevaluation(target)
+			}
+			continue
+		}
+
+		if !slices.Contains(assignees, r.myNodeName()) {
+			log.Info(r, "handleHydraJobAssignments_skipped", "reason", "not_in_assignees", "target", targetStr, "assignees", assignees, "myNode", r.myNodeName())
+			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "skipped", "not_in_assignees", assignees)
+			continue
+		}
+
+		cmd := r.getCommand(target)
+		if cmd == nil {
+			log.Info(r, "handleHydraJobAssignments_pending", "reason", "command_not_received", "target", targetStr)
+			r.mu.Lock()
+			r.pendingAssignments[targetStr] = assignment
+			r.mu.Unlock()
+			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "pending", "command_not_received", assignees)
+			continue
+		}
+
+		log.Info(r, "handleHydraJobAssignments_will_do_job", "target", targetStr, "myNode", r.myNodeName())
+		if r.doTarget(target) {
+			addedJob = true
+			r.clearRetryDelay(targetStr)
+			currentRep := r.countReplication(target)
+			if currentRep >= r.rf {
+				r.cancelHydraReevaluation(target)
+			}
+		} else {
+			delay := r.advanceRetryDelay(targetStr)
+			log.Info(r, "handleHydraJobAssignments_failed_will_retry", "target", targetStr, "delay", delay.String())
+			go func() {
+				time.Sleep(delay)
+				r.retryJobAssignment(target, "hydra")
+			}()
+		}
+	}
+	if addedJob || len(reassignments) > 0 {
+		r.publishNodeUpdate(&tlv.NodeUpdate{
+			JobAssignments: reassignments,
+		})
+	}
+}
+
 func (r *Repo) determineWinnersHydra(target enc.Name) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -677,11 +680,20 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	oldLeader := selectLeader(r.nodeStatus)
+	wasILder := r.myNodeName() == oldLeader
+
 	r.nodeStatus[publisher] = NodeStatus{
 		Capacity:    update.StorageCapacity,
 		Used:        update.StorageUsed,
 		LastUpdated: time.Now(),
 		Jobs:        update.Jobs,
+	}
+
+	nowLeader := selectLeader(r.nodeStatus)
+	amINowLeader := r.myNodeName() == nowLeader
+	if wasILder != amINowLeader || oldLeader != nowLeader {
+		log.Info(r, "leader_changed", "wasLeader", oldLeader, "nowLeader", nowLeader, "iWasLeader", wasILder, "iAmLeader", amINowLeader)
 	}
 }
 
@@ -763,7 +775,6 @@ func (r *Repo) scheduleHydraReevaluation(target enc.Name) {
 	r.scheduledRedistributions[targetStr] = time.AfterFunc(delay, func() {
 		r.redistMu.Lock()
 		delete(r.scheduledRedistributions, targetStr)
-		r.mu.Unlock()
 
 		leader := selectLeader(r.nodeStatus)
 		if r.myNodeName() == leader {
@@ -800,9 +811,7 @@ func (r *Repo) redistributeIfNeeded(target enc.Name) {
 
 	leader := selectLeader(r.nodeStatus)
 	if r.myNodeName() != leader {
-		// FIXME: we were the leader when it was called but now we're not?
-		// I don't know if this is even possible
-		r.scheduleHydraReevaluation(target) // NOTE: added since a non-leader should schedule re-evaluations
+		r.scheduleHydraReevaluation(target)
 		return
 	}
 
@@ -928,9 +937,13 @@ func (r *Repo) onBidInterest(name enc.Name, params enc.Wire, reply func(wire enc
 
 	log.Debug(r, "subscribeToResults", "resultsName", resultsName.String(), "target", target.String())
 
-	// FIXME: we should really have retries here, and the interests should be long-lived
 	r.client.ExpressR(ndn.ExpressRArgs{
 		Name: resultsName,
+		Config: &ndn.InterestConfig{
+			CanBePrefix: false,
+			MustBeFresh: true,
+		},
+		Retries: 3,
 		Callback: func(args ndn.ExpressCallbackArgs) {
 			if args.Result != ndn.InterestResultData {
 				log.Warn(r, "subscribeToResults_failed", "result", args.Result)
@@ -1066,68 +1079,74 @@ func (r *Repo) runAuction(cmd *tlv.Command) {
 	var metricsMu sync.Mutex
 	responsesCh := make(chan string, len(peers))
 
+	var wg sync.WaitGroup
 	for _, peer := range peers {
-		peerPrefix, _ := enc.NameFromStr(peer)
-		bidName := peerPrefix.Append(enc.NewGenericComponent(BID_SUFFIX))
-		bidName = bidName.Append(enc.NewTimestampComponent(timestamp))
+		wg.Add(1)
+		go func(peer string) {
+			defer wg.Done()
 
-		metricReq := &tlv.MetricRequest{
-			Target:      cmd.Target,
-			Timestamp:   timestamp,
-			ResultsName: resultsName,
-			Auctioneer:  r.nodePrefix,
-		}
+			peerPrefix, _ := enc.NameFromStr(peer)
+			bidName := peerPrefix.Append(enc.NewGenericComponent(BID_SUFFIX))
+			bidName = bidName.Append(enc.NewTimestampComponent(timestamp))
 
-		peerCopy := peer
-		log.Info(r, "runAuction_sending_bid_interest", "peer", peerCopy, "bidName", bidName.String())
-		r.client.ExpressR(ndn.ExpressRArgs{
-			Name: bidName,
-			Config: &ndn.InterestConfig{
-				CanBePrefix: false,
-				MustBeFresh: true,
-			},
-			AppParam: metricReq.Encode(),
-			Retries:  3,
-			Callback: func(args ndn.ExpressCallbackArgs) {
-				if args.Result != ndn.InterestResultData {
-					log.Warn(r, "runAuction_bid_failed", "peer", peerCopy, "result", args.Result)
-					return
-				}
+			metricReq := &tlv.MetricRequest{
+				Target:      cmd.Target,
+				Timestamp:   timestamp,
+				ResultsName: resultsName,
+				Auctioneer:  r.nodePrefix,
+			}
 
-				log.Info(r, "runAuction_bid_received", "peer", peerCopy, "result", args.Result)
+			log.Info(r, "runAuction_sending_bid_interest", "peer", peer, "bidName", bidName.String())
+			r.client.ExpressR(ndn.ExpressRArgs{
+				Name: bidName,
+				Config: &ndn.InterestConfig{
+					CanBePrefix: false,
+					MustBeFresh: true,
+				},
+				AppParam: metricReq.Encode(),
+				Retries:  3,
+				Callback: func(args ndn.ExpressCallbackArgs) {
+					if args.Result != ndn.InterestResultData {
+						log.Warn(r, "runAuction_bid_failed", "peer", peer, "result", args.Result)
+						return
+					}
 
-				metricResp, err := tlv.ParseMetricResponse(enc.NewWireView(args.Data.Content()), false)
-				if err != nil {
-					log.Warn(r, "runAuction_response_parse_failed", "peer", peerCopy, "err", err)
-					return
-				}
+					log.Info(r, "runAuction_bid_received", "peer", peer, "result", args.Result)
 
-				metricsMu.Lock()
-				peerMetrics[peerCopy] = struct {
-					capacity uint64
-					used     uint64
-					delay    bool
-				}{
-					capacity: metricResp.Capacity,
-					used:     metricResp.Used,
-					delay:    metricResp.Delay,
-				}
-				metricsMu.Unlock()
+					metricResp, err := tlv.ParseMetricResponse(enc.NewWireView(args.Data.Content()), false)
+					if err != nil {
+						log.Warn(r, "runAuction_response_parse_failed", "peer", peer, "err", err)
+						return
+					}
 
-				r.mu.Lock()
-				if status, ok := r.nodeStatus[peerCopy]; ok {
-					status.LastUpdated = time.Now()
-					r.nodeStatus[peerCopy] = status
-				}
-				r.mu.Unlock()
+					metricsMu.Lock()
+					peerMetrics[peer] = struct {
+						capacity uint64
+						used     uint64
+						delay    bool
+					}{
+						capacity: metricResp.Capacity,
+						used:     metricResp.Used,
+						delay:    metricResp.Delay,
+					}
+					metricsMu.Unlock()
 
-				select {
-				case responsesCh <- peerCopy:
-				default:
-				}
-			},
-		})
+					r.mu.Lock()
+					if status, ok := r.nodeStatus[peer]; ok {
+						status.LastUpdated = time.Now()
+						r.nodeStatus[peer] = status
+					}
+					r.mu.Unlock()
+
+					select {
+					case responsesCh <- peer:
+					default:
+					}
+				},
+			})
+		}(peer)
 	}
+	wg.Wait()
 
 	auctionTimer := time.NewTimer(r.auctionTimeout)
 	receivedCount := 0
