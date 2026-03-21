@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/a-thieme/repo/repo/util"
 	"github.com/a-thieme/repo/tlv"
 	enc "github.com/named-data/ndnd/std/encoding"
+	svs "github.com/named-data/ndnd/std/sync"
 )
 
 func TestEventLogger_WriteAndParse(t *testing.T) {
@@ -325,5 +327,285 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 
 	if claimCount != replicationFactor {
 		t.Errorf("Expected %d claims, got %d", replicationFactor, claimCount)
+	}
+}
+
+func TestHydraLeaderSelection(t *testing.T) {
+	nodeStatus := map[string]NodeStatus{
+		"/ndn/repo/n2": {Jobs: []enc.Name{}},
+		"/ndn/repo/n0": {Jobs: []enc.Name{}},
+		"/ndn/repo/n1": {Jobs: []enc.Name{}},
+	}
+
+	leader := selectLeader(nodeStatus)
+	if leader != "/ndn/repo/n0" {
+		t.Errorf("Expected leader /ndn/repo/n0, got %s", leader)
+	}
+}
+
+func TestHydraLeaderSelection_Empty(t *testing.T) {
+	leader := selectLeader(map[string]NodeStatus{})
+	if leader != "" {
+		t.Errorf("Expected empty leader, got %s", leader)
+	}
+}
+
+func TestHydraLeaderSelection_SingleNode(t *testing.T) {
+	nodeStatus := map[string]NodeStatus{
+		"/ndn/repo/solo": {Jobs: []enc.Name{}},
+	}
+
+	leader := selectLeader(nodeStatus)
+	if leader != "/ndn/repo/solo" {
+		t.Errorf("Expected leader /ndn/repo/solo, got %s", leader)
+	}
+}
+
+func TestHydraLeaderRedistribution(t *testing.T) {
+	nodeCount := 5
+	replicationFactor := 3
+	nodeNames := make([]string, nodeCount)
+	repos := make([]*Repo, nodeCount)
+
+	for i := 0; i < nodeCount; i++ {
+		nodeNames[i] = fmt.Sprintf("/ndn/repo/n%d", i)
+		repos[i] = NewRepo("/ndn/drepo", nodeNames[i], "/ndn/repo.teame.dev/repo", replicationFactor, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+	}
+
+	target, _ := enc.NameFromStr("/ndn/target/test")
+	cmd := &tlv.Command{
+		Type:   "INSERT",
+		Target: target,
+	}
+
+	for i := 0; i < nodeCount; i++ {
+		repos[i].mu.Lock()
+		repos[i].nodeStatus[repos[i].myNodeName()] = NodeStatus{
+			Jobs:        []enc.Name{},
+			Capacity:    1000000000,
+			Used:        0,
+			LastUpdated: time.Now(),
+		}
+		repos[i].mu.Unlock()
+		repos[i].addCommand(cmd)
+	}
+
+	for i := 0; i < nodeCount; i++ {
+		for j := 0; j < nodeCount; j++ {
+			if i != j {
+				repos[i].mu.Lock()
+				repos[i].nodeStatus[nodeNames[j]] = NodeStatus{
+					Jobs:        []enc.Name{},
+					Capacity:    1000000000,
+					Used:        0,
+					LastUpdated: time.Now(),
+				}
+				repos[i].mu.Unlock()
+			}
+		}
+	}
+
+	repos[0].mu.Lock()
+	repos[0].nodeStatus["/ndn/repo/n3"] = NodeStatus{
+		Jobs:     []enc.Name{target},
+		Capacity: 1000000000,
+		Used:     0,
+	}
+	repos[0].mu.Unlock()
+
+	leader := selectLeader(repos[0].nodeStatus)
+	t.Logf("Leader: %s", leader)
+
+	if leader != "/ndn/repo/n0" {
+		t.Errorf("Expected leader /ndn/repo/n0, got %s", leader)
+	}
+
+	nonLeaderIdx := 1
+	nonLeader := repos[nonLeaderIdx]
+	nonLeader.mu.Lock()
+	nonLeader.nodeStatus["/ndn/repo/n3"] = NodeStatus{
+		Jobs:     []enc.Name{target},
+		Capacity: 1000000000,
+		Used:     0,
+	}
+	nonLeader.mu.Unlock()
+
+	nonLeader.onHeartbeatTimeoutHydra("/ndn/repo/n3")
+
+	nonLeader.redistMu.Lock()
+	_, hasScheduled := nonLeader.scheduledRedistributions[target.String()]
+	nonLeader.redistMu.Unlock()
+
+	if !hasScheduled {
+		t.Error("Non-leader should have scheduled re-evaluation after detecting node failure")
+	}
+}
+
+func TestHydraCancelWhenReplicated(t *testing.T) {
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+
+	target, _ := enc.NameFromStr("/ndn/target/cancel-test")
+	cmd := &tlv.Command{
+		Type:   "INSERT",
+		Target: target,
+	}
+
+	repo.mu.Lock()
+	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
+	}
+	repo.nodeStatus["peer-1"] = NodeStatus{
+		Jobs:     []enc.Name{target},
+		Capacity: 1000000000,
+		Used:     0,
+	}
+	repo.nodeStatus["peer-2"] = NodeStatus{
+		Jobs:     []enc.Name{target},
+		Capacity: 1000000000,
+		Used:     0,
+	}
+	repo.mu.Unlock()
+
+	repo.addCommand(cmd)
+	repo.scheduleHydraReevaluation(target)
+
+	repo.redistMu.Lock()
+	_, hasScheduled := repo.scheduledRedistributions[target.String()]
+	repo.redistMu.Unlock()
+
+	if !hasScheduled {
+		t.Error("Should have scheduled re-evaluation initially")
+	}
+
+	repo.cancelHydraReevaluation(target)
+
+	repo.redistMu.Lock()
+	_, stillScheduled := repo.scheduledRedistributions[target.String()]
+	repo.redistMu.Unlock()
+
+	if stillScheduled {
+		t.Error("Re-evaluation should have been cancelled")
+	}
+}
+
+func TestHydraRescheduleOnAssignment(t *testing.T) {
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+
+	target, _ := enc.NameFromStr("/ndn/target/reschedule-test")
+	cmd := &tlv.Command{
+		Type:   "INSERT",
+		Target: target,
+	}
+
+	repo.mu.Lock()
+	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
+	}
+	repo.mu.Unlock()
+
+	repo.addCommand(cmd)
+	repo.scheduleHydraReevaluation(target)
+
+	repo.redistMu.Lock()
+	originalTimer := repo.scheduledRedistributions[target.String()]
+	repo.redistMu.Unlock()
+
+	if originalTimer == nil {
+		t.Fatal("Timer should be scheduled")
+	}
+
+	repo.scheduleHydraReevaluation(target)
+
+	repo.redistMu.Lock()
+	newTimer := repo.scheduledRedistributions[target.String()]
+	repo.redistMu.Unlock()
+
+	if newTimer == nil {
+		t.Fatal("Timer should still be scheduled after reschedule")
+	}
+
+	if originalTimer == newTimer {
+		t.Error("Timer should have been replaced on reschedule")
+	}
+}
+
+func TestAuctionHeartbeatUpdateCallback(t *testing.T) {
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "auction", nil, 500*time.Millisecond)
+
+	repo.mu.Lock()
+	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
+		Jobs:        []enc.Name{},
+		Capacity:    1000000000,
+		Used:        0,
+		LastUpdated: time.Now().Add(-10 * time.Second),
+	}
+	repo.mu.Unlock()
+
+	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
+	update := svs.SvSyncUpdate{
+		Name: peerName,
+		Boot: 1,
+		High: 1,
+		Low:  1,
+	}
+
+	repo.handleAuctionHeartbeatSvSyncUpdate(update)
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+
+	status, exists := repo.nodeStatus[peerName.String()]
+	if !exists {
+		t.Fatal("Peer should have been added to nodeStatus")
+	}
+
+	if time.Since(status.LastUpdated) > time.Second {
+		t.Error("LastUpdated should have been updated to now")
+	}
+}
+
+func TestAuctionHeartbeatUpdateCallback_ExistingNode(t *testing.T) {
+	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "auction", nil, 500*time.Millisecond)
+
+	oldTime := time.Now().Add(-10 * time.Second)
+	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
+
+	repo.mu.Lock()
+	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
+		Jobs:        []enc.Name{},
+		Capacity:    1000000000,
+		Used:        0,
+		LastUpdated: time.Now(),
+	}
+	repo.nodeStatus[peerName.String()] = NodeStatus{
+		Jobs:        []enc.Name{},
+		Capacity:    1000000000,
+		Used:        0,
+		LastUpdated: oldTime,
+	}
+	repo.mu.Unlock()
+
+	update := svs.SvSyncUpdate{
+		Name: peerName,
+		Boot: 1,
+		High: 1,
+		Low:  1,
+	}
+
+	repo.handleAuctionHeartbeatSvSyncUpdate(update)
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+
+	status := repo.nodeStatus[peerName.String()]
+	if time.Since(status.LastUpdated) > time.Second {
+		t.Error("LastUpdated should have been updated to now for existing node")
+	}
+	if status.LastUpdated == oldTime {
+		t.Error("LastUpdated should have changed from old time")
 	}
 }

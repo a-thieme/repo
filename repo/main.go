@@ -19,7 +19,7 @@ func main() {
 	maxJoinGrowthRate := flag.Uint64("max-join-growth-rate", 10*1024*1024, "Maximum JOIN storage growth per second in bytes")
 	heartbeatInterval := flag.Duration("heartbeat-interval", 5*time.Second, "Heartbeat interval for node status updates")
 	distribution := flag.String("distribution", "hydra", "Distribution mechanism: hydra, auction")
-	auctionTimeout := flag.Duration("auction-timeout", 1750*time.Millisecond, "Auction timeout for waiting for bid responses")
+	auctionTimeout := flag.Duration("auction-timeout", 6000*time.Millisecond, "Auction timeout for waiting for bid responses")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 

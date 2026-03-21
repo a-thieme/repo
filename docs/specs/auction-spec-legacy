@@ -1,0 +1,257 @@
+================================================================================
+AUCTION SPECIFICATION - IMPLEMENTATION GUIDANCE (LEGACY)
+================================================================================
+
+This document contains implementation-specific details that supplement the
+auction-spec. It is provided for reference when implementing or maintaining
+the auction mechanism but is NOT part of the normative specification.
+
+For the authoritative protocol specification, see auction-spec.
+
+================================================================================
+PREFIXES TO REGISTER (ON STARTUP)
+================================================================================
+
+- heartbeat SVS prefix: /<group prefix>/heartbeat
+- /<node prefix>/bid
+- /<node prefix>/results
+
+================================================================================
+IMPLEMENTATION CONSTANTS
+================================================================================
+
+AUCTION_TIMEOUT = 3.5 × expected max RTT
+
+    For the testbed topology, RTT ≈ 500ms, giving AUCTION_TIMEOUT ≈ 1.75s
+
+    This accounts for:
+        T_bid     = RTT    (bid interest → peer → bid data back to auctioneer)
+        T_result = RTT    (result interest → auctioneer → result data back)
+        T_update = 1.5×RTT (NodeUpdate propagation to all nodes after job claim)
+
+    Total = RTT + RTT + 1.5×RTT = 3.5×RTT
+
+AUCTION_BACKUP_DELAY = AUCTION_TIMEOUT + 2s
+
+    Time to wait for an earlier auction to complete and SVS to propagate
+    before initiating a backup auction.
+
+Note: These values are calibrated for the testbed topology. Other deployments
+SHOULD adjust based on expected network characteristics.
+
+================================================================================
+CLI FLAGS
+================================================================================
+
+The following command-line flags control auction behavior:
+
+    --auction-timeout duration
+        Timeout for waiting for MetricResponse from peers.
+        Default: 1.75s (calibrated for testbed)
+
+    --auction-backup-delay duration
+        Delay before initiating a backup auction.
+        Default: 3.75s
+
+================================================================================
+AUCTION HEARTBEATS
+================================================================================
+
+The auction mechanism uses a separate SVS group for heartbeats:
+
+    - SVS group prefix: /<group prefix>/heartbeat
+    - Increase sequence number by 1 every HEARTBEAT_INTERVAL (5s)
+    - Note: This does not publish any data, and nodes do not attempt to
+      fetch the update
+
+See shared-spec for additional heartbeat behavior.
+
+================================================================================
+AUCTIONEER PSEUDOCODE
+================================================================================
+
+The following pseudocode describes the auctioneer's behavior:
+
+function runAuction(target, rf):
+    timestamp = uint64(time.Now().UnixNano())
+    resultsName = /<self prefix>/results/v=<timestamp>
+
+    // Send bid interests to all peers
+    for each node in peerList:
+        if node == self or node.isDoing(target):
+            continue
+        interestName = /<node prefix>/bid/v=<timestamp>
+        appParams = MetricRequest {
+            Target: target,
+            Timestamp: timestamp,
+            ResultsName: resultsName
+        }
+        sendInterest(interestName, appParams)
+
+    // Wait for responses
+    responses = waitForResponses(AUCTION_TIMEOUT)
+
+    // Check for Delay
+    for each response in responses:
+        if response.Delay == true:
+            publishJobAssignment(resultsName, target, nil)
+            return
+
+    // Determine winners
+    candidates = filter(nodes, not node.isDoing(target))
+    sort(candidates, by (used/capacity) ascending)
+    winners = candidates[0 : rf - currentReplication]
+
+    // Publish results
+    publishJobAssignment(resultsName, target, winners)
+
+function publishJobAssignment(resultsName, target, assignees):
+    data = JobAssignment {
+        Target: target,
+        Assignees: assignees
+    }
+    client.Store().Put(data, resultsName)
+
+================================================================================
+PEER PSEUDOCODE
+================================================================================
+
+The following pseudocode describes peer behavior when receiving a bid interest:
+
+function onBidInterest(interest):
+    request = parseMetricRequest(interest.AppParams)
+    timestamp = request.Timestamp
+    resultsName = request.ResultsName
+
+    // Determine Delay
+    if request.Target == currentAuctionTarget:
+        if timestamp < currentAuctionTimestamp:
+            delay = true              // Their auction is earlier
+        elif timestamp > currentAuctionTimestamp:
+            delay = false             // Our auction is earlier
+        else:
+            delay = (ourNodeName > request.AuctioneerName)
+    else:
+        delay = false  // Different target, no conflict
+
+    // Respond with metrics
+    response = MetricResponse {
+        Capacity: storageCapacity,
+        Used: storageUsed,
+        Delay: delay
+    }
+    sendData(interest.Name, response)
+
+    // Subscribe to results
+    expressInterest(resultsName, onResultsData)
+
+================================================================================
+HANDLING RESULTS DATA
+================================================================================
+
+function onResultsData(data):
+    assignment = parseJobAssignment(data.Content)
+
+    if assignment.Assignees is nil or empty:
+        // Auction cancelled
+        if isUnderReplicated(assignment.Target):
+            runAuction(assignment.Target, rf)
+        return
+
+    if ourNodeName in assignment.Assignees:
+        doJob(assignment.Target)
+        publishNodeUpdate()
+
+    if isUnderReplicated(assignment.Target):
+        runAuction(assignment.Target, rf)
+
+================================================================================
+PENDING ASSIGNMENT BUFFER
+================================================================================
+
+If an assignment is received before the corresponding command:
+
+    buffer[target] = assignment
+
+On NodeUpdate receipt with NewCommand:
+
+    if command.Target in buffer:
+        assignment = buffer[command.Target]
+        if isUnderReplicated(command.Target):
+            doJob(command.Target)
+            delete buffer[command.Target]
+            if isUnderReplicated(command.Target):
+                runAuction(command.Target, rf)
+
+================================================================================
+EVENT LOGGING
+================================================================================
+
+The following events SHOULD be logged for debugging and analysis:
+
+    auction_started     - Auction initiated for a target
+    auction_cancelled  - Auction cancelled due to Delay response
+    auction_bid_received - Received MetricResponse from a peer
+    auction_completed   - Auction completed with winners selected
+    auction_delayed    - Local auction delayed due to peer timestamp
+    pending_assignment_buffered - Assignment buffered awaiting command
+
+================================================================================
+EXAMPLE: 3-NODE AUCTION FLOW
+================================================================================
+
+Topology:
+    - nodeA: auctioneer (initiator)
+    - nodeB: peer
+    - nodeC: peer
+    - Job Target: /ndn/producer/mytarget/t=1234567890
+    - Replication Factor: 2
+
+Flow:
+
+1. nodeA detects under-replication for target
+   - Generates timestamp: 1700000000123456789
+   - ResultsName: /ndn/repo/nodeA/results/v=1700000000123456789
+
+2. nodeA sends Bid Interests to nodeB, nodeC
+   - Interest name: /ndn/repo/nodeB/bid/v=1700000000123456789
+   - AppParams: MetricRequest {
+        Target: /ndn/producer/mytarget/t=1234567890,
+        Timestamp: 1700000000123456789,
+        ResultsName: /ndn/repo/nodeA/results/v=1700000000123456789
+      }
+
+3. nodeB, nodeC receive Bid Interests
+   - Parse MetricRequest
+   - Determine Delay (based on timestamp comparison)
+   - Send MetricResponse with storage metrics
+   - Subscribe to ResultsName
+
+4. nodeA receives MetricResponses
+   - No Delay received
+   - Determine winners (nodes with lowest storage utilization %)
+   - Suppose nodeA (30% used) and nodeB (40% used) win
+
+5. nodeA publishes JobAssignment
+   - Data name: /ndn/repo/nodeA/results/v=1700000000123456789
+   - Content: {
+        Target: /ndn/producer/mytarget/t=1234567890,
+        Assignees: [nodeA, nodeB]
+      }
+
+6. nodeB, nodeC receive JobAssignment
+   - nodeB sees it's in Assignees → claims job
+   - nodeC is not in Assignees → no action
+   - Both check replication: satisfied (2 >= RF)
+
+================================================================================
+IMPORTANT NOTES
+================================================================================
+
+1. The auction mechanism is a COMPLETELY SEPARATE code path from Hydra.
+   The Hydra behavior must remain EXACTLY as before.
+
+2. Bid Interests (MetricRequest/MetricResponse) are REQUIRED for proper
+   timestamp-based coordination.
+
+================================================================================

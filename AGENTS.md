@@ -3,6 +3,7 @@
 ## Project Overview
 
 This is a Go project implementing a distributed Named Data Networking (NDN) data repository. It consists of three main components:
+
 - **repo**: Main repository that manages storage commands, distributes jobs across nodes
 - **producer**: Sends commands to the repository
 - **tlv**: Defines TLV data structures for command/node communication
@@ -60,12 +61,15 @@ make -C experiments shell NODES=5
 ## Code Style Guidelines
 
 ### General
+
 - Language: Go 1.25.6
 - Format: Run `go fmt` before committing
 - No linter config found - follow standard Go conventions
 
 ### Imports
+
 Group imports in this order with blank lines between:
+
 1. Standard library (`slices`, `sync`, `time`, etc.)
 2. External packages (`github.com/a-thieme/repo/...`)
 3. NDN packages (`github.com/named-data/ndnd/...`)
@@ -86,6 +90,7 @@ import (
 ```
 
 ### Naming Conventions
+
 - **Types**: PascalCase (e.g., `Repo`, `NodeStatus`, `EventLogger`)
 - **Struct fields**: camelCase, unexported (e.g., `groupPrefix`, `storageCapacity`)
 - **Functions**: camelCase (e.g., `myNodeName()`, `amIDoingJob()`)
@@ -94,6 +99,7 @@ import (
 - **Acronyms**: Keep uppercase in names (e.g., `encodeXML`, not `encodeXml`)
 
 ### Types and Structs
+
 - Use struct composition for configuration
 - Embed interfaces for delegation when appropriate
 - Use explicit field names; avoid anonymous fields unless embedding
@@ -111,6 +117,7 @@ type Repo struct {
 ```
 
 ### Error Handling
+
 - Return errors from functions when possible
 - Use `log.Fatal()` for fatal errors that should stop the program
 - Use `log.Warn()` for non-fatal issues that should be logged
@@ -127,6 +134,7 @@ if err := r.engine.Start(); err != nil {
 ```
 
 ### Mutex and Concurrency
+
 - Always use `defer r.mu.Unlock()` after `Lock()`
 - Consider `sync.RWMutex` for read-heavy operations
 - Document if a function requires the lock to be held
@@ -140,6 +148,7 @@ func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
 ```
 
 ### Testing
+
 - Test files: `*_test.go` in same package
 - Use `testing.T` methods: `t.Fatalf()`, `t.Errorf()`, `t.Skip()`
 - Use `t.TempDir()` for temporary test files
@@ -172,16 +181,19 @@ go test -v -timeout 120s ./repo/...
 ```
 
 **Requirements:**
+
 - NFD must be installed and running locally
 - No special routes needed - tests create their own prefixes under `/ndn/drepo`
 - Tests automatically set multicast strategies for SVS sync prefixes
 
 **Test Configuration:**
+
 - Tests set multicast strategy for `/ndn/drepo/group-messages/32=svs` (all modes)
 - In auction mode, tests also set `/ndn/drepo/heartbeat/32=svs`
 - Tests use `-short` flag to skip integration tests
 
 ### TLV Definitions
+
 - TLV structs use struct tags for code generation
 - Follow pattern in `tlv/definitions.go`
 - Run `go generate` after modifying TLV definitions
@@ -195,17 +207,20 @@ type Command struct {
 ```
 
 ### Logging
+
 - Use the NDN log package: `log.Info()`, `log.Warn()`, `log.Fatal()`
 - Include structured keys: `log.Info(r, "repo_start")`
 - Use error keys: `log.Fatal(r, "node_update_pub_failed", "err", err)`
 
 ### Code Organization
+
 - Main logic in `repo/repo.go`, `producer/producer.go`
 - Utilities in `repo/util/` (event_log.go, counting_face.go)
 - TLV definitions in `tlv/definitions.go`
 - Tests alongside implementation files
 
 ### File Headers
+
 - Use `//go:generate` directives for code generation
 - Embed directives: `//go:embed testbed-root.decoded`
 
@@ -218,12 +233,14 @@ var testbedRootCert []byte
 ## Dependencies
 
 Key external packages:
+
 - `github.com/named-data/ndnd` - NDN SDK
 - `github.com/cloudflare/cloudflare-go` - Cloudflare DNS integration
 
 ## Common Tasks
 
 ### Running specific tests
+
 ```bash
 # Single test
 go test -v -run 'TestEventLogger_WriteAndParse' -timeout 30s ./repo/...
@@ -236,6 +253,7 @@ go test -v -timeout 30s ./repo/...
 ```
 
 ### Building
+
 ```bash
 make build
 # Or manually:
@@ -244,12 +262,15 @@ go build -o bin/producer ./producer
 ```
 
 ### Timeout Configuration
+
 Default timeouts are calibrated for the testbed topology (real link delays):
+
 - `--svs-timeout`: 8s (SVS health check)
 - `--producer-timeout`: 1s (Producer command timeout)
 - `--replication-timeout`: 1s (Replication wait timeout)
 
 Run calibration to measure realistic values:
+
 ```bash
 make test-timing  # Uses Docker/mini-ndn
 # Or in experiments/:
@@ -257,15 +278,19 @@ make calibrate CALIBRATE_NODES=24 CALIBRATE_ITER=5
 ```
 
 Calibration now uses 99th percentile + 50% buffer for recommended timeouts. Results include:
+
 - `replication_time_p95_ms`, `replication_time_p99_ms`
 - `update_propagation_p95_ms`, `update_propagation_p99_ms`
 
 ### Topology Files
+
 The project includes mini-ndn topology configurations in `experiments/`:
+
 - `testbed_topology.conf` - Real NDN testbed topology with 24 nodes and actual link latencies
 - `full_mesh_topology.conf` - Full mesh topology for testing (all 10ms links)
 
 The testbed topology uses real link delays (RTT/2 in ms) from the NDN testbed. Delays MUST include the `ms` suffix:
+
 ```ini
 UCLA:FRANKFURT delay=75ms   # Correct
 UCLA:FRANKFURT delay=75     # Wrong - will be ignored!
@@ -276,11 +301,13 @@ UCLA:FRANKFURT delay=75     # Wrong - will be ignored!
 The project includes an alternative distribution mechanism called "auction" (see `docs/specs/auction-spec` for full specification).
 
 **Key Terms (see docs/specs/auction-spec GLOSSARY for complete list):**
+
 - **Job Target (Target)**: The command identifier to be replicated (e.g., `/ndn/producer/mytarget/t=123`)
 - **Bid Interest Name**: `/<peer-node-prefix>/bid/v=<timestamp>` - where bids are sent
 - **Results Interest Name**: `/<auctioneer-node-prefix>/results/v=<timestamp>` - where results are published
 
 **Running experiments with auction:**
+
 ```bash
 # Calibrate for auction mode
 make -C experiments calibrate CALIBRATE_NODES=24 CALIBRATE_ITER=5 DISTRIBUTION=auction
@@ -290,7 +317,93 @@ make -C experiments run NODE_COUNTS="4 8 12" PRODUCER_COUNTS="1" -j5 DISTRIBUTIO
 ```
 
 **Important:** When debugging auction issues, reference `docs/specs/auction-spec` first. The spec includes:
+
 - Complete flow diagram with examples
 - TLV definitions
 - Timestamp collision resolution
 - Pending assignment buffer handling
+
+---
+
+## Current Implementation Status (March 2026)
+
+### Hydra Distribution (Working)
+
+**Status: Fully operational**
+
+Hydra distribution mechanism is working correctly with retry logic and failure recovery.
+
+**Failure Recovery Tests:**
+
+| Test | Status | Recovery Time | Reaction Time |
+|------|--------|---------------|--------------|
+| SingleRepoDown | PASS | ~15.6s | ~138ms |
+| MultipleReposDown | PASS | ~16.6s | ~1.1s |
+| CascadingFailures | PASS | - | - |
+
+**Experiments (24 nodes, RF=3):**
+
+| Producers | Commands | RepMax | All at RF |
+|-----------|----------|--------|-----------|
+| 1 | 10 | 355ms | ✓ |
+| 4 | 40 | 378ms | ✓ |
+| 8 | 80 | 389ms | ✓ |
+| 16 | 160 | 389ms | ✓ |
+
+**Key Features:**
+
+- Exponential backoff retry (500ms base, 30s max) when `doJob` fails
+- Reaction time = recovery_time - HEARTBEAT_TIMEOUT (15.5s)
+- Retry clears when replication is satisfied
+
+### Auction Distribution (Not Working)
+
+**Status: Broken - Heartbeat mechanism not functioning**
+
+The auction heartbeat mechanism is fundamentally broken. When a node calls `heartbeatSync.Publish(nil)`, other nodes don't receive the notification via `SetOnPublisher` callback.
+
+**Symptoms:**
+
+- Auction failure tests fail: recovery never happens after node kill
+- Auction experiments show very low replication success rates (1-3 out of 10-40 commands at RF)
+
+**Root Cause:**
+The `SvsALO` with `Publish(nil)` and `SetOnPublisher` doesn't work as expected for heartbeat signaling. The callback mechanism doesn't trigger properly when nodes publish nil content.
+
+**Attempted Fixes:**
+
+1. Tried using `SvSync` with `OnUpdate` callback (same pattern as working auc-repo) - did not fix issue
+2. Tried `SetOnPublisher` with `Publish(nil)` - callback not triggered
+
+**Required Investigation:**
+The issue may be in the NDN SDK's handling of nil content publications, or in how SvsALO broadcasts to subscribers. Further debugging requires:
+
+- Checking if `Publish(nil)` actually sends any data
+- Verifying the multicast strategy is correctly set for `/ndn/drepo/heartbeat/32=svs`
+- Comparing with the working auc-repo implementation at `/home/adam/ndn/auc-repo/repo/awareness/awareness.go`
+
+### Changes Made (March 2026)
+
+**repo/repo.go:**
+
+- Added `retryDelays` map and `retryMu` mutex for tracking exponential backoff state
+- Added `BASE_RETRY_DELAY = 500ms` and `MAX_RETRY_DELAY = 30s` constants
+- Added `getRetryDelay()` and `clearRetryDelay()` functions
+- Added `retryJobClaim()` for Hydra retry handling when `doJob` fails
+- Modified `handleHydraJobAssignments()` to schedule retry with exponential backoff on job failure
+- Modified `handleAuctionJobAssignments()` for similar retry behavior in auction mode
+
+**repo/helpers.go:**
+
+- Added `BASE_RETRY_DELAY` and `MAX_RETRY_DELAY` constants
+- Added `getRetryDelay()` and `clearRetryDelay()` functions
+
+**repo/integration_failure_test.go:**
+
+- Added `reactionTime = recoveryTime - HEARTBEAT_TIMEOUT` calculation
+- Log output now shows both recovery time and reaction time
+
+### Remaining Issues
+
+1. **Auction heartbeat**: Requires significant debugging - likely needs direct comparison with auc-repo implementation
+2. **Hydra MultipleReposDown**: Test can occasionally fail due to timing sensitivity when two nodes fail simultaneously (race condition in leader election/redistribution timing)

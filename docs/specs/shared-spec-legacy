@@ -1,0 +1,199 @@
+================================================================================
+SHARED SPECIFICATION - IMPLEMENTATION GUIDANCE (LEGACY)
+================================================================================
+
+This document contains implementation-specific details that supplement the
+shared-spec. It is provided for reference when implementing or maintaining
+the distributed repository but is NOT part of the normative specification.
+
+For the authoritative protocol specification, see shared-spec.
+
+================================================================================
+PREFIXES TO REGISTER
+================================================================================
+
+On startup, each node MUST register the following prefixes:
+
+    /<group prefix>/group-messages    SVS sync prefix (all modes)
+
+Auction mode additionally requires:
+
+    /<node prefix>/bid                Bid Interest namespace
+    /<node prefix>/results            Results Interest namespace
+    /<group prefix>/heartbeat         Heartbeat SVS prefix (auction mode)
+
+================================================================================
+CONFIGURATION
+================================================================================
+
+CLI Flags:
+
+    --heartbeat-interval duration
+        Interval between heartbeat publications.
+        Default: 5s
+
+    --distribution string
+        Distribution mechanism: "hydra" or "auction".
+        Default: "hydra"
+
+================================================================================
+HEARTBEAT MECHANISM (IMPLEMENTATION)
+================================================================================
+
+Heartbeat Publication:
+
+    - SVS group depends on distribution type
+    - Increase sequence number by 1 every HEARTBEAT_INTERVAL
+    - For Hydra: publish NodeUpdate with current Jobs list
+    - For Auction: no data published (SVS sync only)
+
+Heartbeat Timeout:
+
+    - For any heartbeat received from another node, reset its timer to:
+        HEARTBEAT_TIMEOUT = 3 × HEARTBEAT_INTERVAL + jitter
+
+    where jitter = random duration in [0, HEARTBEAT_INTERVAL/2]
+
+    For Hydra: add 500ms buffer (default timeout: 15.5s)
+
+    On timeout:
+        - For each job the node was doing:
+            - If the job is now under-replicated, run the distribution mechanism
+
+================================================================================
+REPLICATION CHECK (IMPLEMENTATION)
+================================================================================
+
+The replication check is invoked:
+
+    1. On command receipt from producer
+    2. On Jobs Update from another node
+    3. On heartbeat timeout (when a node goes offline)
+
+Algorithm:
+
+    For every node in nodeStatus:
+        Add up the number of nodes currently doing each command
+
+    If count < ReplicationFactor:
+        Run the distribution mechanism
+
+================================================================================
+STORAGE SIMULATION (IMPLEMENTATION)
+================================================================================
+
+Storage Update Rules:
+
+    INSERT commands:
+        - Immediate storage increase: random 0-500MB
+
+    JOIN commands:
+        - Gradual growth: 0 to maxJoinGrowthRate bytes per tick
+        - Tick interval: 1 second
+        - Maximum growth rate: configured per deployment
+
+Implementation:
+
+    runStorageSimulation() runs every 1 second via time.Ticker
+
+================================================================================
+JOB CLAIMING (IMPLEMENTATION)
+================================================================================
+
+The doJob() function performs the following:
+
+    1. Check storage availability:
+        If storage usage > STORAGE_THRESHOLD (75%):
+            Return false
+
+    2. Add target to local jobs list:
+        Append to r.jobs
+
+    3. Update storage:
+        If INSERT: add random 0-500MB to storageUsed
+        If JOIN: storage grows over time (per Storage Simulation)
+
+    4. Log event: "job_claimed"
+
+    5. Return true
+
+================================================================================
+JOB UPDATE PROCESSING (IMPLEMENTATION)
+================================================================================
+
+Upon receiving a NodeUpdate containing Jobs from another node:
+
+    1. Compare with previously-known jobs from that node
+    2. For each job that changed state:
+
+        Job removed from node's list:
+            - Check if under-replicated
+            - If under-replicated: schedule auction
+
+        Job added to node's list:
+            - Check if over-replicated
+            - If over-replicated: cancel auctions
+
+Example:
+
+    Node A was doing [1,2,3] and now publishes [2,3,4]:
+
+        - Job 1: removed from A's list → check under-replication
+        - Job 2: still with A → no action
+        - Job 3: still with A → no action
+        - Job 4: added to A's list → check over-replication
+
+================================================================================
+COMMAND PROCESSING (IMPLEMENTATION)
+================================================================================
+
+On receiving a command from producer:
+
+    1. Parse command:
+        - Type: INSERT or JOIN
+        - Target: enc.Name (job identifier)
+        - SnapshotThreshold: uint64
+
+    2. Send StatusResponse to producer:
+        - status: "received"
+
+    3. Store command internally
+
+    4. Publish NodeUpdate to group sync:
+        NodeUpdate { NewCommand: commandFromProducer }
+
+    5. Check for replication
+
+    6. Run under-replication handler if needed
+
+See distribution-specific specs for:
+    - Hydra: determineWinnersHydra() and synchronous JobAssignments
+    - Auction: MetricRequest/MetricResponse bidding mechanism
+
+================================================================================
+EVENT LOGGING (IMPLEMENTATION)
+================================================================================
+
+Shared events (logged by both mechanisms):
+
+    command_received    Command received from producer
+    command_synced     Command synchronized via SVS
+    job_claimed        Job claimed by this node
+    node_update        NodeUpdate published
+    replication_check  Replication check invoked
+    storage_changed    Storage usage changed
+
+Hydra-specific events:
+
+    decision_made      Winner determination completed
+
+Auction-specific events:
+
+    auction_started     Auction initiated
+    auction_cancelled  Auction cancelled
+    auction_bid_received  MetricResponse received
+    auction_completed   Auction completed
+    auction_delayed    Local auction delayed
+    pending_assignment_buffered  Assignment buffered awaiting command
+
+================================================================================

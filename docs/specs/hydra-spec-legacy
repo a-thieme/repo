@@ -1,0 +1,118 @@
+================================================================================
+Hydra Distribution Mechanism - Implementation Details
+================================================================================
+
+This document contains implementation-specific details for the Hydra distribution
+mechanism. See hydra-spec for the protocol specification.
+
+1. Function Specifications
+
+1.1 Winner Determination
+
+determineWinnersHydra(cmd *Command) []string
+
+	Input: Command to distribute
+	Output: List of node names that should perform the job
+
+	Algorithm:
+	1. Count current replication by iterating nodeStatus entries
+	2. For each node, check if target is in their Jobs list
+	3. Count total nodes currently doing the job
+
+	4. Filter candidates:
+	   - For each node NOT already doing the job
+	   - Check if node's storage usage < STORAGE_THRESHOLD (75%)
+	   - Only consider nodes with capacity to accept more work
+
+	5. Sort candidates by priority:
+	   - Primary: Free space descending (most free space first)
+	   - Secondary: Capacity descending (larger capacity first)
+	   - Tertiary: Name ascending (lexicographic tie-breaker)
+
+	6. Select winners:
+	   - needed = rf - currentReplication
+	   - Select top N candidates where N = needed
+
+	7. Return selected candidate list (can be empty if replication satisfied)
+
+1.2 Job Claiming
+
+doJob(cmd *Command) bool
+
+	Input: Command to perform
+	Output: true if job claimed successfully, false if storage full
+
+	Claims the job by:
+	- Adding target to local Jobs list
+	- Incrementing storage used
+	- Returning true
+
+	Returns false if storage would exceed STORAGE_THRESHOLD
+
+1.3 Job Status
+
+amIDoingJob(target enc.Name) bool
+
+	Input: Job target identifier
+	Output: true if this node is currently performing the job
+
+	Checks if target exists in local Jobs list.
+
+2. Event Logging
+
+The following events MUST be logged:
+
+	command_received
+		Emitted when a command is received from the producer
+
+	command_synced
+		Emitted when a command is published via SVS
+
+	decision_made
+		Emitted when winner determination completes
+
+	job_claimed
+		Emitted when this node claims a job
+
+	node_update
+		Emitted when NodeUpdate is received from peer
+
+	replication_check
+		Emitted when replication check is performed
+
+	storage_changed
+		Emitted when storage usage changes
+
+3. Default Configuration
+
+Hydra is the DEFAULT distribution mechanism.
+Activated when --distribution=hydra (or not specified).
+
+4. Implementation Notes
+
+4.1 Synchronous Distribution
+
+All distribution happens synchronously in one step. The node that receives the
+command decides winners immediately without round-trip communication.
+
+4.2 Single Source of Truth
+
+JobAssignments in NodeUpdate are authoritative. Nodes MUST NOT second-guess
+assignments from peers.
+
+4.3 No Separate Communication
+
+All communication for distribution happens via SVS:
+- Commands, JobAssignments, and status updates all in NodeUpdate
+- No separate Interest-based communication needed for distribution
+
+4.4 Storage Full Handling (Not Yet Specified)
+
+When a node assigned a job cannot accept it due to storage being full:
+
+	1. The node rejects the job assignment
+	2. The assigning node detects under-replication and recomputes winners
+	3. New JobAssignments are published
+
+This behavior is documented here as an implementation note but is not yet
+fully specified in the protocol.

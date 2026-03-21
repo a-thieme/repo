@@ -297,7 +297,16 @@ def main():
     info("Calculating and installing routes...\n")
     grh.calculateNPossibleRoutes()
 
-    info("Setting multicast strategy for SVS sync interests only...\n")
+    # Force sync RIB to FIB to ensure all routes are installed
+    info("Syncing RIB to FIB...\n")
+    for host in ndn.net.hosts:
+        host.cmd("nfdc rib announce 2>&1")
+
+    # Wait for routes to propagate
+    info("Waiting for routes to propagate (5s)...\n")
+    time.sleep(5)
+
+    info("Setting multicast strategy for SVS sync interests and bid prefixes...\n")
     for host in ndn.net.hosts:
         host.cmd(
             "nfdc strategy set /ndn/drepo/group-messages/32=svs /localhost/nfd/strategy/multicast 2>&1"
@@ -305,9 +314,12 @@ def main():
         host.cmd(
             "nfdc strategy set /ndn/drepo/heartbeat/32=svs /localhost/nfd/strategy/multicast 2>&1"
         )
-        host.cmd(
-            "nfdc strategy set /ndn/repo/.*/bid /localhost/nfd/strategy/multicast 2>&1"
-        )
+        # Set multicast strategy for each node's bid prefix explicitly (not regex)
+        for other_host in ndn.net.hosts:
+            bid_prefix = f"/ndn/repo/{other_host.name}/bid"
+            host.cmd(
+                f"nfdc strategy set {bid_prefix} /localhost/nfd/strategy/multicast 2>&1"
+            )
         host.cmd(
             "nfdc strategy set /ndn/drepo/notify /localhost/nfd/strategy/best-route 2>&1"
         )
@@ -315,10 +327,15 @@ def main():
     info("Verifying multicast strategy is active on all nodes...\n")
     strategy_timeout = 10
     for host in ndn.net.hosts:
-        for prefix in [
+        prefixes_to_verify = [
             "/ndn/drepo/group-messages/32=svs",
             "/ndn/drepo/heartbeat/32=svs",
-        ]:
+        ]
+        # Add bid prefixes for verification
+        for other_host in ndn.net.hosts:
+            prefixes_to_verify.append(f"/ndn/repo/{other_host.name}/bid")
+
+        for prefix in prefixes_to_verify:
             deadline = time.time() + strategy_timeout
             result = ""
             while time.time() < deadline:

@@ -174,6 +174,7 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 	recoveryDeadline := time.Now().Add(*failureRecoveryWait)
 	recovered := false
 	var recoveryTime time.Duration
+	var reactionTime time.Duration
 
 	for time.Now().Before(recoveryDeadline) {
 		commandsAfterFailure := getCommandsWithClaims(t, repos[:len(repos)-cfg.failureCount])
@@ -189,6 +190,7 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 
 		if allRecovered {
 			recoveryTime = time.Since(failureTime)
+			reactionTime = recoveryTime - HEARTBEAT_TIMEOUT
 			recovered = true
 			break
 		}
@@ -202,7 +204,7 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 	t.Logf("Commands affected: %d", len(affectedCommands))
 
 	if recovered {
-		t.Logf("PASS: Recovery achieved in %v", recoveryTime)
+		t.Logf("PASS: Recovery achieved in %v (reaction time: %v)", recoveryTime, reactionTime)
 		for target := range affectedCommands {
 			t.Logf("  Command %s recovered to RF", target)
 		}
