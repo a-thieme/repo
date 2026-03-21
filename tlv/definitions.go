@@ -59,6 +59,8 @@ type MetricRequest struct {
 	ResultsName enc.Name `tlv:"0x299"`
 	//+field:natural
 	Timestamp uint64 `tlv:"0x29A"`
+	//+field:name
+	Auctioneer enc.Name `tlv:"0x29C"`
 }
 
 type MetricResponse struct {

@@ -21,6 +21,9 @@ const STORAGE_TICK_TIME = 1 * time.Second
 const BASE_RETRY_DELAY = 500 * time.Millisecond
 const MAX_RETRY_DELAY = 30 * time.Second
 
+const DefaultStorageCapacity = 500 * 1024 * 1024   // 500MB
+const MaxInsertCost = DefaultStorageCapacity / 100 // 1% = 5MB
+
 const BID_SUFFIX = "bid"
 const RESULTS_SUFFIX = "results"
 const HEARTBEAT_SUFFIX = "heartbeat"
@@ -245,9 +248,6 @@ func (r *Repo) doTarget(target enc.Name) bool {
 	return r.doJobWithStats(cmd, c, u)
 }
 
-// FIXME: why does this take capacity and used as parameters when it could get them
-// itself via r.getStorageStats? also, unless it is used only when handling a full command,
-// it can just take in the target instead of command
 func (r *Repo) doJobWithStats(cmd *tlv.Command, capacity, used uint64) bool {
 	if capacity > 0 && (float64(used)/float64(capacity) >= 0.75) {
 		return false
@@ -257,8 +257,7 @@ func (r *Repo) doJobWithStats(cmd *tlv.Command, capacity, used uint64) bool {
 	r.jobs = append(r.jobs, cmd.Target)
 
 	if cmd.Type == "INSERT" {
-		// FIXME: cap this to 1% of the default storage capacity
-		cost := (hashFromString(cmd.Target.String()) % (500 * 1024 * 1024))
+		cost := (hashFromString(cmd.Target.String()) % MaxInsertCost)
 		r.storageUsed += cost
 
 		jobKey := cmd.Target.String()
@@ -285,8 +284,8 @@ func NewHydraMechanism() *HydraMechanism {
 	}
 }
 
-func (h *HydraMechanism) DetermineWinners(cmd *tlv.Command, nodeStatus map[string]NodeStatus, myName string, rf int, eventLogger util.Logger) []string {
-	currentReplication := countReplicationInternal(cmd.Target, nodeStatus)
+func (h *HydraMechanism) DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus, myName string, rf int, eventLogger util.Logger) []string {
+	currentReplication := countReplicationInternal(target, nodeStatus)
 
 	candidates := make([]string, 0, len(nodeStatus))
 	usedSpace := make(map[string]float64)
@@ -294,7 +293,7 @@ func (h *HydraMechanism) DetermineWinners(cmd *tlv.Command, nodeStatus map[strin
 	for name, status := range nodeStatus {
 		isDoing := false
 		for _, job := range status.Jobs {
-			if job.Equal(cmd.Target) {
+			if job.Equal(target) {
 				isDoing = true
 				break
 			}
@@ -314,7 +313,7 @@ func (h *HydraMechanism) DetermineWinners(cmd *tlv.Command, nodeStatus map[strin
 	if needed <= 0 {
 		if eventLogger != nil {
 			eventLogger.LogDecisionMade(
-				cmd.Target.String(),
+				target.String(),
 				false,
 				"replication_satisfied",
 				fmt.Sprintf("current=%d needed=%d", currentReplication, needed),
@@ -367,7 +366,7 @@ func (h *HydraMechanism) DetermineWinners(cmd *tlv.Command, nodeStatus map[strin
 
 	if eventLogger != nil {
 		eventLogger.LogDecisionMade(
-			cmd.Target.String(),
+			target.String(),
 			shouldClaim,
 			reason,
 			fmt.Sprintf("current=%d needed=%d selected=%v", currentReplication, needed, selectedCandidates),
@@ -400,15 +399,15 @@ func NewAuctionMechanism() *AuctionMechanism {
 	return &AuctionMechanism{}
 }
 
-func (a *AuctionMechanism) DetermineWinners(cmd *tlv.Command, nodeStatus map[string]NodeStatus, myName string, rf int, eventLogger util.Logger) []string {
-	currentReplication := countReplicationInternal(cmd.Target, nodeStatus)
+func (a *AuctionMechanism) DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus, myName string, rf int, eventLogger util.Logger) []string {
+	currentReplication := countReplicationInternal(target, nodeStatus)
 
 	candidates := make([]string, 0, len(nodeStatus))
 	usedPercentage := make(map[string]float64)
 	for name, status := range nodeStatus {
 		isDoing := false
 		for _, job := range status.Jobs {
-			if job.Equal(cmd.Target) {
+			if job.Equal(target) {
 				isDoing = true
 				break
 			}
@@ -425,7 +424,7 @@ func (a *AuctionMechanism) DetermineWinners(cmd *tlv.Command, nodeStatus map[str
 	if needed <= 0 {
 		if eventLogger != nil {
 			eventLogger.LogDecisionMade(
-				cmd.Target.String(),
+				target.String(),
 				false,
 				"replication_satisfied",
 				fmt.Sprintf("current=%d needed=%d", currentReplication, needed),
@@ -472,13 +471,13 @@ func (a *AuctionMechanism) DetermineWinners(cmd *tlv.Command, nodeStatus map[str
 
 	if eventLogger != nil {
 		eventLogger.LogAuctionWinners(
-			cmd.Target.String(),
+			target.String(),
 			candidates,
 			winnerScores,
 			selectedCandidates,
 		)
 		eventLogger.LogDecisionMade(
-			cmd.Target.String(),
+			target.String(),
 			shouldClaim,
 			reason,
 			fmt.Sprintf("current=%d needed=%d selected=%v", currentReplication, needed, selectedCandidates),
@@ -492,9 +491,7 @@ func (a *AuctionMechanism) DetermineWinners(cmd *tlv.Command, nodeStatus map[str
 	return selectedCandidates
 }
 
-// FIXME: this function doesn't just get the retry delay, it also resets the delay
-// either rename or fix the function to match the intention
-func (r *Repo) getRetryDelay(target string) time.Duration {
+func (r *Repo) advanceRetryDelay(target string) time.Duration {
 	r.retryMu.Lock()
 	defer r.retryMu.Unlock()
 

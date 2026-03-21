@@ -1332,6 +1332,8 @@ type MetricRequestEncoder struct {
 
 	Target_length      uint
 	ResultsName_length uint
+
+	Auctioneer_length uint
 }
 
 type MetricRequestParsingContext struct {
@@ -1351,6 +1353,13 @@ func (encoder *MetricRequestEncoder) Init(value *MetricRequest) {
 		}
 	}
 
+	if value.Auctioneer != nil {
+		encoder.Auctioneer_length = 0
+		for _, c := range value.Auctioneer {
+			encoder.Auctioneer_length += uint(c.EncodingLength())
+		}
+	}
+
 	l := uint(0)
 	if value.Target != nil {
 		l += 3
@@ -1364,6 +1373,11 @@ func (encoder *MetricRequestEncoder) Init(value *MetricRequest) {
 	}
 	l += 3
 	l += uint(1 + enc.Nat(value.Timestamp).EncodingLength())
+	if value.Auctioneer != nil {
+		l += 3
+		l += uint(enc.TLNum(encoder.Auctioneer_length).EncodingLength())
+		l += encoder.Auctioneer_length
+	}
 	encoder.Length = l
 
 }
@@ -1400,6 +1414,15 @@ func (encoder *MetricRequestEncoder) EncodeInto(value *MetricRequest, buf []byte
 
 	buf[pos] = byte(enc.Nat(value.Timestamp).EncodeInto(buf[pos+1:]))
 	pos += uint(1 + buf[pos])
+	if value.Auctioneer != nil {
+		buf[pos] = 253
+		binary.BigEndian.PutUint16(buf[pos+1:], uint16(668))
+		pos += 3
+		pos += uint(enc.TLNum(encoder.Auctioneer_length).EncodeInto(buf[pos:]))
+		for _, c := range value.Auctioneer {
+			pos += uint(c.EncodeInto(buf[pos:]))
+		}
+	}
 }
 
 func (encoder *MetricRequestEncoder) Encode(value *MetricRequest) enc.Wire {
@@ -1417,6 +1440,7 @@ func (context *MetricRequestParsingContext) Parse(reader enc.WireView, ignoreCri
 	var handled_Target bool = false
 	var handled_ResultsName bool = false
 	var handled_Timestamp bool = false
+	var handled_Auctioneer bool = false
 
 	progress := -1
 	_ = progress
@@ -1476,6 +1500,13 @@ func (context *MetricRequestParsingContext) Parse(reader enc.WireView, ignoreCri
 						}
 					}
 				}
+			case 668:
+				if true {
+					handled = true
+					handled_Auctioneer = true
+					delegate := reader.Delegate(int(l))
+					value.Auctioneer, err = delegate.ReadName()
+				}
 			default:
 				if !ignoreCritical && ((typ <= 31) || ((typ & 1) == 1)) {
 					return nil, enc.ErrUnrecognizedField{TypeNum: typ}
@@ -1502,6 +1533,9 @@ func (context *MetricRequestParsingContext) Parse(reader enc.WireView, ignoreCri
 	}
 	if !handled_Timestamp && err == nil {
 		err = enc.ErrSkipRequired{Name: "Timestamp", TypeNum: 666}
+	}
+	if !handled_Auctioneer && err == nil {
+		value.Auctioneer = nil
 	}
 
 	if err != nil {

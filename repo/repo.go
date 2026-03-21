@@ -83,7 +83,7 @@ type NodeStatus struct {
 }
 
 type DistributionMechanism interface {
-	DetermineWinners(cmd *tlv.Command, nodeStatus map[string]NodeStatus, myName string, rf int, eventLogger util.Logger) []string
+	DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus, myName string, rf int, eventLogger util.Logger) []string
 }
 
 // initialization
@@ -366,7 +366,6 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 		r.mu.Lock()
 		if pending, ok := r.pendingAssignments[targetStr]; ok {
 			log.Info(r, "onCommand_pending_assignment_found", "target", targetStr)
-			// FIXME: pending assignments only store ones assigned to us, so this check isn't necessary
 			assignees := encNamesToStrings(pending.Assignees)
 			if slices.Contains(assignees, r.myNodeName()) {
 				r.doCmd(cmd)
@@ -392,9 +391,9 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 	}
 
 	myPrefix := r.myNodeName()
-	winners := r.determineWinnersHydra(cmd)
+	winners := r.determineWinnersHydra(cmd.Target)
 	if slices.Contains(winners, myPrefix) {
-		r.doCmd(cmd)
+		r.doTarget(cmd.Target)
 	}
 
 	r.publishNodeUpdate(&tlv.NodeUpdate{
@@ -488,18 +487,18 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 			continue
 		}
 
-		// FIXME: remove this getCommand()
 		cmd := r.getCommand(target)
-		log.Debug(r, "onGroupSync_got_command", "target", targetStr, "cmd", cmd)
 		if cmd == nil {
 			log.Info(r, "onGroupSync_assignment_pending", "reason", "command_not_received", "target", targetStr)
+			r.mu.Lock()
+			r.pendingAssignments[targetStr] = assignment
+			r.mu.Unlock()
 			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "pending", "command_not_received", assignees)
 			continue
 		}
 
 		log.Info(r, "onGroupSync_will_do_job", "target", targetStr, "myNode", r.myNodeName())
-		// FIXME: use r.doTartet() not command
-		if r.doCmd(cmd) {
+		if r.doTarget(target) {
 			addedJob = true
 			r.clearRetryDelay(targetStr)
 			currentRep := r.countReplication(target)
@@ -507,11 +506,11 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 				r.cancelHydraReevaluation(target)
 			}
 		} else {
-			delay := r.getRetryDelay(targetStr)
+			delay := r.advanceRetryDelay(targetStr)
 			log.Info(r, "onGroupSync_job_failed_will_retry", "target", targetStr, "delay", delay.String())
 			go func() {
 				time.Sleep(delay)
-				r.retryJobClaim(target, cmd)
+				r.retryJobAssignment(target, "hydra")
 			}()
 		}
 	}
@@ -522,14 +521,13 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 	}
 }
 
-// FIXME: this doesn't need the cmd as a parameter
-func (r *Repo) retryJobClaim(target enc.Name, cmd *tlv.Command) {
+func (r *Repo) retryJobAssignment(target enc.Name, mechanism string) {
 	targetStr := target.String()
 
 	r.mu.Lock()
 	if r.amIDoingJob(target) {
 		r.mu.Unlock()
-		log.Info(r, "retryJobClaim_skipped", "reason", "already_doing_job", "target", targetStr)
+		log.Info(r, "retryJobAssignment_skipped", "reason", "already_doing_job", "target", targetStr)
 		return
 	}
 
@@ -537,19 +535,17 @@ func (r *Repo) retryJobClaim(target enc.Name, cmd *tlv.Command) {
 	if currentRep >= r.rf {
 		r.mu.Unlock()
 		r.clearRetryDelay(targetStr)
-		log.Info(r, "retryJobClaim_skipped", "reason", "replication_satisfied", "target", targetStr)
+		log.Info(r, "retryJobAssignment_skipped", "reason", "replication_satisfied", "target", targetStr)
 		return
 	}
-
-	capacity, used := r.getStorageStatsUnsafe()
 	r.mu.Unlock()
 
-	if r.doJobWithStats(cmd, capacity, used) {
-		log.Info(r, "retryJobClaim_success", "target", targetStr)
+	if r.doTarget(target) {
+		log.Info(r, "retryJobAssignment_success", "target", targetStr)
 		r.clearRetryDelay(targetStr)
 		r.mu.Lock()
 		currentRep := r.countReplication(target)
-		if currentRep >= r.rf {
+		if currentRep >= r.rf && mechanism == "hydra" {
 			r.cancelHydraReevaluation(target)
 		}
 		r.mu.Unlock()
@@ -557,11 +553,11 @@ func (r *Repo) retryJobClaim(target enc.Name, cmd *tlv.Command) {
 			Jobs: []enc.Name{target},
 		})
 	} else {
-		delay := r.getRetryDelay(targetStr)
-		log.Info(r, "retryJobClaim_failed_will_retry", "target", targetStr, "delay", delay.String())
+		delay := r.advanceRetryDelay(targetStr)
+		log.Info(r, "retryJobAssignment_failed_will_retry", "target", targetStr, "delay", delay.String(), "mechanism", mechanism)
 		go func() {
 			time.Sleep(delay)
-			r.retryJobClaim(target, cmd)
+			r.retryJobAssignment(target, mechanism)
 		}()
 	}
 }
@@ -619,11 +615,8 @@ func (r *Repo) handleAuctionJobAssignments(assignments []*tlv.JobAssignment, pub
 		assignees := encNamesToStrings(assignment.Assignees)
 
 		if len(assignees) == 0 {
-			// FIXME: when empty auctions are published, that means they were cancelled, not delayed.
-			// it also doesn't need to be logged
 			log.Info(r, "handleAuctionJobAssignments_delayed", "target", targetStr, "from", publisherName)
 			r.eventLogger.LogAuctionDelayed(targetStr, "delayed_by_peer")
-			// TODO: find if this check needs to happen, given the flow of everything else
 			currentReplication := r.countReplication(target)
 			if currentReplication < r.rf {
 				go r.runAuctionIfNeeded(target)
@@ -643,7 +636,6 @@ func (r *Repo) handleAuctionJobAssignments(assignments []*tlv.JobAssignment, pub
 			continue
 		}
 
-		// we are in assignees and not doing it
 		cmd := r.getCommand(target)
 		if cmd == nil {
 			log.Info(r, "handleAuctionJobAssignments_pending", "target", targetStr)
@@ -655,7 +647,7 @@ func (r *Repo) handleAuctionJobAssignments(assignments []*tlv.JobAssignment, pub
 		}
 
 		log.Info(r, "handleAuctionJobAssignments_will_do_job", "target", targetStr, "myNode", r.myNodeName())
-		if r.doCmd(cmd) {
+		if r.doTarget(target) {
 			r.clearRetryDelay(targetStr)
 			r.publishNodeUpdate(&tlv.NodeUpdate{
 				Jobs: r.getMyJobs(),
@@ -665,46 +657,20 @@ func (r *Repo) handleAuctionJobAssignments(assignments []*tlv.JobAssignment, pub
 				go r.runAuctionIfNeeded(target)
 			}
 		} else {
-			delay := r.getRetryDelay(targetStr)
+			delay := r.advanceRetryDelay(targetStr)
 			log.Info(r, "handleAuctionJobAssignments_failed_will_retry", "target", targetStr, "delay", delay.String())
-			// FIXME: we might want to keep track of these so we can cancel or reschedule them (for better cleanup)
-			// note, this is an optimization
 			go func() {
 				time.Sleep(delay)
-				r.retryAuctionClaim(target)
+				r.retryJobAssignment(target, "auction")
 			}()
 		}
 	}
 }
 
-func (r *Repo) retryAuctionClaim(target enc.Name) {
-	targetStr := target.String()
-
-	r.mu.Lock()
-	if r.amIDoingJob(target) {
-		r.mu.Unlock()
-		log.Info(r, "retryAuctionClaim_skipped", "reason", "already_doing_job", "target", targetStr)
-		return
-	}
-
-	currentRep := r.countReplication(target)
-	if currentRep >= r.rf {
-		r.mu.Unlock()
-		r.clearRetryDelay(targetStr)
-		log.Info(r, "retryAuctionClaim_skipped", "reason", "replication_satisfied", "target", targetStr)
-		return
-	}
-	r.mu.Unlock()
-
-	// FIXME: why does it check replication again? we were already assigned this before and we know that
-	// the job is now under-replicated why run an auction here when we could claim it and be done with it
-	r.runAuctionIfNeeded(target)
-}
-
-func (r *Repo) determineWinnersHydra(cmd *tlv.Command) []string {
+func (r *Repo) determineWinnersHydra(target enc.Name) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.distributor.DetermineWinners(cmd, r.nodeStatus, r.myNodeName(), r.rf, r.eventLogger)
+	return r.distributor.DetermineWinners(target, r.nodeStatus, r.myNodeName(), r.rf, r.eventLogger)
 }
 
 func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
@@ -755,40 +721,27 @@ func (r *Repo) onHeartbeatTimeoutHydra(nodeName string) {
 
 	for _, target := range affectedJobs {
 		r.mu.Lock()
-		cmd := r.getCommandInternal(target)
-		if cmd == nil {
-			r.mu.Unlock()
-			// FIXME: if the leader doesn't have a command that a downed node was doing,
-			// it will not attempt to re-replicate it. this is due to the implementation only,
-			// since technically, a leader could reassign jobs while only knowing their targets.
-			// I think it is coded this way because some helper functions use commands as parameters
-			// instead of the targets alone. The one exception to this is when we take into account
-			// a job's cost (see /home/adam/ndn/new-repo's implementation for details), but that
-			// would be an optimization at best
-			continue
-		}
-
 		currentReplication := countReplicationInternal(target, r.nodeStatus)
 		if currentReplication >= r.rf {
 			r.cancelHydraReevaluation(target)
 			r.mu.Unlock()
 			continue
 		}
-		capacity, used := r.getStorageStatsUnsafe()
 		r.mu.Unlock()
 
-		winners := r.determineWinnersHydra(cmd)
+		winners := r.determineWinnersHydra(target)
 
-		// FIXME: why do we only publish job assignments if we are not the winner?
-		// It assumes that only one node went down but maybe that's why it sometimes fails if
-		// two nodes doing the same job both go down
+		var assignments []*tlv.JobAssignment
 		if slices.Contains(winners, myName) {
-			r.doJobWithStats(cmd, capacity, used)
-		} else if winners != nil {
-			assignments := []*tlv.JobAssignment{{
+			r.doTarget(target)
+		}
+		if winners != nil {
+			assignments = []*tlv.JobAssignment{{
 				Target:    target,
 				Assignees: stringNamesToEncNames(winners),
 			}}
+		}
+		if len(assignments) > 0 {
 			r.publishJobAssignments(assignments)
 		}
 	}
@@ -853,26 +806,21 @@ func (r *Repo) redistributeIfNeeded(target enc.Name) {
 		return
 	}
 
-	winners := r.determineWinnersHydra(cmd)
+	winners := r.determineWinnersHydra(target)
 	myName := r.myNodeName()
 
 	var assignments []*tlv.JobAssignment
-	addedJob := false
-
-	// FIXME: again, this assumes that only one node went down and nothing else bad happened
-	// there could also be a case where an under-replicated job lost one of its 2 nodes, leaving only
-	// one left. This prevents it from reaching rf=3
 	if slices.Contains(winners, myName) {
-		r.doCmd(cmd)
-		addedJob = true
-	} else if winners != nil {
-		assignments = append(assignments, &tlv.JobAssignment{
+		r.doTarget(target)
+	}
+	if winners != nil {
+		assignments = []*tlv.JobAssignment{{
 			Target:    target,
 			Assignees: stringNamesToEncNames(winners),
-		})
+		}}
 	}
 
-	if addedJob || len(assignments) > 0 {
+	if len(assignments) > 0 {
 		r.mu.Unlock()
 		r.publishJobAssignments(assignments)
 	} else {
@@ -948,8 +896,7 @@ func (r *Repo) onBidInterest(name enc.Name, params enc.Wire, reply func(wire enc
 		weDelay = false
 		reason = "incoming_later_than_ours"
 	} else {
-		// FIXME: add auctioneer name into the bid request so these are deterministic, not based on name prefix count
-		incomingAuctioneer := name.Prefix(2).String()
+		incomingAuctioneer := metricReq.Auctioneer.String()
 		myName := r.myNodeName()
 		weDelay = incomingAuctioneer < myName
 		if weDelay {
@@ -973,8 +920,7 @@ func (r *Repo) onBidInterest(name enc.Name, params enc.Wire, reply func(wire enc
 	}
 
 	if r.eventLogger != nil {
-		// FIXME: add auctioneer name into the bid request so these are deterministic, not based on name prefix count
-		r.eventLogger.LogAuctionBid(target.String(), name.Prefix(2).String(), capacity, used, weDelay)
+		r.eventLogger.LogAuctionBid(target.String(), metricReq.Auctioneer.String(), capacity, used, weDelay)
 	}
 
 	log.Debug(r, "replyingToBid", "name", name)
@@ -1129,6 +1075,7 @@ func (r *Repo) runAuction(cmd *tlv.Command) {
 			Target:      cmd.Target,
 			Timestamp:   timestamp,
 			ResultsName: resultsName,
+			Auctioneer:  r.nodePrefix,
 		}
 
 		peerCopy := peer
@@ -1278,7 +1225,7 @@ func (r *Repo) determineAndPublishAuctionWinners(target enc.Name, timestamp uint
 		return
 	}
 
-	winners := r.determineWinnersAuction(cmd, nodeStatusCopy, r.myNodeName(), r.rf)
+	winners := r.determineWinnersAuction(target, nodeStatusCopy, r.myNodeName(), r.rf)
 
 	log.Info(r, "runAuction_winners", "target", targetStr, "winners", winners)
 
@@ -1305,8 +1252,8 @@ func (r *Repo) determineAndPublishAuctionWinners(target enc.Name, timestamp uint
 	r.eventLogger.LogAuctionResults(targetStr, resultsName.String(), winners)
 }
 
-func (r *Repo) determineWinnersAuction(cmd *tlv.Command, nodeStatus map[string]NodeStatus, myName string, rf int) []string {
-	return r.distributor.DetermineWinners(cmd, nodeStatus, myName, rf, r.eventLogger)
+func (r *Repo) determineWinnersAuction(target enc.Name, nodeStatus map[string]NodeStatus, myName string, rf int) []string {
+	return r.distributor.DetermineWinners(target, nodeStatus, myName, rf, r.eventLogger)
 }
 
 func (r *Repo) runAuctionIfNeeded(target enc.Name) {

@@ -169,7 +169,7 @@ func TestRepo_ReplicationLogic(t *testing.T) {
 		Target: target,
 	}
 
-	shouldClaim := repo.determineWinnersHydra(cmd)
+	shouldClaim := repo.determineWinnersHydra(cmd.Target)
 	if shouldClaim == nil {
 		t.Error("Empty repo should claim first job")
 	}
@@ -193,7 +193,7 @@ func TestRepo_ReplicationAlreadySatisfied(t *testing.T) {
 	}
 	repo.mu.Unlock()
 
-	shouldClaim := repo.determineWinnersHydra(cmd)
+	shouldClaim := repo.determineWinnersHydra(cmd.Target)
 	if shouldClaim != nil {
 		t.Error("Repo should not claim when replication factor already satisfied")
 	}
@@ -242,7 +242,7 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 	}
 	repo.mu.Unlock()
 
-	winners := repo.determineWinnersHydra(cmd)
+	winners := repo.determineWinnersHydra(cmd.Target)
 	if winners == nil {
 		t.Error("Repo should claim job when replication not satisfied")
 	}
@@ -306,7 +306,7 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 	claimCount := 0
 	claimedBy := make([]string, 0)
 	for i := 0; i < nodeCount; i++ {
-		winners := repos[i].determineWinnersHydra(cmd)
+		winners := repos[i].determineWinnersHydra(cmd.Target)
 		if winners != nil {
 			for _, w := range winners {
 				if w == nodeNames[i] {

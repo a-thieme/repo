@@ -12,8 +12,6 @@ Usage:
     python3 analyze_traces.py --experiments <dir1> <dir2> ... [--output-dir <dir>] [--format json,csv,markdown]
 """
 
-# FIXME: this takes a very long time to run and only uses one thread. improve timing by doing multithreading where possible
-
 import argparse
 import json
 import sys
@@ -69,16 +67,25 @@ def parse_events(exp_dir: Path) -> Tuple[List[Dict], Dict]:
         with open(metadata_file) as f:
             metadata = json.load(f)
 
-    for event_file in exp_dir.glob("events-*.jsonl"):
+    event_files = list(exp_dir.glob("events-*.jsonl"))
+
+    def parse_file(event_file: Path) -> List[Dict]:
+        file_events = []
         node_name = event_file.stem.replace("events-", "")
         with open(event_file) as f:
             for line in f:
                 try:
                     event = json.loads(line.strip())
                     event["_node_name"] = node_name
-                    events.append(event)
+                    file_events.append(event)
                 except json.JSONDecodeError:
                     continue
+        return file_events
+
+    with ThreadPoolExecutor(max_workers=min(8, len(event_files))) as executor:
+        futures = [executor.submit(parse_file, ef) for ef in event_files]
+        for future in as_completed(futures):
+            events.extend(future.result())
 
     events.sort(key=lambda e: parse_ts(e.get("ts", "")) or datetime.min)
 
@@ -457,48 +464,50 @@ def analyze_assignment_conflicts(events: List[Dict], metadata: Dict) -> Dict[str
 
 def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str, Any]:
     """Analyze what triggers group message publications."""
-    node_updates = [e for e in events if e.get("event") == "node_update" and e.get("jobs")]
+    node_updates = [
+        e for e in events if e.get("event") == "node_update" and e.get("jobs")
+    ]
     command_received = [e for e in events if e.get("event") == "command_received"]
     command_synced = [e for e in events if e.get("event") == "command_synced"]
     job_claimed = [e for e in events if e.get("event") == "job_claimed"]
     assignment_handled = [e for e in events if e.get("event") == "assignment_handled"]
-    
+
     triggers = defaultdict(int)
-    
+
     first_event_ts = None
     for e in events:
         ts = parse_ts(e.get("ts", ""))
         if ts:
             first_event_ts = ts
             break
-    
+
     if not first_event_ts:
         return {"total": 0, "by_trigger": {}}
-    
+
     experiment_start_ms = first_event_ts.timestamp() * 1000
     heartbeat_interval = 5000
     heartbeat_tolerance = 500
-    
+
     for update in node_updates:
         ts = parse_ts(update.get("ts", ""))
         if ts is None:
             continue
-        
+
         ts_ms = ts.timestamp() * 1000
         elapsed_ms = ts_ms - experiment_start_ms
-        
+
         trigger = "unknown"
-        
+
         heartbeat_bucket = round(elapsed_ms / heartbeat_interval)
         expected_heartbeat = heartbeat_bucket * heartbeat_interval
         if abs(elapsed_ms - expected_heartbeat) <= heartbeat_tolerance:
             trigger = "heartbeat"
         else:
             found_trigger = False
-            
+
             window_start_ms = ts_ms - 1000
             window_end_ms = ts_ms + 500
-            
+
             for cr in command_received:
                 cr_ts = parse_ts(cr.get("ts", ""))
                 if cr_ts:
@@ -507,7 +516,7 @@ def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str
                         trigger = "new_command"
                         found_trigger = True
                         break
-            
+
             if not found_trigger:
                 for cs in command_synced:
                     cs_ts = parse_ts(cs.get("ts", ""))
@@ -517,7 +526,7 @@ def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str
                             trigger = "new_command"
                             found_trigger = True
                             break
-            
+
             if not found_trigger:
                 for jc in job_claimed:
                     jc_ts = parse_ts(jc.get("ts", ""))
@@ -527,7 +536,7 @@ def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str
                             trigger = "job_claim"
                             found_trigger = True
                             break
-            
+
             if not found_trigger:
                 for ah in assignment_handled:
                     ah_ts = parse_ts(ah.get("ts", ""))
@@ -537,9 +546,9 @@ def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str
                             trigger = "assignment"
                             found_trigger = True
                             break
-        
+
         triggers[trigger] += 1
-    
+
     return {
         "total": len(node_updates),
         "by_trigger": dict(triggers),
@@ -699,7 +708,9 @@ def generate_csv_output(data: Dict, output_dir: Path):
 
     pub_triggers_csv = output_dir / "publication_triggers.csv"
     with open(pub_triggers_csv, "w") as f:
-        f.write("experiment,total_publications,heartbeat,new_command,job_claim,assignment,unknown\n")
+        f.write(
+            "experiment,total_publications,heartbeat,new_command,job_claim,assignment,unknown\n"
+        )
         for exp in data["experiments"]:
             pt = exp.get("publication_triggers", {})
             by_trigger = pt.get("by_trigger", {})
@@ -923,16 +934,19 @@ def main():
     print(f"Analyzing {len(args.experiments)} experiments...\n")
 
     experiments_data = []
-    
+
     def analyze_and_collect(exp_dir):
         exp_path = Path(exp_dir)
         if not exp_path.exists():
             print(f"Warning: {exp_dir} does not exist, skipping")
             return None
         return analyze_experiment(exp_path)
-    
+
     with ThreadPoolExecutor(max_workers=min(8, len(args.experiments))) as executor:
-        futures = {executor.submit(analyze_and_collect, exp_dir): exp_dir for exp_dir in args.experiments}
+        futures = {
+            executor.submit(analyze_and_collect, exp_dir): exp_dir
+            for exp_dir in args.experiments
+        }
         for future in as_completed(futures):
             result = future.result()
             if result is not None:
