@@ -505,6 +505,7 @@ func TestConcurrentCommands_TwoProducers(t *testing.T) {
 	repoBinary := buildRepoBinary(t)
 	producerBinary := buildProducerBinary(t)
 	tmpDir := t.TempDir()
+	t.Logf("Event log directory: %s", tmpDir)
 
 	cfg := integrationTestConfig{
 		name:              "ConcurrentCommands",
@@ -512,6 +513,7 @@ func TestConcurrentCommands_TwoProducers(t *testing.T) {
 		replicationFactor: 3,
 		cacheless:         false,
 		runProducer:       false,
+		debug:             true,
 	}
 
 	repos := startRepos(t, cfg, repoBinary, tmpDir)

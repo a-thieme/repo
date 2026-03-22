@@ -41,6 +41,7 @@ func (r *Repo) processJobAssignments(assignments []*tlv.JobAssignment, publisher
 		if r.amIDoingJob(target) {
 			log.Info(r, "processJobAssignments_skipped", "reason", "already_doing_job", "target", targetStr)
 			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "skipped", "already_doing_job", assignees)
+			r.scheduleReevaluationLoop(target)
 			continue
 		}
 
@@ -98,27 +99,37 @@ func (r *Repo) scheduleReevaluationLoop(target enc.Name) {
 		t.Stop()
 	}
 
+	log.Info(r, "scheduleReevaluationLoop_scheduled", "target", targetStr, "delay", delay.String(), "isLeader", r.amILeader())
+
 	r.scheduledRedistributions[targetStr] = time.AfterFunc(delay, func() {
 		r.redistMu.Lock()
 		delete(r.scheduledRedistributions, targetStr)
 		r.redistMu.Unlock()
 
-		if !r.amILeader() {
+		isLeader := r.amILeader()
+		log.Info(r, "scheduleReevaluationLoop_fired", "target", targetStr, "isLeader", isLeader)
+
+		if !isLeader {
 			r.scheduleReevaluationLoop(target)
 			return
 		}
 
 		currentReplication := r.countReplication(target)
+		log.Info(r, "scheduleReevaluationLoop_check", "target", targetStr, "currentReplication", currentReplication, "rf", r.rf)
+
 		if currentReplication >= r.rf {
+			log.Info(r, "scheduleReevaluationLoop_skip_satisfied", "target", targetStr)
 			return
 		}
 
 		cmd := r.getCommand(target)
 		if cmd == nil {
+			log.Info(r, "scheduleReevaluationLoop_skip_noCommand", "target", targetStr)
 			r.scheduleReevaluationLoop(target)
 			return
 		}
 
+		log.Info(r, "scheduleReevaluationLoop_runningDistribution", "target", targetStr)
 		r.distributor.RunDistribution(cmd)
 
 		r.mu.Lock()
