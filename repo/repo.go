@@ -321,6 +321,11 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 			NewCommand:     cmd,
 			JobAssignments: []*tlv.JobAssignment{jobAssignment},
 		})
+	} else {
+		log.Info(r, "onCommand_noAssignment_publishingNewCmd", "target", cmd.Target.String())
+		r.publishNodeUpdate(&tlv.NodeUpdate{
+			NewCommand: cmd,
+		})
 	}
 }
 

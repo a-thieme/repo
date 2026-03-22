@@ -504,7 +504,8 @@ func TestConcurrentCommands_TwoProducers(t *testing.T) {
 
 	repoBinary := buildRepoBinary(t)
 	producerBinary := buildProducerBinary(t)
-	tmpDir := t.TempDir()
+	tmpDir := "/tmp/concurrent_test_logs"
+	os.MkdirAll(tmpDir, 0755)
 	t.Logf("Event log directory: %s", tmpDir)
 
 	cfg := integrationTestConfig{

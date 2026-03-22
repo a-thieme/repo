@@ -38,13 +38,6 @@ func (r *Repo) processJobAssignments(assignments []*tlv.JobAssignment, publisher
 		targetStr := target.String()
 		assignees := encNamesToStrings(assignment.Assignees)
 
-		if r.amIDoingJob(target) {
-			log.Info(r, "processJobAssignments_skipped", "reason", "already_doing_job", "target", targetStr)
-			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "skipped", "already_doing_job", assignees)
-			r.scheduleReevaluationLoop(target)
-			continue
-		}
-
 		if !slices.Contains(assignees, r.myNodeName()) {
 			log.Info(r, "processJobAssignments_skipped", "reason", "not_in_assignees", "target", targetStr)
 			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "skipped", "not_in_assignees", assignees)

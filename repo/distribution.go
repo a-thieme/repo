@@ -63,6 +63,8 @@ func DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus, myName 
 		}
 	}
 
+	log.Info(nil, "determineWinners_debug", "target", target.String(), "nodeStatus_len", len(nodeStatus), "candidates", candidates)
+
 	needed := rf - currentReplication
 
 	if needed <= 0 {

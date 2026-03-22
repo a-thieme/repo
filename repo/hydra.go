@@ -33,10 +33,10 @@ func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.JobAssignment {
 		if inWinners {
 			claimed := h.repo.doTarget(cmd.Target)
 			log.Info(h.repo, "hydra_onCommand_claimed", "target", cmd.Target.String(), "claimed", claimed, "node", myName)
-			return &tlv.JobAssignment{
-				Target:    cmd.Target,
-				Assignees: stringNamesToEncNames(winners),
-			}
+		}
+		return &tlv.JobAssignment{
+			Target:    cmd.Target,
+			Assignees: stringNamesToEncNames(winners),
 		}
 	}
 	return nil

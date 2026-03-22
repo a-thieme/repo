@@ -250,11 +250,15 @@ func (r *Repo) doCmd(cmd *tlv.Command) bool {
 // used when you want to do a target but don't have the command
 func (r *Repo) doTarget(target enc.Name) bool {
 	c, u := r.getStorageStats()
+	log.Info(r, "doTarget_called", "target", target.String(), "capacity", c, "used", u, "node", r.myNodeName())
 	cmd := r.getCommand(target)
 	if cmd == nil {
+		log.Info(r, "doTarget_nilCmd", "target", target.String())
 		return false
 	}
-	return r.doJobWithStats(cmd, c, u)
+	result := r.doJobWithStats(cmd, c, u)
+	log.Info(r, "doTarget_result", "target", target.String(), "result", result)
+	return result
 }
 
 func (r *Repo) doJobWithStats(cmd *tlv.Command, capacity, used uint64) bool {
