@@ -325,84 +325,32 @@ make -C experiments run NODE_COUNTS="4 8 12" PRODUCER_COUNTS="1" -j5 DISTRIBUTIO
 
 ---
 
-## Current Implementation Status (March 2026)
+## Lessons Learned
 
-### Hydra Distribution (Working)
+### Debugging Distributed Systems
 
-**Status: Fully operational**
+1. **Test before and after** - Always verify the original code's behavior with tests before making changes. We found `TestFailureRecovery_MultipleReposDown` was already failing before our fix, preventing wrong conclusions about our changes.
 
-Hydra distribution mechanism is working correctly with retry logic and failure recovery.
+2. **Small changes, test incrementally** - Make minimal changes and verify each step. This makes it easier to identify what broke when tests fail.
 
-**Failure Recovery Tests:**
+3. **Race conditions in SVS sync** - The order of message delivery matters:
+   - A `JobAssignment` can arrive BEFORE the `NewCommand`
+   - Nodes must buffer pending assignments and process them when the command arrives
+   - This is handled in `handleHydraJobAssignments()` which stores pending assignments
 
-| Test | Status | Recovery Time | Reaction Time |
-|------|--------|---------------|--------------|
-| SingleRepoDown | PASS | ~15.6s | ~138ms |
-| MultipleReposDown | PASS | ~16.6s | ~1.1s |
-| CascadingFailures | PASS | - | - |
+4. **Pending assignment handling differs by path**:
+   - `onCommand` (direct from producer): Needed pending check for Hydra - nodes may receive JobAssignment before NewCommand
+   - `onGroupSync` (via SVS): Already had pending check
 
-**Experiments (24 nodes, RF=3):**
+5. **Heartbeat-based recovery has limitations** - When multiple nodes fail, redistribution may not recover all commands. `TestFailureRecovery_MultipleReposDown` is flaky even with original code.
 
-| Producers | Commands | RepMax | All at RF |
-|-----------|----------|--------|-----------|
-| 1 | 10 | 355ms | ✓ |
-| 4 | 40 | 378ms | ✓ |
-| 8 | 80 | 389ms | ✓ |
-| 16 | 160 | 389ms | ✓ |
+### Operational Insights
 
-**Key Features:**
-
-- Exponential backoff retry (500ms base, 30s max) when `doJob` fails
-- Reaction time = recovery_time - HEARTBEAT_TIMEOUT (15.5s)
-- Retry clears when replication is satisfied
-
-### Auction Distribution (Not Working)
-
-**Status: Broken - Heartbeat mechanism not functioning**
-
-The auction heartbeat mechanism is fundamentally broken. When a node calls `heartbeatSync.Publish(nil)`, other nodes don't receive the notification via `SetOnPublisher` callback.
-
-**Symptoms:**
-
-- Auction failure tests fail: recovery never happens after node kill
-- Auction experiments show very low replication success rates (1-3 out of 10-40 commands at RF)
-
-**Root Cause:**
-The `SvsALO` with `Publish(nil)` and `SetOnPublisher` doesn't work as expected for heartbeat signaling. The callback mechanism doesn't trigger properly when nodes publish nil content.
-
-**Attempted Fixes:**
-
-1. Tried using `SvSync` with `OnUpdate` callback (same pattern as working auc-repo) - did not fix issue
-2. Tried `SetOnPublisher` with `Publish(nil)` - callback not triggered
-
-**Required Investigation:**
-The issue may be in the NDN SDK's handling of nil content publications, or in how SvsALO broadcasts to subscribers. Further debugging requires:
-
-- Checking if `Publish(nil)` actually sends any data
-- Verifying the multicast strategy is correctly set for `/ndn/drepo/heartbeat/32=svs`
-- Comparing with the working auc-repo implementation at `/home/adam/ndn/auc-repo/repo/awareness/awareness.go`
-
-### Changes Made (March 2026)
-
-**repo/repo.go:**
-
-- Added `retryDelays` map and `retryMu` mutex for tracking exponential backoff state
-- Added `BASE_RETRY_DELAY = 500ms` and `MAX_RETRY_DELAY = 30s` constants
-- Added `getRetryDelay()` and `clearRetryDelay()` functions
-- Added `retryJobClaim()` for Hydra retry handling when `doJob` fails
-- Modified `handleHydraJobAssignments()` to schedule retry with exponential backoff on job failure
-- Modified `handleAuctionJobAssignments()` for similar retry behavior in auction mode
-
-**repo/helpers.go:**
-
-- Added `BASE_RETRY_DELAY` and `MAX_RETRY_DELAY` constants
-- Added `getRetryDelay()` and `clearRetryDelay()` functions
-
-**repo/integration_failure_test.go:**
-
-- Added `reactionTime = recoveryTime - HEARTBEAT_TIMEOUT` calculation
-- Log output now shows both recovery time and reaction time
-
-### Remaining Issues
-
-*(None - all known issues have been resolved)*
+1. **Always set multicast strategy** - Without it, SVS doesn't work properly
+2. **Announce your prefixes** - AttachCommandHandler alone is not enough
+3. **Publish heartbeats after state changes** - Otherwise peers don't see updates
+4. **Use time-bounded metrics** - Cumulative stats include startup overhead
+5. **Test incrementally** - Start with 2 nodes, then 3, then 5
+6. **Check FIB entries** - Most connectivity issues show up there first
+7. **Leader determination must happen AFTER dead node removal** - Computing `willBeLeader` before `delete(allNodes, downNode)` causes all nodes to think they're leader
+8. **Source of truth** - Tests determine actual status, not documentation
