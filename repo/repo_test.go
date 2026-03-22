@@ -169,7 +169,7 @@ func TestRepo_ReplicationLogic(t *testing.T) {
 		Target: target,
 	}
 
-	shouldClaim := repo.determineWinnersHydra(cmd.Target)
+	shouldClaim := DetermineWinners(cmd.Target, repo.nodeStatus, repo.myNodeName(), repo.rf, repo.eventLogger)
 	if shouldClaim == nil {
 		t.Error("Empty repo should claim first job")
 	}
@@ -193,7 +193,7 @@ func TestRepo_ReplicationAlreadySatisfied(t *testing.T) {
 	}
 	repo.mu.Unlock()
 
-	shouldClaim := repo.determineWinnersHydra(cmd.Target)
+	shouldClaim := DetermineWinners(cmd.Target, repo.nodeStatus, repo.myNodeName(), repo.rf, repo.eventLogger)
 	if shouldClaim != nil {
 		t.Error("Repo should not claim when replication factor already satisfied")
 	}
@@ -242,7 +242,7 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 	}
 	repo.mu.Unlock()
 
-	winners := repo.determineWinnersHydra(cmd.Target)
+	winners := DetermineWinners(cmd.Target, repo.nodeStatus, repo.myNodeName(), repo.rf, repo.eventLogger)
 	if winners == nil {
 		t.Error("Repo should claim job when replication not satisfied")
 	}
@@ -306,7 +306,7 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 	claimCount := 0
 	claimedBy := make([]string, 0)
 	for i := 0; i < nodeCount; i++ {
-		winners := repos[i].determineWinnersHydra(cmd.Target)
+		winners := DetermineWinners(cmd.Target, repos[i].nodeStatus, repos[i].myNodeName(), repos[i].rf, repos[i].eventLogger)
 		if winners != nil {
 			for _, w := range winners {
 				if w == nodeNames[i] {
@@ -430,7 +430,7 @@ func TestHydraLeaderRedistribution(t *testing.T) {
 	}
 	nonLeader.mu.Unlock()
 
-	nonLeader.onHeartbeatTimeoutHydra("/ndn/repo/n3")
+	nonLeader.distributor.OnNodeDead("/ndn/repo/n3", []enc.Name{target})
 
 	nonLeader.redistMu.Lock()
 	_, hasScheduled := nonLeader.scheduledRedistributions[target.String()]
@@ -469,7 +469,7 @@ func TestHydraCancelWhenReplicated(t *testing.T) {
 	repo.mu.Unlock()
 
 	repo.addCommand(cmd)
-	repo.scheduleHydraReevaluation(target)
+	repo.scheduleReevaluationLoop(target)
 
 	repo.redistMu.Lock()
 	_, hasScheduled := repo.scheduledRedistributions[target.String()]
@@ -479,7 +479,7 @@ func TestHydraCancelWhenReplicated(t *testing.T) {
 		t.Error("Should have scheduled re-evaluation initially")
 	}
 
-	repo.cancelHydraReevaluation(target)
+	repo.cancelReevaluation(target)
 
 	repo.redistMu.Lock()
 	_, stillScheduled := repo.scheduledRedistributions[target.String()]
@@ -508,7 +508,7 @@ func TestHydraRescheduleOnAssignment(t *testing.T) {
 	repo.mu.Unlock()
 
 	repo.addCommand(cmd)
-	repo.scheduleHydraReevaluation(target)
+	repo.scheduleReevaluationLoop(target)
 
 	repo.redistMu.Lock()
 	originalTimer := repo.scheduledRedistributions[target.String()]
@@ -518,7 +518,7 @@ func TestHydraRescheduleOnAssignment(t *testing.T) {
 		t.Fatal("Timer should be scheduled")
 	}
 
-	repo.scheduleHydraReevaluation(target)
+	repo.scheduleReevaluationLoop(target)
 
 	repo.redistMu.Lock()
 	newTimer := repo.scheduledRedistributions[target.String()]

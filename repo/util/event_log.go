@@ -2,10 +2,12 @@ package util
 
 import (
 	"encoding/json"
-	enc "github.com/named-data/ndnd/std/encoding"
 	"os"
 	"sync"
 	"time"
+
+	enc "github.com/named-data/ndnd/std/encoding"
+	"github.com/named-data/ndnd/std/log"
 )
 
 type EventType string
@@ -192,6 +194,10 @@ func (l *EventLogger) Flush() error {
 	return l.file.Sync()
 }
 
+func (l *EventLogger) String() string {
+	return l.nodeID
+}
+
 func (l *EventLogger) Log(event Event) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -203,7 +209,9 @@ func (l *EventLogger) Log(event Event) {
 
 	encoder := json.NewEncoder(l.file)
 	encoder.SetEscapeHTML(false)
-	encoder.Encode(event)
+	if err := encoder.Encode(event); err != nil {
+		log.Warn(l, "event_log_encode_failed", "err", err)
+	}
 }
 
 func (l *EventLogger) LogSyncInterestSent(total uint64) {

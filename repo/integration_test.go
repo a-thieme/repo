@@ -16,6 +16,7 @@ import (
 	"github.com/a-thieme/repo/repo/util"
 	"github.com/a-thieme/repo/tlv"
 	enc "github.com/named-data/ndnd/std/encoding"
+	"github.com/named-data/ndnd/std/log"
 )
 
 type integrationTestConfig struct {
@@ -101,11 +102,17 @@ func setupCSCache(cacheless bool) func() {
 	if !cacheless {
 		return func() {}
 	}
-	exec.Command("nfdc", "cs", "config", "capacity", "1").Run()
-	exec.Command("nfdc", "cs", "erase").Run()
+	out, err := exec.Command("nfdc", "cs", "config", "capacity", "1").CombinedOutput()
+	if err != nil {
+		log.Warn(nil, "cs_config_failed", "output", string(out), "err", err)
+	}
+	out, err = exec.Command("nfdc", "cs", "erase", "/ndn/drepo").CombinedOutput()
+	if err != nil {
+		log.Warn(nil, "cs_erase_failed", "output", string(out), "err", err)
+	}
 	return func() {
 		exec.Command("nfdc", "cs", "config", "capacity", "65536", "admit", "on", "serve", "on").Run()
-		exec.Command("nfdc", "cs", "erase").Run()
+		exec.Command("nfdc", "cs", "erase", "/ndn/drepo").Run()
 	}
 }
 

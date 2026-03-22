@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"hash/fnv"
 	"slices"
 	"time"
@@ -24,9 +23,15 @@ const MAX_RETRY_DELAY = 30 * time.Second
 const DefaultStorageCapacity = 500 * 1024 * 1024   // 500MB
 const MaxInsertCost = DefaultStorageCapacity / 100 // 1% = 5MB
 
-const BID_SUFFIX = "bid"
-const RESULTS_SUFFIX = "results"
 const HEARTBEAT_SUFFIX = "heartbeat"
+
+type NodeStatus struct {
+	Capacity    uint64
+	Used        uint64
+	LastUpdated time.Time
+	Jobs        []enc.Name
+	TimerID     uint64
+}
 
 func hashFromString(s string) uint64 {
 	f := fnv.New64()
@@ -199,7 +204,7 @@ func (r *Repo) publishNodeUpdate(update *tlv.NodeUpdate) {
 		log.Fatal(r, "node_update_pub_failed", "err", err)
 	} else {
 		log.Info(r, "publishNodeUpdate_success", "name", name.String())
-		r.updateNodeStatus(r.myNodeName(), update)
+		r.updateNodeStatusCommon(r.myNodeName(), update)
 	}
 }
 
@@ -227,7 +232,7 @@ func (r *Repo) publishCommand(newCmd *tlv.Command, winners []string) {
 		log.Fatal(r, "node_update_pub_failed", "err", err)
 	}
 
-	r.updateNodeStatus(r.myNodeName(), update)
+	r.updateNodeStatusCommon(r.myNodeName(), update)
 }
 
 func (r *Repo) publishJobAssignments(assignments []*tlv.JobAssignment) {
@@ -278,223 +283,6 @@ func (r *Repo) doJobWithStats(cmd *tlv.Command, capacity, used uint64) bool {
 	return true
 }
 
-type HydraMechanism struct {
-	storageThreshold float64
-}
-
-func NewHydraMechanism() *HydraMechanism {
-	return &HydraMechanism{
-		storageThreshold: 0.75,
-	}
-}
-
-func (h *HydraMechanism) DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus, myName string, rf int, eventLogger util.Logger) []string {
-	currentReplication := countReplicationInternal(target, nodeStatus)
-
-	candidates := make([]string, 0, len(nodeStatus))
-	usedSpace := make(map[string]float64)
-	capacity := make(map[string]uint64)
-	for name, status := range nodeStatus {
-		isDoing := false
-		for _, job := range status.Jobs {
-			if job.Equal(target) {
-				isDoing = true
-				break
-			}
-		}
-		if !isDoing {
-			us := status.UsedSpace()
-			if us < h.storageThreshold {
-				usedSpace[name] = us
-				candidates = append(candidates, name)
-				capacity[name] = status.Capacity
-			}
-		}
-	}
-
-	needed := rf - currentReplication
-
-	if needed <= 0 {
-		if eventLogger != nil {
-			eventLogger.LogDecisionMade(
-				target.String(),
-				false,
-				"replication_satisfied",
-				fmt.Sprintf("current=%d needed=%d", currentReplication, needed),
-				currentReplication,
-				needed,
-				candidates,
-				nil,
-				nil,
-			)
-		}
-		return nil
-	}
-
-	slices.SortFunc(candidates, func(i, j string) int {
-		if usedSpace[i] != usedSpace[j] {
-			if usedSpace[i] < usedSpace[j] {
-				return -1
-			}
-			return 1
-		}
-		if capacity[i] != capacity[j] {
-			if capacity[i] > capacity[j] {
-				return -1
-			}
-			return 1
-		}
-		if i < j {
-			return -1
-		}
-		if i > j {
-			return 1
-		}
-		return 0
-	})
-
-	limit := min(needed, len(candidates))
-	selectedCandidates := candidates[:limit]
-
-	candidateScores := make(map[string]int)
-	for i, c := range candidates {
-		candidateScores[c] = len(candidates) - i
-	}
-
-	shouldClaim := false
-	reason := "not_selected"
-	if slices.Contains(selectedCandidates, myName) {
-		shouldClaim = true
-		reason = "selected_as_candidate"
-	}
-
-	if eventLogger != nil {
-		eventLogger.LogDecisionMade(
-			target.String(),
-			shouldClaim,
-			reason,
-			fmt.Sprintf("current=%d needed=%d selected=%v", currentReplication, needed, selectedCandidates),
-			currentReplication,
-			needed,
-			candidates,
-			candidateScores,
-			selectedCandidates,
-		)
-	}
-	return selectedCandidates
-}
-
-func countReplicationInternal(target enc.Name, nodeStatus map[string]NodeStatus) int {
-	count := 0
-	for _, status := range nodeStatus {
-		for _, job := range status.Jobs {
-			if job.Equal(target) {
-				count++
-				break
-			}
-		}
-	}
-	return count
-}
-
-type AuctionMechanism struct{}
-
-func NewAuctionMechanism() *AuctionMechanism {
-	return &AuctionMechanism{}
-}
-
-func (a *AuctionMechanism) DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus, myName string, rf int, eventLogger util.Logger) []string {
-	currentReplication := countReplicationInternal(target, nodeStatus)
-
-	candidates := make([]string, 0, len(nodeStatus))
-	usedPercentage := make(map[string]float64)
-	for name, status := range nodeStatus {
-		isDoing := false
-		for _, job := range status.Jobs {
-			if job.Equal(target) {
-				isDoing = true
-				break
-			}
-		}
-		if !isDoing {
-			up := status.UsedSpace()
-			usedPercentage[name] = up
-			candidates = append(candidates, name)
-		}
-	}
-
-	needed := rf - currentReplication
-
-	if needed <= 0 {
-		if eventLogger != nil {
-			eventLogger.LogDecisionMade(
-				target.String(),
-				false,
-				"replication_satisfied",
-				fmt.Sprintf("current=%d needed=%d", currentReplication, needed),
-				currentReplication,
-				needed,
-				candidates,
-				nil,
-				nil,
-			)
-		}
-		return nil
-	}
-
-	slices.SortFunc(candidates, func(i, j string) int {
-		if usedPercentage[i] != usedPercentage[j] {
-			if usedPercentage[i] < usedPercentage[j] {
-				return -1
-			}
-			return 1
-		}
-		if i < j {
-			return -1
-		}
-		if i > j {
-			return 1
-		}
-		return 0
-	})
-
-	limit := min(needed, len(candidates))
-	selectedCandidates := candidates[:limit]
-
-	winnerScores := make(map[string]float64)
-	for _, c := range selectedCandidates {
-		winnerScores[c] = usedPercentage[c]
-	}
-
-	shouldClaim := false
-	reason := "not_selected"
-	if slices.Contains(selectedCandidates, myName) {
-		shouldClaim = true
-		reason = "selected_as_candidate"
-	}
-
-	if eventLogger != nil {
-		eventLogger.LogAuctionWinners(
-			target.String(),
-			candidates,
-			winnerScores,
-			selectedCandidates,
-		)
-		eventLogger.LogDecisionMade(
-			target.String(),
-			shouldClaim,
-			reason,
-			fmt.Sprintf("current=%d needed=%d selected=%v", currentReplication, needed, selectedCandidates),
-			currentReplication,
-			needed,
-			candidates,
-			nil,
-			selectedCandidates,
-		)
-	}
-	return selectedCandidates
-}
-
 func (r *Repo) advanceRetryDelay(target string) time.Duration {
 	r.retryMu.Lock()
 	defer r.retryMu.Unlock()
@@ -517,4 +305,17 @@ func (r *Repo) clearRetryDelay(target string) {
 	r.retryMu.Lock()
 	defer r.retryMu.Unlock()
 	delete(r.retryDelays, target)
+}
+
+func countReplicationInternal(target enc.Name, nodeStatus map[string]NodeStatus) int {
+	count := 0
+	for _, status := range nodeStatus {
+		for _, job := range status.Jobs {
+			if job.Equal(target) {
+				count++
+				break
+			}
+		}
+	}
+	return count
 }
