@@ -210,7 +210,7 @@ func runReplicationTest(t *testing.T, cfg integrationTestConfig) {
 	t.Logf("nfdc strategy set notify: %s (err=%v)", string(out2), err)
 
 	if cfg.distribution == "auction" {
-		out3, err := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/heartbeat/32=svs", "/localhost/nfd/strategy/multicast").CombinedOutput()
+		out3, err := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/heartbeat", "/localhost/nfd/strategy/multicast").CombinedOutput()
 		t.Logf("nfdc strategy set heartbeat (auction): %s (err=%v)", string(out3), err)
 	}
 
@@ -832,7 +832,7 @@ func TestAuction_ConcurrentCommands(t *testing.T) {
 	t.Logf("nfdc strategy set: %s", string(out))
 	exec.Command("nfdc", "strategy", "set", "/ndn/drepo/notify", "/localhost/nfd/strategy/best-route").Run()
 
-	out3, err := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/heartbeat/32=svs", "/localhost/nfd/strategy/multicast").CombinedOutput()
+	out3, err := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/heartbeat", "/localhost/nfd/strategy/multicast").CombinedOutput()
 	t.Logf("nfdc strategy set heartbeat (auction): %s (err=%v)", string(out3), err)
 
 	t.Logf("Waiting for routing convergence (%v)...", *routingConvergeWait)

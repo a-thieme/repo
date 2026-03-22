@@ -390,6 +390,23 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 		return
 	}
 
+	// Hydra also checks pending assignments - a node may have received JobAssignment
+	// before receiving the NewCommand
+	targetStr := cmd.Target.String()
+	r.mu.Lock()
+	if pending, ok := r.pendingAssignments[targetStr]; ok {
+		log.Info(r, "onCommand_pending_assignment_found_hydra", "target", targetStr)
+		assignees := encNamesToStrings(pending.Assignees)
+		if slices.Contains(assignees, r.myNodeName()) {
+			r.doCmd(cmd)
+			r.publishNodeUpdate(&tlv.NodeUpdate{
+				Jobs: r.getMyJobs(),
+			})
+		}
+		delete(r.pendingAssignments, targetStr)
+	}
+	r.mu.Unlock()
+
 	myPrefix := r.myNodeName()
 	winners := r.determineWinnersHydra(cmd.Target)
 	if slices.Contains(winners, myPrefix) {

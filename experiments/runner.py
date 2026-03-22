@@ -283,7 +283,7 @@ def main():
             [host],
             [
                 "/ndn/drepo/group-messages/32=svs",
-                "/ndn/drepo/heartbeat/32=svs",
+                "/ndn/drepo/heartbeat",
                 node_prefix,
                 sync_data_prefix,
                 results_prefix,
@@ -291,7 +291,7 @@ def main():
             ],
         )
         info(
-            f"  Added origin for {host.name}: /ndn/drepo/group-messages/32=svs, /ndn/drepo/heartbeat/32=svs, {node_prefix}, {sync_data_prefix}, {results_prefix}, {bid_prefix}\n"
+            f"  Added origin for {host.name}: /ndn/drepo/group-messages/32=svs, /ndn/drepo/heartbeat, {node_prefix}, {sync_data_prefix}, {results_prefix}, {bid_prefix}\n"
         )
 
     info("Calculating and installing routes...\n")
@@ -312,7 +312,7 @@ def main():
             "nfdc strategy set /ndn/drepo/group-messages/32=svs /localhost/nfd/strategy/multicast 2>&1"
         )
         host.cmd(
-            "nfdc strategy set /ndn/drepo/heartbeat/32=svs /localhost/nfd/strategy/multicast 2>&1"
+            "nfdc strategy set /ndn/drepo/heartbeat /localhost/nfd/strategy/multicast 2>&1"
         )
         # Set multicast strategy for each node's bid prefix explicitly (not regex)
         for other_host in ndn.net.hosts:
@@ -329,7 +329,7 @@ def main():
     for host in ndn.net.hosts:
         prefixes_to_verify = [
             "/ndn/drepo/group-messages/32=svs",
-            "/ndn/drepo/heartbeat/32=svs",
+            "/ndn/drepo/heartbeat",
         ]
         # Add bid prefixes for verification
         for other_host in ndn.net.hosts:

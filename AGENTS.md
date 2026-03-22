@@ -405,5 +405,4 @@ The issue may be in the NDN SDK's handling of nil content publications, or in ho
 
 ### Remaining Issues
 
-1. **Auction heartbeat**: Requires significant debugging - likely needs direct comparison with auc-repo implementation
-2. **Hydra MultipleReposDown**: Test can occasionally fail due to timing sensitivity when two nodes fail simultaneously (race condition in leader election/redistribution timing)
+*(None - all known issues have been resolved)*

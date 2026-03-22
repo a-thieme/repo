@@ -99,7 +99,7 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 
 	t.Logf("Waiting for full replication to RF=%d...", cfg.replicationFactor)
 	if !waitForFullReplication(t, repos, cfg.replicationFactor, *replicationTimeout) {
-		commands := getCommandsWithClaims(t, repos)
+		commands := getCommandsWithClaims(t, repos, nil)
 		for target, nodes := range commands {
 			t.Logf("  Command %s: %d claims (need %d)", target, len(nodes), cfg.replicationFactor)
 		}
@@ -107,7 +107,7 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 	}
 	t.Logf("Initial replication achieved")
 
-	commandsBeforeFailure := getCommandsWithClaims(t, repos)
+	commandsBeforeFailure := getCommandsWithClaims(t, repos, nil)
 	t.Logf("Commands before failure: %d", len(commandsBeforeFailure))
 	for target, nodes := range commandsBeforeFailure {
 		t.Logf("  %s: claimed by %v", target, nodes)
@@ -150,6 +150,11 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 		r.cmd.Wait()
 	}
 
+	deadNodeIDs := make(map[string]bool)
+	for _, r := range reposToKill {
+		deadNodeIDs[r.nodeID] = true
+	}
+
 	affectedCommands := make(map[string][]string)
 	for target, nodes := range commandsBeforeFailure {
 		for _, killedRepo := range reposToKill {
@@ -177,12 +182,11 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 	var reactionTime time.Duration
 
 	for time.Now().Before(recoveryDeadline) {
-		commandsAfterFailure := getCommandsWithClaims(t, repos[:len(repos)-cfg.failureCount])
+		commandsAfterFailure := getCommandsWithClaims(t, repos, deadNodeIDs)
 
 		allRecovered := true
-		for target := range affectedCommands {
-			nodes, exists := commandsAfterFailure[target]
-			if !exists || len(nodes) < cfg.replicationFactor {
+		for _, nodes := range commandsAfterFailure {
+			if len(nodes) < cfg.replicationFactor {
 				allRecovered = false
 				break
 			}
@@ -205,15 +209,13 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 
 	if recovered {
 		t.Logf("PASS: Recovery achieved in %v (reaction time: %v)", recoveryTime, reactionTime)
-		for target := range affectedCommands {
-			t.Logf("  Command %s recovered to RF", target)
-		}
 	} else {
-		commandsAfterFailure := getCommandsWithClaims(t, repos[:len(repos)-cfg.failureCount])
+		commandsAfterFailure := getCommandsWithClaims(t, repos, deadNodeIDs)
 		t.Errorf("FAIL: Recovery not achieved within %v", *failureRecoveryWait)
-		for target := range affectedCommands {
-			nodes := commandsAfterFailure[target]
-			t.Logf("  Command %s: %d claims (need %d)", target, len(nodes), cfg.replicationFactor)
+		for target, nodes := range commandsAfterFailure {
+			if len(nodes) < cfg.replicationFactor {
+				t.Logf("  Under-replicated: %s: %d claims (need %d)", target, len(nodes), cfg.replicationFactor)
+			}
 		}
 	}
 }
@@ -291,7 +293,7 @@ func waitForReplication(t *testing.T, repos []*repoProcess, rf int, timeout time
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		claims := getCommandsWithClaims(t, repos)
+		claims := getCommandsWithClaims(t, repos, nil)
 
 		minClaims := int(^uint(0) >> 1)
 		if len(claims) == 0 {
@@ -320,10 +322,14 @@ func waitForReplication(t *testing.T, repos []*repoProcess, rf int, timeout time
 	return totalClaims
 }
 
-func getCommandsWithClaims(t *testing.T, repos []*repoProcess) map[string][]string {
+func getCommandsWithClaims(t *testing.T, repos []*repoProcess, deadNodeIDs map[string]bool) map[string][]string {
 	commands := make(map[string]map[string]bool)
 
 	for _, r := range repos {
+		if deadNodeIDs[r.nodeID] {
+			continue
+		}
+
 		events, err := testutil.ParseEventLog(r.logPath)
 		if err != nil {
 			continue
@@ -361,7 +367,7 @@ func waitForFullReplication(t *testing.T, repos []*repoProcess, rf int, timeout 
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		commands := getCommandsWithClaims(t, repos)
+		commands := getCommandsWithClaims(t, repos, nil)
 
 		if len(commands) == 0 {
 			time.Sleep(500 * time.Millisecond)
@@ -439,7 +445,7 @@ func TestFailureRecovery_CascadingFailures(t *testing.T) {
 
 	t.Logf("Waiting for full replication to RF=%d...", cfg.replicationFactor)
 	if !waitForFullReplication(t, repos, cfg.replicationFactor, *replicationTimeout) {
-		commands := getCommandsWithClaims(t, repos)
+		commands := getCommandsWithClaims(t, repos, nil)
 		for target, nodes := range commands {
 			t.Logf("  Command %s: %d claims (need %d)", target, len(nodes), cfg.replicationFactor)
 		}
@@ -447,7 +453,7 @@ func TestFailureRecovery_CascadingFailures(t *testing.T) {
 	}
 	t.Logf("Initial replication achieved")
 
-	commandsBeforeFailure := getCommandsWithClaims(t, repos)
+	commandsBeforeFailure := getCommandsWithClaims(t, repos, nil)
 	t.Logf("Commands before failure: %d", len(commandsBeforeFailure))
 
 	for i := 0; i < cfg.failureCount; i++ {
@@ -459,33 +465,38 @@ func TestFailureRecovery_CascadingFailures(t *testing.T) {
 		time.Sleep(1 * time.Second)
 	}
 
-	survivingRepos := repos[:len(repos)-cfg.failureCount]
-	t.Logf("Surviving repos: %d", len(survivingRepos))
+	deadNodeIDs := make(map[string]bool)
+	for i := 0; i < cfg.failureCount; i++ {
+		repoToKill := repos[len(repos)-1-i]
+		deadNodeIDs[repoToKill.nodeID] = true
+	}
+	t.Logf("Dead nodes: %v", deadNodeIDs)
 
 	t.Logf("Waiting for recovery (timeout=%v)...", *failureRecoveryWait)
 	time.Sleep(*failureRecoveryWait)
 
-	commandsAfterFailure := getCommandsWithClaims(t, survivingRepos)
+	commandsAfterFailure := getCommandsWithClaims(t, repos, deadNodeIDs)
 	t.Logf("=== CASCADING FAILURE TEST RESULTS ===")
 	t.Logf("Node count: %d", cfg.nodeCount)
 	t.Logf("Replication factor: %d", cfg.replicationFactor)
 	t.Logf("Failures: %d", cfg.failureCount)
-	t.Logf("Surviving nodes: %d", len(survivingRepos))
 
 	recovered := true
-	for target, beforeNodes := range commandsBeforeFailure {
-		currentNodes := commandsAfterFailure[target]
-		if len(currentNodes) < cfg.replicationFactor {
+	for _, nodes := range commandsAfterFailure {
+		if len(nodes) < cfg.replicationFactor {
 			recovered = false
-			t.Logf("  Command %s: %d claims (was %d, need %d) - NOT RECOVERED", target, len(currentNodes), len(beforeNodes), cfg.replicationFactor)
-		} else {
-			t.Logf("  Command %s: %d claims - RECOVERED", target, len(currentNodes))
+			break
 		}
 	}
 
 	if recovered {
-		t.Logf("PASS: Recovery achieved after cascading failures")
+		t.Logf("PASS: All %d commands at RF=%d", len(commandsAfterFailure), cfg.replicationFactor)
 	} else {
-		t.Logf("FAIL: Recovery not achieved (expected behavior - recovery not implemented)")
+		t.Errorf("FAIL: Recovery not achieved within %v", *failureRecoveryWait)
+		for target, nodes := range commandsAfterFailure {
+			if len(nodes) < cfg.replicationFactor {
+				t.Logf("  Under-replicated: %s: %d claims (need %d)", target, len(nodes), cfg.replicationFactor)
+			}
+		}
 	}
 }

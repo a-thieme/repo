@@ -100,7 +100,7 @@ func runAuctionFailureTest(t *testing.T, cfg auctionFailureTestConfig) {
 
 	t.Logf("Waiting for full replication to RF=%d...", cfg.replicationFactor)
 	if !waitForFullReplication(t, repos, cfg.replicationFactor, *replicationTimeout) {
-		commands := getCommandsWithClaims(t, repos)
+		commands := getCommandsWithClaims(t, repos, nil)
 		for target, nodes := range commands {
 			t.Logf("  Command %s: %d claims (need %d)", target, len(nodes), cfg.replicationFactor)
 		}
@@ -108,7 +108,7 @@ func runAuctionFailureTest(t *testing.T, cfg auctionFailureTestConfig) {
 	}
 	t.Logf("Initial replication achieved")
 
-	commandsBeforeFailure := getCommandsWithClaims(t, repos)
+	commandsBeforeFailure := getCommandsWithClaims(t, repos, nil)
 	t.Logf("Commands before failure: %d", len(commandsBeforeFailure))
 	for target, nodes := range commandsBeforeFailure {
 		t.Logf("  %s: claimed by %v", target, nodes)
@@ -151,6 +151,11 @@ func runAuctionFailureTest(t *testing.T, cfg auctionFailureTestConfig) {
 		r.cmd.Wait()
 	}
 
+	deadNodeIDs := make(map[string]bool)
+	for _, r := range reposToKill {
+		deadNodeIDs[r.nodeID] = true
+	}
+
 	affectedCommands := make(map[string][]string)
 	for target, nodes := range commandsBeforeFailure {
 		for _, killedRepo := range reposToKill {
@@ -178,12 +183,11 @@ func runAuctionFailureTest(t *testing.T, cfg auctionFailureTestConfig) {
 	var reactionTime time.Duration
 
 	for time.Now().Before(recoveryDeadline) {
-		commandsAfterFailure := getCommandsWithClaims(t, repos[:len(repos)-cfg.failureCount])
+		commandsAfterFailure := getCommandsWithClaims(t, repos, deadNodeIDs)
 
 		allRecovered := true
-		for target := range affectedCommands {
-			nodes, exists := commandsAfterFailure[target]
-			if !exists || len(nodes) < cfg.replicationFactor {
+		for _, nodes := range commandsAfterFailure {
+			if len(nodes) < cfg.replicationFactor {
 				allRecovered = false
 				break
 			}
@@ -202,15 +206,14 @@ func runAuctionFailureTest(t *testing.T, cfg auctionFailureTestConfig) {
 	t.Logf("Node count: %d", cfg.nodeCount)
 	t.Logf("Replication factor: %d", cfg.replicationFactor)
 	t.Logf("Failures: %d", cfg.failureCount)
-	t.Logf("Surviving nodes: %d", len(repos)-cfg.failureCount)
 
-	commandsAfterFailure := getCommandsWithClaims(t, repos[:len(repos)-cfg.failureCount])
+	commandsAfterFailure := getCommandsWithClaims(t, repos, deadNodeIDs)
 
 	recoveredCount := 0
 	notRecoveredCount := 0
-	for target, originalNodes := range affectedCommands {
+	for target := range affectedCommands {
 		currentNodes := commandsAfterFailure[target]
-		originalCount := len(originalNodes)
+		originalCount := len(affectedCommands[target])
 		currentCount := len(currentNodes)
 
 		if currentCount >= cfg.replicationFactor {

@@ -22,7 +22,7 @@ func TestAuction_Load_2Producers(t *testing.T) {
 	t.Logf("nfdc strategy set: %s", string(out))
 	exec.Command("nfdc", "strategy", "set", "/ndn/drepo/notify", "/localhost/nfd/strategy/best-route").Run()
 
-	out3, err := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/heartbeat/32=svs", "/localhost/nfd/strategy/multicast").CombinedOutput()
+	out3, err := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/heartbeat", "/localhost/nfd/strategy/multicast").CombinedOutput()
 	t.Logf("nfdc strategy set heartbeat (auction): %s (err=%v)", string(out3), err)
 
 	t.Logf("Waiting for routing convergence (%v)...", *routingConvergeWait)
@@ -152,7 +152,7 @@ func TestAuction_Load_3Producers(t *testing.T) {
 	t.Logf("nfdc strategy set: %s", string(out))
 	exec.Command("nfdc", "strategy", "set", "/ndn/drepo/notify", "/localhost/nfd/strategy/best-route").Run()
 
-	out3, err := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/heartbeat/32=svs", "/localhost/nfd/strategy/multicast").CombinedOutput()
+	out3, err := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/heartbeat", "/localhost/nfd/strategy/multicast").CombinedOutput()
 	t.Logf("nfdc strategy set heartbeat (auction): %s (err=%v)", string(out3), err)
 
 	t.Logf("Waiting for routing convergence (%v)...", *routingConvergeWait)

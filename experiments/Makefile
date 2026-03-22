@@ -177,7 +177,7 @@ single:
 			--command-type $(COMMAND_TYPE) \
 			--join-ratio $(JOIN_RATIO) \
 			--distribution $(DISTRIBUTION)$${debug_arg}$${failure_args}" \
- 		> "$$result_dir/docker.log" 2>&1
+  		> "$$result_dir/docker.log" 2>&1
 
 # === Debugging ===
 
