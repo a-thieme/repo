@@ -88,8 +88,8 @@ func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) {
 func (r *Repo) scheduleReevaluationLoop(target enc.Name) {
 	targetStr := target.String()
 	// NOTE: this should be longer than it takes for a distribution to happen
-	// Use auction timeout + 2s buffer to ensure auction completes before reevaluation
-	delay := r.auctionTimeout + 2*time.Second
+	// 5 seconds gives enough time for SVS propagation and auction completion
+	delay := 5 * time.Second
 
 	r.redistMu.Lock()
 	defer r.redistMu.Unlock()
@@ -160,6 +160,10 @@ func (r *Repo) handleNodeDeath(nodeName string) {
 	delete(r.nodeStatus, nodeName)
 	r.eventLogger.LogNodeDetectedDead(nodeName, len(status.Jobs))
 	r.mu.Unlock()
+
+	r.heartbeatMu.Lock()
+	r.deadNodes[nodeName] = true
+	r.heartbeatMu.Unlock()
 
 	r.stopHeartbeatTimer(nodeName)
 	r.evaluateBatch(status.Jobs)

@@ -190,26 +190,6 @@ func (r *Repo) getOtherNodeNames() []string {
 	return names
 }
 
-func (r *Repo) getOtherNodeNamesNotDoing(target enc.Name) []string {
-	names := make([]string, 0, len(r.nodeStatus))
-	for name, status := range r.nodeStatus {
-		if name == r.myNodeName() {
-			continue
-		}
-		isDoing := false
-		for _, job := range status.Jobs {
-			if job.Equal(target) {
-				isDoing = true
-				break
-			}
-		}
-		if !isDoing {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
 func (r *Repo) countReplication(target enc.Name) int {
 	r.mu.Lock()
 	count := 0

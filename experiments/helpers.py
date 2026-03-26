@@ -74,18 +74,44 @@ def collect_results(
         sync_interests = meta.get("sync_interests", 0)
         data_packets = meta.get("data_packets", 0)
 
+        # Compute RTT-normalized stats from event logs
+        topo_path = exp_dir / "topology.conf"
+        if not topo_path.exists():
+            topo_path = Path("/usr/local/share/testbed_topology.conf")
+        rtt_stats = compute_rtt_normalized_stats(exp_dir, topo_path)
+
         result = {
             "nodes": meta.get("node_count", 0),
             "producers": meta.get("producer_count", 0),
             "replicated": meta.get("replicated", False),
+            # Replication time in ms
             "rep_min_ms": meta.get("replication_time_min_ms") or 0,
             "rep_max_ms": meta.get("replication_time_max_ms") or 0,
             "rep_avg_ms": meta.get("replication_time_avg_ms") or 0,
             "rep_med_ms": meta.get("replication_time_median_ms") or 0,
+            "rep_p95_ms": meta.get("replication_time_p95_ms") or 0,
+            "rep_p99_ms": meta.get("replication_time_p99_ms") or 0,
+            # Replication time in RTTs
+            "rep_min_rtt": rtt_stats.get("rep_min_rtt", 0),
+            "rep_max_rtt": rtt_stats.get("rep_max_rtt", 0),
+            "rep_avg_rtt": rtt_stats.get("rep_avg_rtt", 0),
+            "rep_med_rtt": rtt_stats.get("rep_med_rtt", 0),
+            "rep_p95_rtt": rtt_stats.get("rep_p95_rtt", 0),
+            "rep_p99_rtt": rtt_stats.get("rep_p99_rtt", 0),
+            # Update propagation in ms
             "prop_min_ms": meta.get("update_propagation_min_ms") or 0,
             "prop_max_ms": meta.get("update_propagation_max_ms") or 0,
             "prop_avg_ms": meta.get("update_propagation_avg_ms") or 0,
             "prop_med_ms": meta.get("update_propagation_median_ms") or 0,
+            "prop_p95_ms": meta.get("update_propagation_p95_ms") or 0,
+            "prop_p99_ms": meta.get("update_propagation_p99_ms") or 0,
+            # Update propagation in RTTs
+            "prop_min_rtt": rtt_stats.get("prop_min_rtt", 0),
+            "prop_max_rtt": rtt_stats.get("prop_max_rtt", 0),
+            "prop_avg_rtt": rtt_stats.get("prop_avg_rtt", 0),
+            "prop_med_rtt": rtt_stats.get("prop_med_rtt", 0),
+            "prop_p95_rtt": rtt_stats.get("prop_p95_rtt", 0),
+            "prop_p99_rtt": rtt_stats.get("prop_p99_rtt", 0),
             "sync_interests": sync_interests,
             "data_packets": data_packets,
             "sync_per_cmd": sync_interests / total_cmds if total_cmds > 0 else 0,
@@ -129,27 +155,45 @@ def collect_results(
 def write_csv(results: List[Dict], csv_path: Path):
     """Write results to CSV file."""
     with open(csv_path, "w") as f:
+        # Header row with both ms and RTT columns
         f.write(
-            "nodes,producers,replicated,rep_min_ms,rep_max_ms,rep_avg_ms,rep_med_ms,"
-        )
-        f.write("prop_min_ms,prop_max_ms,prop_avg_ms,prop_med_ms,")
-        f.write(
+            "nodes,producers,replicated,"
+            "rep_min_ms,rep_med_ms,rep_p95_ms,rep_p99_ms,rep_max_ms,rep_avg_ms,"
+            "rep_min_rtt,rep_med_rtt,rep_p95_rtt,rep_p99_rtt,rep_max_rtt,rep_avg_rtt,"
+            "prop_min_ms,prop_med_ms,prop_p95_ms,prop_p99_ms,prop_max_ms,prop_avg_ms,"
+            "prop_min_rtt,prop_med_rtt,prop_p95_rtt,prop_p99_rtt,prop_max_rtt,prop_avg_rtt,"
             "sync_interests,data_packets,sync_per_cmd,data_per_cmd,total_commands,commands_at_rf,commands_over,commands_under,any_ever_over,"
-        )
-        f.write("total_duration_seconds,replication_wait_duration_seconds,")
-        f.write(
+            "total_duration_seconds,replication_wait_duration_seconds,"
             "failure_enabled,failure_count,failure_nodes,recovery_achieved,recovery_time_ms,"
+            "pre_failure_commands_at_rf,pre_failure_commands_under,"
+            "post_failure_commands_at_rf,post_failure_commands_under\n"
         )
-        f.write("pre_failure_commands_at_rf,pre_failure_commands_under,")
-        f.write("post_failure_commands_at_rf,post_failure_commands_under\n")
 
         for r in results:
             f.write(f"{r['nodes']},{r['producers']},{str(r['replicated']).lower()},")
+            # Replication time in ms
             f.write(
-                f"{r['rep_min_ms']:.2f},{r['rep_max_ms']:.2f},{r['rep_avg_ms']:.2f},{r['rep_med_ms']:.2f},"
+                f"{r.get('rep_min_ms', 0):.2f},{r.get('rep_med_ms', 0):.2f},"
+                f"{r.get('rep_p95_ms', 0):.2f},{r.get('rep_p99_ms', 0):.2f},"
+                f"{r.get('rep_max_ms', 0):.2f},{r.get('rep_avg_ms', 0):.2f},"
             )
+            # Replication time in RTTs
             f.write(
-                f"{r['prop_min_ms']:.2f},{r['prop_max_ms']:.2f},{r['prop_avg_ms']:.2f},{r['prop_med_ms']:.2f},"
+                f"{r.get('rep_min_rtt', 0):.2f},{r.get('rep_med_rtt', 0):.2f},"
+                f"{r.get('rep_p95_rtt', 0):.2f},{r.get('rep_p99_rtt', 0):.2f},"
+                f"{r.get('rep_max_rtt', 0):.2f},{r.get('rep_avg_rtt', 0):.2f},"
+            )
+            # Update propagation in ms
+            f.write(
+                f"{r.get('prop_min_ms', 0):.2f},{r.get('prop_med_ms', 0):.2f},"
+                f"{r.get('prop_p95_ms', 0):.2f},{r.get('prop_p99_ms', 0):.2f},"
+                f"{r.get('prop_max_ms', 0):.2f},{r.get('prop_avg_ms', 0):.2f},"
+            )
+            # Update propagation in RTTs
+            f.write(
+                f"{r.get('prop_min_rtt', 0):.2f},{r.get('prop_med_rtt', 0):.2f},"
+                f"{r.get('prop_p95_rtt', 0):.2f},{r.get('prop_p99_rtt', 0):.2f},"
+                f"{r.get('prop_max_rtt', 0):.2f},{r.get('prop_avg_rtt', 0):.2f},"
             )
             f.write(
                 f"{r['sync_interests']},{r['data_packets']},{r.get('sync_per_cmd', 0):.2f},{r.get('data_per_cmd', 0):.2f},{r['total_commands']},"
@@ -183,12 +227,12 @@ def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
         if has_failure:
             f.write("## Results (with Failure Simulation)\n\n")
             f.write(
-                "| Nodes | Producers | Replicated | Rep Max (ms) | Prop Max (ms) | "
-            )
-            f.write(
+                "| Nodes | Producers | Replicated | "
+                "Rep Med (ms) | Rep Med (RTT) | Prop Med (ms) | Prop Med (RTT) | "
                 "Total Cmds | At RF | Over | Under | Sync/Cmd | Data/Cmd | Fail | Killed | Recov | Recov Time (ms) |\n"
             )
-            f.write("|-------|-----------|------------|--------------|---------------|")
+            f.write("|-------|-----------|------------|")
+            f.write("--------------|---------------|----------------|----------------|")
             f.write(
                 "------------|-------|------|-------|----------|----------|------|--------|-------|----------------|\n"
             )
@@ -197,7 +241,8 @@ def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
                 f.write(
                     f"| {r['nodes']} | {r['producers']} | {str(r['replicated']).lower()} | "
                 )
-                f.write(f"{r['rep_max_ms']:.2f} | {r['prop_max_ms']:.2f} | ")
+                f.write(f"{r.get('rep_med_ms', 0):.2f} | {r.get('rep_med_rtt', 0):.2f} | "
+                    f"{r.get('prop_med_ms', 0):.2f} | {r.get('prop_med_rtt', 0):.2f} | ")
                 f.write(
                     f"{r['total_commands']} | {r['commands_at_rf']} | {r['commands_over']} | "
                 )
@@ -212,12 +257,12 @@ def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
         else:
             f.write("## Results\n\n")
             f.write(
-                "| Nodes | Producers | Replicated | Rep Max (ms) | Prop Max (ms) | "
-            )
-            f.write(
+                "| Nodes | Producers | Replicated | "
+                "Rep Med (ms) | Rep Med (RTT) | Prop Med (ms) | Prop Med (RTT) | "
                 "Total Cmds | At RF | Over | Under | Sync/Cmd | Data/Cmd | Any Over | Duration (s) |\n"
             )
-            f.write("|-------|-----------|------------|--------------|---------------|")
+            f.write("|-------|-----------|------------|")
+            f.write("--------------|---------------|----------------|----------------|")
             f.write(
                 "------------|-------|------|-------|----------|----------|----------|---------------|\n"
             )
@@ -226,7 +271,8 @@ def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
                 f.write(
                     f"| {r['nodes']} | {r['producers']} | {str(r['replicated']).lower()} | "
                 )
-                f.write(f"{r['rep_max_ms']:.2f} | {r['prop_max_ms']:.2f} | ")
+                f.write(f"{r.get('rep_med_ms', 0):.2f} | {r.get('rep_med_rtt', 0):.2f} | "
+                    f"{r.get('prop_med_ms', 0):.2f} | {r.get('prop_med_rtt', 0):.2f} | ")
                 f.write(
                     f"{r['total_commands']} | {r['commands_at_rf']} | {r['commands_over']} | "
                 )
@@ -236,6 +282,24 @@ def write_results_md(results: List[Dict], run_dir: Path, md_path: Path):
                 )
                 f.write(f"{str(r.get('any_ever_over', False)).lower()} | ")
                 f.write(f"{r['total_duration_seconds']:.2f} |\n")
+
+        # Detailed RTT breakdown section
+        f.write("\n## RTT-Normalized Performance Details\n\n")
+        f.write(
+            "| Nodes | Producers | "
+            "Rep P95 (RTT) | Rep P99 (RTT) | Rep Max (RTT) | "
+            "Prop P95 (RTT) | Prop P99 (RTT) | Prop Max (RTT) |\n"
+        )
+        f.write("|-------|-----------|")
+        f.write("---------------|---------------|---------------|")
+        f.write("----------------|----------------|---------------|\n")
+
+        for r in results:
+            f.write(f"| {r['nodes']} | {r['producers']} | ")
+            f.write(
+                f"{r.get('rep_p95_rtt', 0):.2f} | {r.get('rep_p99_rtt', 0):.2f} | {r.get('rep_max_rtt', 0):.2f} | "
+                f"{r.get('prop_p95_rtt', 0):.2f} | {r.get('prop_p99_rtt', 0):.2f} | {r.get('prop_max_rtt', 0):.2f} |\n"
+            )
 
 
 def print_summary(results: List[Dict]):
@@ -249,16 +313,20 @@ def print_summary(results: List[Dict]):
     if has_failure:
         print("\n=== EXPERIMENT RESULTS (with Failure Simulation) ===\n")
         print(
-            f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} {'RepMax':<10} {'PropMax':<10} {'Total':<6} {'AtRF':<5} {'Sync':<8} {'Data':<8} {'S/Cmd':<7} {'D/Cmd':<7} {'Fail':<5} {'Killed':<7} {'Recov':<6} {'RecovTime':<10}"
+            f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} "
+            f"{'RepMed(ms)':<12} {'RepMed(RTT)':<12} "
+            f"{'PropMed(ms)':<13} {'PropMed(RTT)':<13} "
+            f"{'Total':<6} {'AtRF':<5} {'Sync':<8} {'Data':<8} {'S/Cmd':<7} {'D/Cmd':<7} {'Fail':<5} {'Killed':<7} {'Recov':<6} {'RecovTime':<10}"
         )
-        print("-" * 126)
+        print("-" * 150)
 
         for r in results:
             recov_time = r.get("recovery_time_ms", 0)
             recov_str = f"{recov_time:.0f}ms" if recov_time > 0 else "N/A"
             print(
                 f"{r['nodes']:<6} {r['producers']:<6} {str(r['replicated']).lower():<8} "
-                f"{r['rep_max_ms']:<10.2f} {r['prop_max_ms']:<10.2f} "
+                f"{r.get('rep_med_ms', 0):<12.2f} {r.get('rep_med_rtt', 0):<12.2f} "
+                f"{r.get('prop_med_ms', 0):<13.2f} {r.get('prop_med_rtt', 0):<13.2f} "
                 f"{r['total_commands']:<6} {r['commands_at_rf']:<5} "
                 f"{r.get('sync_interests', 0):<8} {r.get('data_packets', 0):<8} "
                 f"{r.get('sync_per_cmd', 0):<7.1f} {r.get('data_per_cmd', 0):<7.1f} "
@@ -270,18 +338,38 @@ def print_summary(results: List[Dict]):
     else:
         print("\n=== EXPERIMENT RESULTS ===\n")
         print(
-            f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} {'RepMax':<10} {'PropMax':<10} {'Total':<6} {'AtRF':<5} {'Over':<5} {'Under':<6} {'Sync':<8} {'Data':<8} {'S/Cmd':<7} {'D/Cmd':<7}"
+            f"{'Nodes':<6} {'Prod':<6} {'Repl':<8} "
+            f"{'RepMed(ms)':<12} {'RepMed(RTT)':<12} "
+            f"{'PropMed(ms)':<13} {'PropMed(RTT)':<13} "
+            f"{'Total':<6} {'AtRF':<5} {'Over':<5} {'Under':<6} {'Sync':<8} {'Data':<8} {'S/Cmd':<7} {'D/Cmd':<7}"
         )
-        print("-" * 111)
+        print("-" * 135)
 
         for r in results:
             print(
                 f"{r['nodes']:<6} {r['producers']:<6} {str(r['replicated']).lower():<8} "
-                f"{r['rep_max_ms']:<10.2f} {r['prop_max_ms']:<10.2f} "
+                f"{r.get('rep_med_ms', 0):<12.2f} {r.get('rep_med_rtt', 0):<12.2f} "
+                f"{r.get('prop_med_ms', 0):<13.2f} {r.get('prop_med_rtt', 0):<13.2f} "
                 f"{r['total_commands']:<6} {r['commands_at_rf']:<5} {r['commands_over']:<5} {r['commands_under']:<6} "
                 f"{r.get('sync_interests', 0):<8} {r.get('data_packets', 0):<8} "
                 f"{r.get('sync_per_cmd', 0):<7.1f} {r.get('data_per_cmd', 0):<7.1f}"
             )
+
+    # Print RTT details
+    print("\n=== RTT-NORMALIZED DETAILS ===\n")
+    print(
+        f"{'Nodes':<6} {'Prod':<6} "
+        f"{'RepP95(RTT)':<12} {'RepP99(RTT)':<12} {'RepMax(RTT)':<12} "
+        f"{'PropP95(RTT)':<13} {'PropP99(RTT)':<13} {'PropMax(RTT)':<13}"
+    )
+    print("-" * 100)
+
+    for r in results:
+        print(
+            f"{r['nodes']:<6} {r['producers']:<6} "
+            f"{r.get('rep_p95_rtt', 0):<12.2f} {r.get('rep_p99_rtt', 0):<12.2f} {r.get('rep_max_rtt', 0):<12.2f} "
+            f"{r.get('prop_p95_rtt', 0):<13.2f} {r.get('prop_p99_rtt', 0):<13.2f} {r.get('prop_max_rtt', 0):<13.2f}"
+        )
 
 
 def analyze_calibration(calibration_dir: Path, node_count: int, distribution: str = "hydra") -> Dict[str, Any]:
@@ -573,6 +661,209 @@ def measure_update_propagation(results_dir: Path, node_count: int, topology_path
 
     max_normalized = max(normalized_rtts) if normalized_rtts else 0.0
     return max_prop_ms, max_normalized
+
+
+def compute_rtt_normalized_stats(results_dir: Path, topo_path: Path) -> Dict[str, Any]:
+    """Compute RTT-normalized replication and propagation stats from event logs.
+
+    Args:
+        results_dir: Directory containing event logs
+        topo_path: Path to topology.conf file
+
+    Returns:
+        Dict with RTT-normalized stats for replication and propagation times
+    """
+    # Load topology delays
+    delays, median_delay = parse_topology_delays(topo_path)
+    fallback_delay = median_delay if median_delay else 10.0
+
+    all_events = []
+    for log_file in results_dir.glob("events-*.jsonl"):
+        node_name = log_file.stem.replace("events-", "")
+        try:
+            with open(log_file) as f:
+                for line in f:
+                    try:
+                        event = json.loads(line.strip())
+                        event["_node_name"] = node_name
+                        all_events.append(event)
+                    except json.JSONDecodeError:
+                        pass
+        except IOError:
+            continue
+
+    all_events.sort(key=lambda e: e.get("ts", ""))
+
+    # Build command timelines to find first claim and RF claim times
+    command_times = {}  # target -> {start_ts, first_claim_ts, rf_claim_ts, claims[]}
+    claim_counts = {}   # target -> set of claiming nodes
+
+    for event in all_events:
+        ts = event.get("ts")
+        if event.get("event") == "command_received":
+            target = event.get("target", "")
+            if target and target not in command_times:
+                command_times[target] = {
+                    "start_ts": ts,
+                    "first_claim_ts": None,
+                    "rf_claim_ts": None,
+                    "claims": []
+                }
+                claim_counts[target] = set()
+
+        elif event.get("event") == "job_claimed":
+            target = event.get("target", "")
+            node = event.get("_node_name", "")
+            if target in command_times and node not in claim_counts[target]:
+                claim_counts[target].add(node)
+                ct = command_times[target]
+                ct["claims"].append({"ts": ts, "node": node})
+
+                if ct["first_claim_ts"] is None:
+                    ct["first_claim_ts"] = ts
+
+                # Check if RF reached
+                if len(claim_counts[target]) >= 3 and ct["rf_claim_ts"] is None:
+                    # RF claim time is when the RF-th claim was made
+                    sorted_claims = sorted(ct["claims"], key=lambda c: c["ts"])
+                    if len(sorted_claims) >= 3:
+                        ct["rf_claim_ts"] = sorted_claims[2]["ts"]
+
+    # Calculate per-command RTT values
+    rep_times_ms = []
+    rep_times_rtt = []
+    prop_times_ms = []
+    prop_times_rtt = []
+
+    replication_factor = 3  # Default, could be extracted from metadata
+
+    for target, ct in command_times.items():
+        if ct["first_claim_ts"] is None or ct["rf_claim_ts"] is None:
+            continue
+
+        # Replication time: first claim to RF claim
+        first_claim_time = parse_ts(ct["first_claim_ts"])
+        rf_claim_time = parse_ts(ct["rf_claim_ts"])
+
+        if first_claim_time and rf_claim_time:
+            rep_time_ms = (rf_claim_time - first_claim_time).total_seconds() * 1000
+            rep_times_ms.append(rep_time_ms)
+
+            # For RTT: find the maximum link delay among claims
+            # The bottleneck link is the one with highest delay
+            max_link_delay = 0.0
+            for claim in ct["claims"]:
+                link_delay = get_link_delay(
+                    claim["node"], claim["node"], delays, fallback_delay
+                )
+                # Actually we need the delay from first claimer to this claimer
+                first_claimer = ct["claims"][0]["node"]
+                link_delay = get_link_delay(first_claimer, claim["node"], delays, fallback_delay)
+                if link_delay > max_link_delay:
+                    max_link_delay = link_delay
+
+            if max_link_delay > 0:
+                expected_rtt = 2 * max_link_delay
+                rep_time_rtt = rep_time_ms / expected_rtt
+                rep_times_rtt.append(rep_time_rtt)
+
+        # Propagation time: claim to all other nodes receiving the update
+        # For each claim, measure time for update to propagate to others
+        for claim in ct["claims"]:
+            claiming_node = claim["node"]
+            claim_ts = claim["ts"]
+            claim_time = parse_ts(claim_ts)
+
+            if claim_time is None:
+                continue
+
+            # Find when other nodes received this update via node_update events
+            for event in all_events:
+                if event.get("event") == "node_update":
+                    from_node = event.get("from", "")
+                    from_node_name = from_node.split("/")[-1] if "/" in from_node else from_node
+                    if from_node_name == claiming_node:
+                        recv_node = event.get("_node_name", "")
+                        if recv_node != claiming_node:
+                            jobs = event.get("jobs", [])
+                            if any(target in str(j) for j in jobs):
+                                recv_ts = event.get("ts")
+                                recv_time = parse_ts(recv_ts)
+                                if recv_time:
+                                    prop_time_ms = (recv_time - claim_time).total_seconds() * 1000
+                                    link_delay = get_link_delay(
+                                        claiming_node, recv_node, delays, fallback_delay
+                                    )
+                                    if link_delay > 0:
+                                        expected_rtt = 2 * link_delay
+                                        prop_time_rtt = prop_time_ms / expected_rtt
+                                        prop_times_ms.append(prop_time_ms)
+                                        prop_times_rtt.append(prop_time_rtt)
+
+    # Compute aggregate stats
+    def compute_stats(times_ms, times_rtt):
+        if not times_ms:
+            return {
+                "min": 0, "max": 0, "avg": 0, "median": 0, "p95": 0, "p99": 0,
+                "min_rtt": 0, "max_rtt": 0, "avg_rtt": 0, "median_rtt": 0, "p95_rtt": 0, "p99_rtt": 0
+            }
+
+        sorted_ms = sorted(times_ms)
+        sorted_rtt = sorted(times_rtt) if times_rtt else [0]
+        n = len(sorted_ms)
+
+        def percentile(data, p):
+            if not data:
+                return 0
+            idx = int(len(data) * p / 100)
+            return data[min(idx, len(data) - 1)]
+
+        return {
+            "min": sorted_ms[0] if sorted_ms else 0,
+            "max": sorted_ms[-1] if sorted_ms else 0,
+            "avg": statistics.mean(sorted_ms) if sorted_ms else 0,
+            "median": statistics.median(sorted_ms) if sorted_ms else 0,
+            "p95": percentile(sorted_ms, 95),
+            "p99": percentile(sorted_ms, 99),
+            "min_rtt": sorted_rtt[0] if sorted_rtt else 0,
+            "max_rtt": sorted_rtt[-1] if sorted_rtt else 0,
+            "avg_rtt": statistics.mean(sorted_rtt) if sorted_rtt else 0,
+            "median_rtt": statistics.median(sorted_rtt) if sorted_rtt else 0,
+            "p95_rtt": percentile(sorted_rtt, 95),
+            "p99_rtt": percentile(sorted_rtt, 99),
+        }
+
+    rep_stats = compute_stats(rep_times_ms, rep_times_rtt)
+    prop_stats = compute_stats(prop_times_ms, prop_times_rtt)
+
+    return {
+        # Replication time stats
+        "rep_min_ms": rep_stats["min"],
+        "rep_max_ms": rep_stats["max"],
+        "rep_avg_ms": rep_stats["avg"],
+        "rep_med_ms": rep_stats["median"],
+        "rep_p95_ms": rep_stats["p95"],
+        "rep_p99_ms": rep_stats["p99"],
+        "rep_min_rtt": rep_stats["min_rtt"],
+        "rep_max_rtt": rep_stats["max_rtt"],
+        "rep_avg_rtt": rep_stats["avg_rtt"],
+        "rep_med_rtt": rep_stats["median_rtt"],
+        "rep_p95_rtt": rep_stats["p95_rtt"],
+        "rep_p99_rtt": rep_stats["p99_rtt"],
+        # Propagation time stats
+        "prop_min_ms": prop_stats["min"],
+        "prop_max_ms": prop_stats["max"],
+        "prop_avg_ms": prop_stats["avg"],
+        "prop_med_ms": prop_stats["median"],
+        "prop_p95_ms": prop_stats["p95"],
+        "prop_p99_ms": prop_stats["p99"],
+        "prop_min_rtt": prop_stats["min_rtt"],
+        "prop_max_rtt": prop_stats["max_rtt"],
+        "prop_avg_rtt": prop_stats["avg_rtt"],
+        "prop_med_rtt": prop_stats["median_rtt"],
+        "prop_p95_rtt": prop_stats["p95_rtt"],
+        "prop_p99_rtt": prop_stats["p99_rtt"],
+    }
 
 
 def cmd_collect(args):

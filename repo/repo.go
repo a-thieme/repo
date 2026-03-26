@@ -58,6 +58,7 @@ type Repo struct {
 
 	heartbeats  map[string]*time.Timer
 	heartbeatMu sync.Mutex
+	deadNodes   map[string]bool
 
 	eventLogger  util.Logger
 	countingFace *util.CountingFace
@@ -98,6 +99,7 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 		pendingAssignments:       make(map[string]*tlv.JobAssignment),
 		scheduledRedistributions: make(map[string]*time.Timer),
 		heartbeats:               make(map[string]*time.Timer),
+		deadNodes:                make(map[string]bool),
 	}
 
 	r.distributor = NewDistributionMechanism(r, distributionMechanism)
@@ -272,6 +274,15 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 	publisherName := pub.Publisher.String()
 	log.Info(r, "onGroupSync_received", "publisher", publisherName, "jobs", len(update.Jobs), "newCmd", update.NewCommand != nil)
 	log.Debug(r, "groupSync_update_received", "publisher", publisherName, "jobs", len(update.Jobs))
+
+	r.heartbeatMu.Lock()
+	if r.deadNodes[publisherName] {
+		r.heartbeatMu.Unlock()
+		log.Debug(r, "update_from_dead_node", "node", publisherName)
+		return
+	}
+	r.heartbeatMu.Unlock()
+
 	r.updateNodeStatus(publisherName, update)
 	r.resetHeartbeatTimer(publisherName)
 	r.eventLogger.LogNodeUpdate(publisherName, update.Jobs, update.StorageCapacity, update.StorageUsed)

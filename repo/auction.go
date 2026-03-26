@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/a-thieme/repo/tlv"
@@ -23,10 +24,11 @@ type AuctionMechanism struct {
 	repo            *Repo
 	heartbeatSvSync *svs.SvSync
 	quitCh          chan struct{}
+	auctionSeq      uint64
 }
 
 func NewAuctionMechanism(repo *Repo) *AuctionMechanism {
-	return &AuctionMechanism{repo: repo}
+	return &AuctionMechanism{repo: repo, auctionSeq: 0}
 }
 
 func (a *AuctionMechanism) String() string {
@@ -87,6 +89,15 @@ func (a *AuctionMechanism) runHeartbeatTick() {
 func (a *AuctionMechanism) HandleHeartbeatUpdate(update svs.SvSyncUpdate) {
 	nodeName := update.Name.String()
 	log.Debug(a, "heartbeat", "node", nodeName)
+
+	a.repo.heartbeatMu.Lock()
+	if a.repo.deadNodes[nodeName] {
+		a.repo.heartbeatMu.Unlock()
+		log.Debug(a, "heartbeat_from_dead_node", "node", nodeName)
+		return
+	}
+	a.repo.heartbeatMu.Unlock()
+
 	a.repo.mu.Lock()
 	if status, exists := a.repo.nodeStatus[nodeName]; exists {
 		status.LastUpdated = time.Now()
@@ -125,11 +136,11 @@ func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
 		return
 	}
 
-	timestamp := uint64(time.Now().UnixNano())
+	auctionID := atomic.AddUint64(&a.auctionSeq, 1)
 	resultsName := a.repo.nodePrefix.Append(enc.NewGenericComponent(RESULTS_SUFFIX))
-	resultsName = resultsName.Append(enc.NewTimestampComponent(timestamp))
+	resultsName = resultsName.Append(enc.NewTimestampComponent(auctionID))
 
-	peerMetrics := a.collectPeerMetrics(peers, jobs, resultsName)
+	peerMetrics := a.collectPeerMetrics(peers, jobs, resultsName, auctionID)
 	if len(peerMetrics) == 0 {
 		log.Info(a.repo, "runAuctionBatched_no_metrics", "jobCount", len(jobs))
 		return
@@ -139,6 +150,16 @@ func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
 	shouldPublishJobs := false
 	for _, target := range jobs {
 		targetStr := target.String()
+
+		// Check if replication is needed before scheduling reevaluation
+		currentReplication := a.repo.countReplication(target)
+		needed := a.repo.rf - currentReplication
+		if needed <= 0 {
+			log.Info(a.repo, "runAuctionBatched_skip", "reason", "replication_satisfied", "target", targetStr)
+			continue
+		}
+
+		// Only schedule reevaluation AFTER confirming we need more replicas
 		a.repo.scheduleReevaluationLoop(target)
 
 		a.repo.mu.Lock()
@@ -160,6 +181,14 @@ func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
 		a.repo.mu.Unlock()
 
 		assignment := a.repo.DetermineWinners(target, nodeStatus)
+
+		// If assignment is nil, replication is satisfied - cancel pending reevaluation
+		if assignment == nil {
+			log.Info(a.repo, "runAuctionBatched_skip", "reason", "replication_satisfied_in_determineWinners", "target", targetStr)
+			a.repo.cancelReevaluation(target)
+			continue
+		}
+
 		isAssignee := a.repo.amAssignee(assignment)
 		if assignment != nil {
 			log.Info(a.repo, "runAuctionBatched_winner", "target", targetStr, "winners", assignment.Assignees)
@@ -194,12 +223,10 @@ func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
 	}
 }
 
-func (a *AuctionMechanism) collectPeerMetrics(peers []string, jobs []enc.Name, resultsName enc.Name) map[string]*tlv.NodeUpdate {
+func (a *AuctionMechanism) collectPeerMetrics(peers []string, jobs []enc.Name, resultsName enc.Name, auctionID uint64) map[string]*tlv.NodeUpdate {
 	peerMetrics := make(map[string]*tlv.NodeUpdate)
 	var metricsMu sync.Mutex
 	responsesCh := make(chan string, len(peers))
-
-	timestamp := uint64(time.Now().UnixNano())
 
 	auctionTimer := time.NewTimer(a.repo.auctionTimeout)
 
@@ -213,7 +240,7 @@ func (a *AuctionMechanism) collectPeerMetrics(peers []string, jobs []enc.Name, r
 
 			peerPrefix, _ := enc.NameFromStr(peer)
 			bidName := peerPrefix.Append(enc.NewGenericComponent(BID_SUFFIX))
-			bidName = bidName.Append(enc.NewTimestampComponent(timestamp))
+			bidName = bidName.Append(enc.NewTimestampComponent(auctionID))
 
 			metricReq := &tlv.MetricRequest{
 				Target:      jobs[0],
@@ -274,7 +301,6 @@ func (a *AuctionMechanism) collectPeerMetrics(peers []string, jobs []enc.Name, r
 
 func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 	targetStr := cmd.Target.String()
-	a.repo.scheduleReevaluationLoop(cmd.Target)
 	currentReplication := a.repo.countReplication(cmd.Target)
 	needed := a.repo.rf - currentReplication
 
@@ -283,20 +309,24 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 		if a.repo.eventLogger != nil {
 			a.repo.eventLogger.LogAuctionDelayed(targetStr, "replication_satisfied")
 		}
+		a.repo.cancelReevaluation(cmd.Target)
 		return
 	}
 
-	timestamp := uint64(time.Now().UnixNano())
-	resultsName := a.repo.nodePrefix.Append(enc.NewGenericComponent(RESULTS_SUFFIX))
-	resultsName = resultsName.Append(enc.NewTimestampComponent(timestamp))
+	// Only schedule reevaluation AFTER confirming we need more replicas
+	a.repo.scheduleReevaluationLoop(cmd.Target)
 
-	log.Info(a.repo, "runAuction_started", "target", targetStr, "timestamp", timestamp, "current", currentReplication, "needed", needed)
+	auctionID := atomic.AddUint64(&a.auctionSeq, 1)
+	resultsName := a.repo.nodePrefix.Append(enc.NewGenericComponent(RESULTS_SUFFIX))
+	resultsName = resultsName.Append(enc.NewTimestampComponent(auctionID))
+
+	log.Info(a.repo, "runAuction_started", "target", targetStr, "auctionID", auctionID, "current", currentReplication, "needed", needed)
 
 	if a.repo.eventLogger != nil {
-		a.repo.eventLogger.LogAuctionStarted(targetStr, currentReplication, needed, timestamp)
+		a.repo.eventLogger.LogAuctionStarted(targetStr, currentReplication, needed, auctionID)
 	}
 
-	peers := a.repo.getOtherNodeNamesNotDoing(cmd.Target)
+	peers := a.repo.getOtherNodeNames()
 	log.Info(a.repo, "runAuction_peers", "target", targetStr, "peers", peers)
 
 	// edge case where we get a command before seeing peers
@@ -322,7 +352,7 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 
 			peerPrefix, _ := enc.NameFromStr(peer)
 			bidName := peerPrefix.Append(enc.NewGenericComponent(BID_SUFFIX))
-			bidName = bidName.Append(enc.NewTimestampComponent(timestamp))
+			bidName = bidName.Append(enc.NewTimestampComponent(auctionID))
 
 			metricReq := &tlv.MetricRequest{
 				Target:      cmd.Target,
@@ -335,7 +365,7 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 				Name: bidName,
 				Config: &ndn.InterestConfig{
 					CanBePrefix: false,
-					MustBeFresh: true, // TODO: see if this is needed
+					MustBeFresh: true,
 				},
 				AppParam: metricReq.Encode(),
 				Retries:  3,
@@ -422,6 +452,14 @@ func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsNa
 	}
 
 	assignment := a.repo.DetermineWinners(target, nodeStatus)
+
+	// If assignment is nil, replication is already satisfied - cancel any pending reevaluation
+	if assignment == nil {
+		log.Info(a.repo, "runAuction_skip", "reason", "replication_satisfied_in_determineWinners", "target", targetStr)
+		a.repo.cancelReevaluation(target)
+		return
+	}
+
 	log.Info(a.repo, "runAuction_winners", "target", targetStr, "winners", assignment.Assignees)
 
 	if a.repo.eventLogger != nil {

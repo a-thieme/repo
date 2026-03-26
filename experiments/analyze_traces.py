@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import bisect
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +33,51 @@ PHASE_CONFIG = {
     "conflict_window_ms": 500,
     "replication_factor": 3,
 }
+
+
+def parse_topology_delays(topo_path: Path) -> tuple:
+    """Parse link delays from topology file.
+    Returns: ({node_pair: delay_ms}, median_delay_ms)
+    """
+    delays = {}
+    median_delays = []
+
+    if not topo_path.exists():
+        return delays, None
+
+    try:
+        with open(topo_path) as f:
+            in_links = False
+            for line in f:
+                line = line.strip()
+                if line == '[links]':
+                    in_links = True
+                    continue
+                if line.startswith('[') and in_links:
+                    break
+                if in_links and ':' in line and 'delay' in line:
+                    parts = line.split()
+                    node_part = parts[0]
+                    delay_part = [p for p in parts if 'delay' in p][0]
+
+                    nodes = node_part.split(':')
+                    if len(nodes) != 2:
+                        continue
+
+                    node1, node2 = nodes[0].lower(), nodes[1].lower()
+                    delay_str = delay_part.split('=')[1].rstrip('ms')
+                    try:
+                        delay_ms = float(delay_str)
+                        delays[(node1, node2)] = delay_ms
+                        delays[(node2, node1)] = delay_ms
+                        median_delays.append(delay_ms)
+                    except (ValueError, IndexError):
+                        continue
+    except IOError:
+        pass
+
+    median = statistics.median(median_delays) if median_delays else None
+    return delays, median
 
 
 def parse_ts(ts_str: str) -> Optional[datetime]:
@@ -171,17 +217,34 @@ def build_command_timelines(events: List[Dict], metadata: Dict) -> Dict[str, Any
     return timelines
 
 
-def compute_phase_durations(timelines: Dict, metadata: Dict) -> Dict[str, Any]:
-    """Calculate duration for each phase per command."""
+def compute_phase_durations(timelines: Dict, metadata: Dict, median_delay_ms: float = None) -> Dict[str, Any]:
+    """Calculate duration for each phase per command.
+
+    Args:
+        timelines: Command timelines dict
+        metadata: Experiment metadata
+        median_delay_ms: Median one-way link delay for RTT normalization (if None, skip RTT)
+    """
     replication_factor = metadata.get(
         "replication_factor", PHASE_CONFIG["replication_factor"]
     )
+
+    # Use median_delay as fallback for RTT calculation
+    fallback_delay = median_delay_ms if median_delay_ms else 10.0
+    expected_rtt = 2 * fallback_delay  # RTT = 2 * one-way delay
+
     phase_stats = {
         "ingestion_ms": [],
         "propagation_ms": [],
         "assignment_chain_ms": [],
         "replication_ms": [],
         "sync_ms": [],
+        # RTT-normalized versions
+        "ingestion_rtt": [],
+        "propagation_rtt": [],
+        "assignment_chain_rtt": [],
+        "replication_rtt": [],
+        "sync_rtt": [],
         "total_commands": len(timelines),
     }
 
@@ -198,38 +261,63 @@ def compute_phase_durations(timelines: Dict, metadata: Dict) -> Dict[str, Any]:
             ingestion_ms = (first_decision - cmd_received).total_seconds() * 1000
             cmd_phases["ingestion_ms"] = ingestion_ms
             phase_stats["ingestion_ms"].append(ingestion_ms)
+            if expected_rtt > 0:
+                ingestion_rtt = ingestion_ms / expected_rtt
+                cmd_phases["ingestion_rtt"] = ingestion_rtt
+                phase_stats["ingestion_rtt"].append(ingestion_rtt)
         else:
             cmd_phases["ingestion_ms"] = None
+            cmd_phases["ingestion_rtt"] = None
 
         if first_decision and first_claim:
             propagation_ms = (first_claim - first_decision).total_seconds() * 1000
             cmd_phases["propagation_ms"] = propagation_ms
             phase_stats["propagation_ms"].append(propagation_ms)
+            if expected_rtt > 0:
+                propagation_rtt = propagation_ms / expected_rtt
+                cmd_phases["propagation_rtt"] = propagation_rtt
+                phase_stats["propagation_rtt"].append(propagation_rtt)
         else:
             cmd_phases["propagation_ms"] = None
+            cmd_phases["propagation_rtt"] = None
 
         if first_claim and len(all_claims) >= replication_factor:
             rf_claim_time = all_claims[replication_factor - 1]
             assignment_chain_ms = (rf_claim_time - first_claim).total_seconds() * 1000
             cmd_phases["assignment_chain_ms"] = assignment_chain_ms
             phase_stats["assignment_chain_ms"].append(assignment_chain_ms)
+            if expected_rtt > 0:
+                assignment_chain_rtt = assignment_chain_ms / expected_rtt
+                cmd_phases["assignment_chain_rtt"] = assignment_chain_rtt
+                phase_stats["assignment_chain_rtt"].append(assignment_chain_rtt)
         else:
             cmd_phases["assignment_chain_ms"] = None
+            cmd_phases["assignment_chain_rtt"] = None
 
         if first_claim and len(all_claims) >= replication_factor:
             rf_claim_time = all_claims[replication_factor - 1]
             replication_ms = (rf_claim_time - first_claim).total_seconds() * 1000
             cmd_phases["replication_ms"] = replication_ms
             phase_stats["replication_ms"].append(replication_ms)
+            if expected_rtt > 0:
+                replication_rtt = replication_ms / expected_rtt
+                cmd_phases["replication_rtt"] = replication_rtt
+                phase_stats["replication_rtt"].append(replication_rtt)
         else:
             cmd_phases["replication_ms"] = None
+            cmd_phases["replication_rtt"] = None
 
         if cmd_received and command_synced:
             sync_ms = (command_synced - cmd_received).total_seconds() * 1000
             cmd_phases["sync_ms"] = sync_ms
             phase_stats["sync_ms"].append(sync_ms)
+            if expected_rtt > 0:
+                sync_rtt = sync_ms / expected_rtt
+                cmd_phases["sync_rtt"] = sync_rtt
+                phase_stats["sync_rtt"].append(sync_rtt)
         else:
             cmd_phases["sync_ms"] = None
+            cmd_phases["sync_rtt"] = None
 
         tl["phases"] = cmd_phases
 
@@ -238,10 +326,15 @@ def compute_phase_durations(timelines: Dict, metadata: Dict) -> Dict[str, Any]:
         if phase == "total_commands":
             summary[phase] = len(timelines)
         elif values:
+            sorted_values = sorted(values)
             summary[f"{phase}_min"] = min(values)
             summary[f"{phase}_max"] = max(values)
             summary[f"{phase}_avg"] = statistics.mean(values)
             summary[f"{phase}_median"] = statistics.median(values)
+            # Percentiles
+            n = len(sorted_values)
+            summary[f"{phase}_p95"] = sorted_values[int(n * 0.95)] if n >= 20 else sorted_values[-1]
+            summary[f"{phase}_p99"] = sorted_values[int(n * 0.99)] if n >= 100 else sorted_values[-1]
             if len(values) > 1:
                 summary[f"{phase}_stdev"] = statistics.stdev(values)
 
@@ -251,7 +344,7 @@ def compute_phase_durations(timelines: Dict, metadata: Dict) -> Dict[str, Any]:
 def categorize_sync_interests(
     events: List[Dict], timelines: Dict, metadata: Dict
 ) -> Dict[str, Any]:
-    """Categorize sync interests by trigger."""
+    """Categorize sync interests by trigger using binary search for efficiency."""
     sync_events = [e for e in events if e.get("event") == "sync_interest_sent"]
     node_updates = [e for e in events if e.get("event") == "node_update"]
     job_released = [e for e in events if e.get("event") == "job_released"]
@@ -268,15 +361,45 @@ def categorize_sync_interests(
         "new_command": [],
         "assignment": [],
         "job_release": [],
-        "unknown": [],
+        "other": [],  # Uncategorized sync interests
     }
 
-    node_update_times = [(parse_ts(u.get("ts")), u) for u in node_updates]
-    job_release_times = [(parse_ts(j.get("ts")), j) for j in job_released]
-    assignment_times = [(parse_ts(a.get("ts")), a) for a in assignment_handled]
+    # Pre-parse timestamps and sort event lists by timestamp for binary search
+    node_updates_sorted = sorted(
+        [(parse_ts(u.get("ts")), u) for u in node_updates if parse_ts(u.get("ts")) is not None],
+        key=lambda x: x[0]
+    )
+    job_released_sorted = sorted(
+        [(parse_ts(j.get("ts")), j) for j in job_released if parse_ts(j.get("ts")) is not None],
+        key=lambda x: x[0]
+    )
+    assignment_sorted = sorted(
+        [(parse_ts(a.get("ts")), a) for a in assignment_handled if parse_ts(a.get("ts")) is not None],
+        key=lambda x: x[0]
+    )
+
+    # Extract just timestamps for binary search
+    node_update_ts_list = [ts for ts, _ in node_updates_sorted]
+    job_release_ts_list = [ts for ts, _ in job_released_sorted]
+    assignment_ts_list = [ts for ts, _ in assignment_sorted]
 
     first_event_ts = parse_ts(sync_events[0].get("ts")) if sync_events else None
     experiment_start_ms = first_event_ts.timestamp() * 1000 if first_event_ts else 0
+
+    def find_events_in_window(ts_list, events_list, sync_ts, window_ms):
+        """Find events within window_ms before sync_ts using binary search."""
+        sync_ts_ms = sync_ts.timestamp() * 1000
+        window_start_ms = sync_ts_ms - window_ms
+        # Create offset-aware datetime for comparison
+        window_start_dt = datetime.fromtimestamp(window_start_ms / 1000, tz=sync_ts.tzinfo)
+        # Find left bound using binary search
+        left = bisect.bisect_left(ts_list, window_start_dt)
+        # Iterate only through events in window
+        for i in range(left, len(events_list)):
+            event_ts = ts_list[i]
+            if (sync_ts - event_ts).total_seconds() * 1000 > window_ms:
+                break
+            yield events_list[i]
 
     for sync_event in sync_events:
         sync_ts = parse_ts(sync_event.get("ts"))
@@ -294,69 +417,51 @@ def categorize_sync_interests(
 
         categorized = False
 
-        for update_ts, update in node_update_times:
-            if update_ts is None:
-                continue
-            if (sync_ts - update_ts).total_seconds() * 1000 <= new_cmd_window:
-                if update.get("newCommand") or update.get("NewCommand"):
-                    categories["new_command"].append(sync_event)
-                    categorized = True
-                    break
+        # Use binary search to find events in window
+        for update_ts, update in find_events_in_window(
+            node_update_ts_list, node_updates_sorted, sync_ts, new_cmd_window
+        ):
+            if update.get("newCommand") or update.get("NewCommand"):
+                categories["new_command"].append(sync_event)
+                categorized = True
+                break
 
         if not categorized:
-            for assign_ts, assign in assignment_times:
-                if assign_ts is None:
-                    continue
-                if (sync_ts - assign_ts).total_seconds() * 1000 <= assign_window:
-                    categories["assignment"].append(sync_event)
-                    categorized = True
-                    break
+            for assign_ts, assign in find_events_in_window(
+                assignment_ts_list, assignment_sorted, sync_ts, assign_window
+            ):
+                categories["assignment"].append(sync_event)
+                categorized = True
+                break
 
         if not categorized:
-            for release_ts, release in job_release_times:
-                if release_ts is None:
-                    continue
-                if (sync_ts - release_ts).total_seconds() * 1000 <= job_release_window:
-                    categories["job_release"].append(sync_event)
-                    categorized = True
-                    break
+            for release_ts, release in find_events_in_window(
+                job_release_ts_list, job_released_sorted, sync_ts, job_release_window
+            ):
+                categories["job_release"].append(sync_event)
+                categorized = True
+                break
 
         if not categorized:
-            categories["unknown"].append(sync_event)
+            categories["other"].append(sync_event)
 
     total = len(sync_events)
+    total_commands = metadata.get("total_commands", 1) or 1  # Avoid division by zero
+
+    def calc_stats(count):
+        return {
+            "count": count,
+            "percentage": (count / total * 100) if total > 0 else 0,
+            "per_command": count / total_commands,
+        }
+
     breakdown = {
         "total_sync_interests": total,
-        "heartbeat": {
-            "count": len(categories["heartbeat"]),
-            "percentage": (len(categories["heartbeat"]) / total * 100)
-            if total > 0
-            else 0,
-        },
-        "new_command": {
-            "count": len(categories["new_command"]),
-            "percentage": (len(categories["new_command"]) / total * 100)
-            if total > 0
-            else 0,
-        },
-        "assignment": {
-            "count": len(categories["assignment"]),
-            "percentage": (len(categories["assignment"]) / total * 100)
-            if total > 0
-            else 0,
-        },
-        "job_release": {
-            "count": len(categories["job_release"]),
-            "percentage": (len(categories["job_release"]) / total * 100)
-            if total > 0
-            else 0,
-        },
-        "unknown": {
-            "count": len(categories["unknown"]),
-            "percentage": (len(categories["unknown"]) / total * 100)
-            if total > 0
-            else 0,
-        },
+        "heartbeat": calc_stats(len(categories["heartbeat"])),
+        "new_command": calc_stats(len(categories["new_command"])),
+        "assignment": calc_stats(len(categories["assignment"])),
+        "job_release": calc_stats(len(categories["job_release"])),
+        "other": calc_stats(len(categories["other"])),
     }
 
     return breakdown
@@ -463,7 +568,7 @@ def analyze_assignment_conflicts(events: List[Dict], metadata: Dict) -> Dict[str
 
 
 def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str, Any]:
-    """Analyze what triggers group message publications."""
+    """Analyze what triggers group message publications using binary search for efficiency."""
     node_updates = [
         e for e in events if e.get("event") == "node_update" and e.get("jobs")
     ]
@@ -488,6 +593,43 @@ def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str
     heartbeat_interval = 5000
     heartbeat_tolerance = 500
 
+    # Pre-parse and sort event lists for binary search
+    command_received_sorted = sorted(
+        [(parse_ts(c.get("ts", "")), c) for c in command_received if parse_ts(c.get("ts", "")) is not None],
+        key=lambda x: x[0]
+    )
+    command_synced_sorted = sorted(
+        [(parse_ts(c.get("ts", "")), c) for c in command_synced if parse_ts(c.get("ts", "")) is not None],
+        key=lambda x: x[0]
+    )
+    job_claimed_sorted = sorted(
+        [(parse_ts(j.get("ts", "")), j) for j in job_claimed if parse_ts(j.get("ts", "")) is not None],
+        key=lambda x: x[0]
+    )
+    assignment_sorted = sorted(
+        [(parse_ts(a.get("ts", "")), a) for a in assignment_handled if parse_ts(a.get("ts", "")) is not None],
+        key=lambda x: x[0]
+    )
+
+    # Extract just timestamps for binary search
+    cr_ts_list = [ts for ts, _ in command_received_sorted]
+    cs_ts_list = [ts for ts, _ in command_synced_sorted]
+    jc_ts_list = [ts for ts, _ in job_claimed_sorted]
+    ah_ts_list = [ts for ts, _ in assignment_sorted]
+
+    def find_events_in_window(ts_list, events_list, update_ts, window_ms):
+        """Find events within window_ms before update_ts using binary search."""
+        update_ts_ms = update_ts.timestamp() * 1000
+        window_start_ms = update_ts_ms - window_ms
+        # Create offset-aware datetime for comparison
+        window_start_dt = datetime.fromtimestamp(window_start_ms / 1000, tz=update_ts.tzinfo)
+        left = bisect.bisect_left(ts_list, window_start_dt)
+        for i in range(left, len(events_list)):
+            event_ts = ts_list[i]
+            if (update_ts - event_ts).total_seconds() * 1000 > window_ms:
+                break
+            yield events_list[i]
+
     for update in node_updates:
         ts = parse_ts(update.get("ts", ""))
         if ts is None:
@@ -504,48 +646,31 @@ def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str
             trigger = "heartbeat"
         else:
             found_trigger = False
+            window_ms = 1000  # 1 second window
 
-            window_start_ms = ts_ms - 1000
-            window_end_ms = ts_ms + 500
-
-            for cr in command_received:
-                cr_ts = parse_ts(cr.get("ts", ""))
-                if cr_ts:
-                    cr_ts_ms = cr_ts.timestamp() * 1000
-                    if cr_ts_ms >= window_start_ms and cr_ts_ms <= ts_ms:
-                        trigger = "new_command"
-                        found_trigger = True
-                        break
+            # Use binary search for each event type
+            for cr in find_events_in_window(cr_ts_list, command_received_sorted, ts, window_ms):
+                trigger = "new_command"
+                found_trigger = True
+                break
 
             if not found_trigger:
-                for cs in command_synced:
-                    cs_ts = parse_ts(cs.get("ts", ""))
-                    if cs_ts:
-                        cs_ts_ms = cs_ts.timestamp() * 1000
-                        if cs_ts_ms >= window_start_ms and cs_ts_ms <= ts_ms:
-                            trigger = "new_command"
-                            found_trigger = True
-                            break
+                for cs in find_events_in_window(cs_ts_list, command_synced_sorted, ts, window_ms):
+                    trigger = "new_command"
+                    found_trigger = True
+                    break
 
             if not found_trigger:
-                for jc in job_claimed:
-                    jc_ts = parse_ts(jc.get("ts", ""))
-                    if jc_ts:
-                        jc_ts_ms = jc_ts.timestamp() * 1000
-                        if jc_ts_ms >= window_start_ms and jc_ts_ms <= ts_ms:
-                            trigger = "job_claim"
-                            found_trigger = True
-                            break
+                for jc in find_events_in_window(jc_ts_list, job_claimed_sorted, ts, window_ms):
+                    trigger = "job_claim"
+                    found_trigger = True
+                    break
 
             if not found_trigger:
-                for ah in assignment_handled:
-                    ah_ts = parse_ts(ah.get("ts", ""))
-                    if ah_ts:
-                        ah_ts_ms = ah_ts.timestamp() * 1000
-                        if ah_ts_ms >= window_start_ms and ah_ts_ms <= ts_ms:
-                            trigger = "assignment"
-                            found_trigger = True
-                            break
+                for ah in find_events_in_window(ah_ts_list, assignment_sorted, ts, window_ms):
+                    trigger = "assignment"
+                    found_trigger = True
+                    break
 
         triggers[trigger] += 1
 
@@ -560,11 +685,17 @@ def analyze_experiment(exp_dir: Path) -> Dict[str, Any]:
     print(f"  Parsing events from {exp_dir.name}...")
     events, metadata = parse_events(exp_dir)
 
+    # Parse topology for RTT normalization
+    topo_path = exp_dir / "topology.conf"
+    if not topo_path.exists():
+        topo_path = Path("/usr/local/share/testbed_topology.conf")
+    _, median_delay = parse_topology_delays(topo_path)
+
     print(f"  Building command timelines...")
     timelines = build_command_timelines(events, metadata)
 
     print(f"  Computing phase durations...")
-    phases = compute_phase_durations(timelines, metadata)
+    phases = compute_phase_durations(timelines, metadata, median_delay)
 
     print(f"  Categorizing sync interests...")
     sync_breakdown = categorize_sync_interests(events, timelines, metadata)
@@ -585,6 +716,7 @@ def analyze_experiment(exp_dir: Path) -> Dict[str, Any]:
             "total_duration_seconds": metadata.get("total_duration_seconds", 0),
             "total_commands": metadata.get("total_commands", 0),
         },
+        "topology_median_delay_ms": median_delay,
         "events": events,
         "timelines": phases["commands"],
         "phase_summary": phases["summary"],
@@ -623,36 +755,47 @@ def generate_csv_output(data: Dict, output_dir: Path):
 
     phase_csv = output_dir / "phase_durations.csv"
     with open(phase_csv, "w") as f:
+        # Header with both ms and RTT columns
         f.write(
-            "experiment,cmd_id,ingestion_ms,propagation_ms,assignment_chain_ms,replication_ms,sync_ms\n"
+            "experiment,cmd_id,"
+            "ingestion_ms,ingestion_rtt,"
+            "propagation_ms,propagation_rtt,"
+            "assignment_chain_ms,assignment_chain_rtt,"
+            "replication_ms,replication_rtt,"
+            "sync_ms,sync_rtt\n"
         )
         for exp in data["experiments"]:
             exp_name = exp["name"]
             for cmd_id, tl in exp["timelines"].items():
                 phases = tl.get("phases", {})
                 f.write(f"{exp_name},{cmd_id},")
+                # Ingestion
                 f.write(
-                    f"{phases.get('ingestion_ms', ''):.2f},"
+                    f"{phases.get('ingestion_ms', ''):.2f},{phases.get('ingestion_rtt', ''):.2f},"
                     if phases.get("ingestion_ms")
-                    else ","
+                    else ",,"
                 )
+                # Propagation
                 f.write(
-                    f"{phases.get('propagation_ms', ''):.2f},"
+                    f"{phases.get('propagation_ms', ''):.2f},{phases.get('propagation_rtt', ''):.2f},"
                     if phases.get("propagation_ms")
-                    else ","
+                    else ",,"
                 )
+                # Assignment chain
                 f.write(
-                    f"{phases.get('assignment_chain_ms', ''):.2f},"
+                    f"{phases.get('assignment_chain_ms', ''):.2f},{phases.get('assignment_chain_rtt', ''):.2f},"
                     if phases.get("assignment_chain_ms")
-                    else ","
+                    else ",,"
                 )
+                # Replication
                 f.write(
-                    f"{phases.get('replication_ms', ''):.2f},"
+                    f"{phases.get('replication_ms', ''):.2f},{phases.get('replication_rtt', ''):.2f},"
                     if phases.get("replication_ms")
-                    else ","
+                    else ",,"
                 )
+                # Sync
                 f.write(
-                    f"{phases.get('sync_ms', ''):.2f}\n"
+                    f"{phases.get('sync_ms', ''):.2f},{phases.get('sync_rtt', ''):.2f}\n"
                     if phases.get("sync_ms")
                     else "\n"
                 )
@@ -664,7 +807,7 @@ def generate_csv_output(data: Dict, output_dir: Path):
             "experiment,total,heartbeat_count,heartbeat_pct,new_cmd_count,new_cmd_pct,"
         )
         f.write("assignment_count,assignment_pct,job_release_count,job_release_pct,")
-        f.write("unknown_count,unknown_pct\n")
+        f.write("other_count,other_pct\n")
         for exp in data["experiments"]:
             sb = exp["sync_breakdown"]
             f.write(f"{exp['name']},{sb['total_sync_interests']},")
@@ -678,7 +821,7 @@ def generate_csv_output(data: Dict, output_dir: Path):
             f.write(
                 f"{sb['job_release']['count']},{sb['job_release']['percentage']:.1f},"
             )
-            f.write(f"{sb['unknown']['count']},{sb['unknown']['percentage']:.1f}\n")
+            f.write(f"{sb['other']['count']},{sb['other']['percentage']:.1f}\n")
     print(f"  CSV (sync) written to: {sync_csv}")
 
     conflict_csv = output_dir / "assignment_conflicts.csv"
@@ -709,7 +852,7 @@ def generate_csv_output(data: Dict, output_dir: Path):
     pub_triggers_csv = output_dir / "publication_triggers.csv"
     with open(pub_triggers_csv, "w") as f:
         f.write(
-            "experiment,total_publications,heartbeat,new_command,job_claim,assignment,unknown\n"
+            "experiment,total_publications,heartbeat,new_command,job_claim,assignment,other\n"
         )
         for exp in data["experiments"]:
             pt = exp.get("publication_triggers", {})
@@ -720,7 +863,7 @@ def generate_csv_output(data: Dict, output_dir: Path):
             f.write(f",{by_trigger.get('new_command', 0)}")
             f.write(f",{by_trigger.get('job_claim', 0)}")
             f.write(f",{by_trigger.get('assignment', 0)}")
-            f.write(f",{by_trigger.get('unknown', 0)}\n")
+            f.write(f",{by_trigger.get('other', 0)}\n")
     print(f"  CSV (pub_triggers) written to: {pub_triggers_csv}")
 
     summary_csv = output_dir / "experiment_summary.csv"
@@ -755,10 +898,10 @@ def generate_markdown_report(data: Dict, output_path: Path):
 
         f.write("\n## Sync Interest Breakdown\n\n")
         f.write(
-            "| Experiment | Total Sync | Heartbeat | New Cmd | Assignment | Job Release | Unknown |\n"
+            "| Experiment | Total Sync | Heartbeat | New Cmd | Assignment | Job Release | Other |\n"
         )
         f.write(
-            "|------------|------------|-----------|----------|------------|-------------|----------|\n"
+            "|------------|------------|-----------|----------|------------|-------------|-------|\n"
         )
         for exp in data["experiments"]:
             sb = exp["sync_breakdown"]
@@ -767,38 +910,69 @@ def generate_markdown_report(data: Dict, output_path: Path):
             f.write(f"| {sb['new_command']['percentage']:.1f}% ")
             f.write(f"| {sb['assignment']['percentage']:.1f}% ")
             f.write(f"| {sb['job_release']['percentage']:.1f}% ")
-            f.write(f"| {sb['unknown']['percentage']:.1f}% |\n")
+            f.write(f"| {sb['other']['percentage']:.1f}% |\n")
 
-        f.write("\n### Absolute Counts\n\n")
+        f.write("\n### Absolute Counts (per command)\n\n")
         f.write(
-            "| Experiment | Heartbeat | New Cmd | Assignment | Job Release | Unknown |\n"
+            "| Experiment | Heartbeat | Heart/cmd | New Cmd | New/cmd | Assignment | Assign/cmd | Job Release | JobRel/cmd | Other | Other/cmd |\n"
         )
         f.write(
-            "|------------|-----------|---------|------------|-------------|----------|\n"
+            "|------------|-----------|-----------|---------|---------|------------|------------|-------------|------------|-------|-----------|\n"
         )
         for exp in data["experiments"]:
             sb = exp["sync_breakdown"]
             f.write(f"| {exp['name']} ")
-            f.write(f"| {sb['heartbeat']['count']:,} ")
-            f.write(f"| {sb['new_command']['count']:,} ")
-            f.write(f"| {sb['assignment']['count']:,} ")
-            f.write(f"| {sb['job_release']['count']:,} ")
-            f.write(f"| {sb['unknown']['count']:,} |\n")
+            f.write(f"| {sb['heartbeat']['count']:,} | {sb['heartbeat']['per_command']:.2f} ")
+            f.write(f"| {sb['new_command']['count']:,} | {sb['new_command']['per_command']:.2f} ")
+            f.write(f"| {sb['assignment']['count']:,} | {sb['assignment']['per_command']:.2f} ")
+            f.write(f"| {sb['job_release']['count']:,} | {sb['job_release']['per_command']:.2f} ")
+            f.write(f"| {sb['other']['count']:,} | {sb['other']['per_command']:.2f} |\n")
 
         f.write("\n## Phase Duration Analysis\n\n")
         f.write(
-            "| Experiment | Ingestion (ms) | Propagation (ms) | Assignment Chain (ms) | Replication (ms) |\n"
+            "| Experiment | Ingestion (ms) | Ingestion (RTT) | Propagation (ms) | Propagation (RTT) | Assignment Chain (ms) | Assignment Chain (RTT) | Replication (ms) | Replication (RTT) |\n"
         )
         f.write(
-            "|------------|----------------|------------------|----------------------|------------------|\n"
+            "|------------|----------------|-----------------|------------------|-------------------|----------------------|----------------------|------------------|-------------------|\n"
         )
         for exp in data["experiments"]:
             s = exp["phase_summary"]
             f.write(f"| {exp['name']} ")
             f.write(f"| {s.get('ingestion_ms_avg', 0):.1f} ")
+            f.write(f"| {s.get('ingestion_rtt_avg', 0):.2f} ")
             f.write(f"| {s.get('propagation_ms_avg', 0):.1f} ")
+            f.write(f"| {s.get('propagation_rtt_avg', 0):.2f} ")
             f.write(f"| {s.get('assignment_chain_ms_avg', 0):.1f} ")
-            f.write(f"| {s.get('replication_ms_avg', 0):.1f} |\n")
+            f.write(f"| {s.get('assignment_chain_rtt_avg', 0):.2f} ")
+            f.write(f"| {s.get('replication_ms_avg', 0):.1f} ")
+            f.write(f"| {s.get('replication_rtt_avg', 0):.2f} |\n")
+
+        # Add RTT summary table
+        f.write("\n### Phase Duration RTT Summary (Median, P95, P99)\n\n")
+        f.write(
+            "| Experiment | Med Ingestion | P95 Ingestion | P99 Ingestion | Med Propagation | P95 Propagation | P99 Propagation | Med Replication | P95 Replication | P99 Replication |\n"
+        )
+        f.write(
+            "|------------|---------------|---------------|---------------|-----------------|-----------------|-----------------|-----------------|-----------------|-----------------|\n"
+        )
+        for exp in data["experiments"]:
+            s = exp["phase_summary"]
+            f.write(f"| {exp['name']} ")
+            f.write(f"| {s.get('ingestion_rtt_median', 0):.2f} | {s.get('ingestion_rtt_p95', 0):.2f} | {s.get('ingestion_rtt_p99', 0):.2f} ")
+            f.write(f"| {s.get('propagation_rtt_median', 0):.2f} | {s.get('propagation_rtt_p95', 0):.2f} | {s.get('propagation_rtt_p99', 0):.2f} ")
+            f.write(f"| {s.get('replication_rtt_median', 0):.2f} | {s.get('replication_rtt_p95', 0):.2f} | {s.get('replication_rtt_p99', 0):.2f} |\n")
+
+        # Add topology info
+        f.write("\n### Topology Information\n\n")
+        f.write(
+            "| Experiment | Topology Median Delay (ms) |\n"
+        )
+        f.write(
+            "|------------|--------------------------|\n"
+        )
+        for exp in data["experiments"]:
+            median_delay = exp.get("topology_median_delay_ms", "N/A")
+            f.write(f"| {exp['name']} | {median_delay} |\n")
 
         f.write("\n## Experiment Duration\n\n")
         f.write(
