@@ -88,7 +88,8 @@ func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) {
 func (r *Repo) scheduleReevaluationLoop(target enc.Name) {
 	targetStr := target.String()
 	// NOTE: this should be longer than it takes for a distribution to happen
-	delay := 2 * time.Second
+	// Use auction timeout + 2s buffer to ensure auction completes before reevaluation
+	delay := r.auctionTimeout + 2*time.Second
 
 	r.redistMu.Lock()
 	defer r.redistMu.Unlock()
