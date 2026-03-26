@@ -336,19 +336,12 @@ func getCommandsWithClaims(t *testing.T, repos []*repoProcess, deadNodeIDs map[s
 		}
 
 		claimed := testutil.FilterEvents(events, testutil.EventJobClaimed)
-		released := testutil.FilterEvents(events, testutil.EventJobReleased)
 
 		for _, e := range claimed {
 			if commands[e.Target] == nil {
 				commands[e.Target] = make(map[string]bool)
 			}
 			commands[e.Target][r.nodeID] = true
-		}
-
-		for _, e := range released {
-			if commands[e.Target] != nil {
-				delete(commands[e.Target], r.nodeID)
-			}
 		}
 	}
 

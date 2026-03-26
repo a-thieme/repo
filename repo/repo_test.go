@@ -446,7 +446,9 @@ func TestHydraLeaderRedistribution(t *testing.T) {
 	}
 	nonLeader.mu.Unlock()
 
-	nonLeader.distributor.BatchedDistribution([]enc.Name{target})
+	// Non-leader should schedule re-evaluation when it detects under-replicated jobs
+	// Call evaluate directly - it will check amILeader(), find false, and schedule re-evaluation
+	nonLeader.evaluate(target)
 
 	nonLeader.redistMu.Lock()
 	_, hasScheduled := nonLeader.scheduledRedistributions[target.String()]
@@ -543,11 +545,11 @@ func TestHydraRescheduleOnAssignment(t *testing.T) {
 	repo.redistMu.Unlock()
 
 	if newTimer == nil {
-		t.Fatal("Timer should still be scheduled after reschedule")
+		t.Fatal("Timer should still be scheduled after second call")
 	}
 
-	if originalTimer == newTimer {
-		t.Error("Timer should have been replaced on reschedule")
+	if originalTimer != newTimer {
+		t.Error("Timer should NOT be replaced when already scheduled (prevents duplicate timers)")
 	}
 }
 

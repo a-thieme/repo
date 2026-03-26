@@ -22,7 +22,6 @@ const (
 	EventDecisionStarted   EventType = "decision_started"
 	EventDecisionMade      EventType = "decision_made"
 	EventJobClaimed        EventType = "job_claimed"
-	EventJobReleased       EventType = "job_released"
 	EventNodeUpdate        EventType = "node_update"
 	EventHeartbeatReceived EventType = "heartbeat_received"
 	EventReplicationCheck  EventType = "replication_check"
@@ -193,9 +192,6 @@ func ComputeGlobalReplicationAtTime(events []Event, target string, beforeTime ti
 		if e.EventType == EventJobClaimed {
 			claimed[e.Node] = true
 		}
-		if e.EventType == EventJobReleased {
-			delete(claimed, e.Node)
-		}
 	}
 	return len(claimed)
 }
@@ -210,9 +206,6 @@ func ComputeGlobalReplicationTimeline(events []Event, target string) []Replicati
 		}
 		if e.EventType == EventJobClaimed {
 			claimed[e.Node] = true
-		}
-		if e.EventType == EventJobReleased {
-			delete(claimed, e.Node)
 		}
 
 		nodes := make([]string, 0, len(claimed))

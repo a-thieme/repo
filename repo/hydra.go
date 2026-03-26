@@ -46,7 +46,9 @@ func (h *HydraMechanism) runHeartbeat() {
 }
 
 func (h *HydraMechanism) Stop() {
-	close(h.quitCh)
+	if h.quitCh != nil {
+		close(h.quitCh)
+	}
 }
 
 func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {

@@ -286,7 +286,7 @@ func runReplicationTest(t *testing.T, cfg integrationTestConfig) {
 		claims := testutil.FilterEvents(events, testutil.EventJobClaimed)
 		syncs := testutil.FilterEvents(events, testutil.EventSyncInterestSent)
 		updates := testutil.FilterEvents(events, testutil.EventNodeUpdate)
-		repChecks := testutil.FilterEvents(events, testutil.EventReplicationCheck)
+		repChecks := testutil.FilterEvents(events, testutil.EventDecisionMade)
 		dataSent := testutil.FilterEvents(events, testutil.EventDataSent)
 		totalDataPackets += len(dataSent)
 		t.Logf("  %s: commands=%d, claims=%d, syncs=%d, data=%d, updates=%d, repChecks=%d",
@@ -345,39 +345,6 @@ func TestCommandPropagation(t *testing.T) {
 		cacheless:         false,
 		runProducer:       true,
 	})
-}
-
-func TestEventLog_JobReleaseFlow(t *testing.T) {
-	tmpDir := t.TempDir()
-	logPath := filepath.Join(tmpDir, "release.jsonl")
-
-	logger, err := util.NewEventLogger(logPath, "/ndn/repo/test")
-	if err != nil {
-		t.Fatalf("Failed to create event logger: %v", err)
-	}
-
-	logger.LogCommandReceived("INSERT", "/ndn/target/release-test")
-	logger.LogJobClaimed("/ndn/target/release-test")
-	logger.LogStorageChanged(800000000, 100000000)
-	logger.LogStorageChanged(900000000, 100000000)
-	logger.LogJobReleased("/ndn/target/release-test")
-
-	logger.Close()
-
-	events, err := testutil.ParseEventLog(logPath)
-	if err != nil {
-		t.Fatalf("Failed to parse event log: %v", err)
-	}
-
-	releaseEvents := testutil.FilterEvents(events, testutil.EventJobReleased)
-	if len(releaseEvents) != 1 {
-		t.Errorf("Expected 1 job release event, got %d", len(releaseEvents))
-	}
-
-	storageEvents := testutil.FilterEvents(events, testutil.EventStorageChanged)
-	if len(storageEvents) != 2 {
-		t.Errorf("Expected 2 storage change events, got %d", len(storageEvents))
-	}
 }
 
 func TestEventLog_NodeUpdateFlow(t *testing.T) {

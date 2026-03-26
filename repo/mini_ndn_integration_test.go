@@ -252,7 +252,7 @@ func TestMiniNDNIntegration(t *testing.T) {
 		jobClaimed := testutil.FilterEvents(events, testutil.EventJobClaimed)
 		syncSent := testutil.FilterEvents(events, testutil.EventSyncInterestSent)
 		dataSent := testutil.FilterEvents(events, testutil.EventDataSent)
-		repChecks := testutil.FilterEvents(events, testutil.EventReplicationCheck)
+		repChecks := testutil.FilterEvents(events, testutil.EventDecisionMade)
 		nodeUpdates := testutil.FilterEvents(events, testutil.EventNodeUpdate)
 
 		t.Logf("  %s: commands=%d, claims=%d, sync=%d, data=%d, repChecks=%d, nodeUpdates=%d",

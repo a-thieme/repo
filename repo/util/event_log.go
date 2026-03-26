@@ -23,7 +23,6 @@ const (
 	EventDecisionStarted   EventType = "decision_started"
 	EventDecisionMade      EventType = "decision_made"
 	EventJobClaimed        EventType = "job_claimed"
-	EventJobReleased       EventType = "job_released"
 	EventNodeUpdate        EventType = "node_update"
 	EventHeartbeatReceived EventType = "heartbeat_received"
 	EventReplicationCheck  EventType = "replication_check"
@@ -100,7 +99,6 @@ type Logger interface {
 	LogDecisionStarted(target string, currentReplication int, needed int)
 	LogDecisionMade(target string, shouldClaim bool, reason string, decisionDetails string, currentReplication int, needed int, candidates []string, candidateScores map[string]int, selectedCandidates []string)
 	LogJobClaimed(target string)
-	LogJobReleased(target string)
 	LogNodeUpdate(from string, jobs []enc.Name, capacity, used uint64)
 	LogStorageChanged(used, delta uint64)
 	LogJobAssignment(target string, assignees []string)
@@ -132,7 +130,6 @@ func (l *NullEventLogger) LogDecisionStarted(target string, currentReplication i
 func (l *NullEventLogger) LogDecisionMade(target string, shouldClaim bool, reason string, decisionDetails string, currentReplication int, needed int, candidates []string, candidateScores map[string]int, selectedCandidates []string) {
 }
 func (l *NullEventLogger) LogJobClaimed(target string)                                       {}
-func (l *NullEventLogger) LogJobReleased(target string)                                      {}
 func (l *NullEventLogger) LogNodeUpdate(from string, jobs []enc.Name, capacity, used uint64) {}
 func (l *NullEventLogger) LogStorageChanged(used, delta uint64)                              {}
 func (l *NullEventLogger) LogJobAssignment(target string, assignees []string)                {}
@@ -321,14 +318,6 @@ func (l *EventLogger) LogJobClaimed(target string) {
 		CommandID: target,
 	})
 	l.Flush()
-}
-
-func (l *EventLogger) LogJobReleased(target string) {
-	l.Log(Event{
-		EventType: EventJobReleased,
-		Target:    target,
-		CommandID: target,
-	})
 }
 
 func (l *EventLogger) LogNodeUpdate(from string, jobs []enc.Name, capacity, used uint64) {

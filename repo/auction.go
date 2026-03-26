@@ -99,7 +99,9 @@ func (a *AuctionMechanism) HandleHeartbeatUpdate(update svs.SvSyncUpdate) {
 }
 
 func (a *AuctionMechanism) Stop() {
-	close(a.quitCh)
+	if a.quitCh != nil {
+		close(a.quitCh)
+	}
 	if a.heartbeatSvSync != nil {
 		a.heartbeatSvSync.Stop()
 	}
@@ -262,6 +264,9 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 
 	if needed <= 0 {
 		log.Info(a.repo, "runAuction_skip", "reason", "replication_satisfied", "target", targetStr, "current", currentReplication)
+		if a.repo.eventLogger != nil {
+			a.repo.eventLogger.LogAuctionDelayed(targetStr, "replication_satisfied")
+		}
 		return
 	}
 
@@ -392,6 +397,27 @@ func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsNa
 
 	assignment := a.repo.DetermineWinners(target, nodeStatus)
 	log.Info(a.repo, "runAuction_winners", "target", targetStr, "winners", assignment.Assignees)
+
+	if a.repo.eventLogger != nil {
+		candidates := make([]string, 0, len(nodeStatus))
+		for name, status := range nodeStatus {
+			isDoing := false
+			for _, job := range status.Jobs {
+				if job.Equal(target) {
+					isDoing = true
+					break
+				}
+			}
+			if !isDoing {
+				candidates = append(candidates, name)
+			}
+		}
+		winners := make([]string, len(assignment.Assignees))
+		for i, a := range assignment.Assignees {
+			winners[i] = a.String()
+		}
+		a.repo.eventLogger.LogAuctionWinners(targetStr, candidates, nil, winners)
+	}
 
 	batched := &tlv.JobAssignmentBatch{
 		JobAssignments: []*tlv.JobAssignment{assignment},
