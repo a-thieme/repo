@@ -189,7 +189,7 @@ go test -v -timeout 120s ./repo/...
 **Test Configuration:**
 
 - Tests set multicast strategy for `/ndn/drepo/group-messages/32=svs` (all modes)
-- In auction mode, tests also set `/ndn/drepo/heartbeat/32=svs`
+- In auction mode, tests also set `/ndn/drepo/heartbeat`
 - Tests use `-short` flag to skip integration tests
 
 ### TLV Definitions
@@ -200,8 +200,11 @@ go test -v -timeout 120s ./repo/...
 
 ```go
 type Command struct {
-    Type             string  `tlv:"0x252"`
-    Target           enc.Name `tlv:"0x253"`
+    //+field:string
+    Type string `tlv:"0x252"`
+    //+field:name
+    Target enc.Name `tlv:"0x253"`
+    //+field:natural
     SnapshotThreshold uint64 `tlv:"0x255"`
 }
 ```
@@ -263,11 +266,11 @@ go build -o bin/producer ./producer
 
 ### Timeout Configuration
 
-Default timeouts are calibrated for the testbed topology (real link delays):
+Default timeouts are calibrated for larger topologies:
 
-- `--svs-timeout`: 8s (SVS health check)
-- `--producer-timeout`: 1s (Producer command timeout)
-- `--replication-timeout`: 1s (Replication wait timeout)
+- `--svs-timeout`: 20s (SVS health check)
+- `--producer-timeout`: 30s (Producer command timeout)
+- `--replication-timeout`: 30s (Replication wait timeout)
 
 Run calibration to measure realistic values:
 
@@ -336,7 +339,7 @@ make -C experiments run NODE_COUNTS="4 8 12" PRODUCER_COUNTS="1" -j5 DISTRIBUTIO
 3. **Race conditions in SVS sync** - The order of message delivery matters:
    - A `JobAssignment` can arrive BEFORE the `NewCommand`
    - Nodes must buffer pending assignments and process them when the command arrives
-   - This is handled in `handleHydraJobAssignments()` which stores pending assignments
+   - This is handled in `ProcessJobAssignments()` which stores pending assignments in `pendingAssignments`
 
 4. **Pending assignment handling differs by path**:
    - `onCommand` (direct from producer): Needed pending check for Hydra - nodes may receive JobAssignment before NewCommand

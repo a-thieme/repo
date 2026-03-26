@@ -221,6 +221,9 @@ func (r *Repo) countReplication(target enc.Name) int {
 }
 
 func (r *Repo) publishUpdateStats(update *tlv.NodeUpdate) {
+	if update == nil {
+		update = &tlv.NodeUpdate{}
+	}
 	capacity, used := r.getStorageStats()
 	update.StorageCapacity = capacity
 	update.StorageUsed = used
