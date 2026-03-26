@@ -166,6 +166,9 @@ func TestMiniNDNIntegration(t *testing.T) {
 	t.Log("Docker image built successfully")
 
 	resultsDir := t.TempDir()
+	if err := os.Chmod(resultsDir, 0755); err != nil {
+		t.Logf("Warning: failed to chmod results dir: %v", err)
+	}
 	t.Logf("Results directory: %s", resultsDir)
 
 	t.Log("Running integration test in Docker...")

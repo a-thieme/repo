@@ -1,7 +1,6 @@
 package main
 
 import (
-	"slices"
 	"time"
 
 	"github.com/a-thieme/repo/tlv"
@@ -10,67 +9,65 @@ import (
 	"github.com/named-data/ndnd/std/log"
 )
 
-func (r *Repo) checkPendingAssignment(target enc.Name) {
-	targetStr := target.String()
+func (r *Repo) checkPendingAssignment(cmd *tlv.Command) {
+	targetStr := cmd.Target.String()
 	r.mu.Lock()
-	if pending, ok := r.pendingAssignments[targetStr]; ok {
+	defer r.mu.Unlock()
+	if _, ok := r.pendingAssignments[targetStr]; ok {
 		log.Info(r, "checkPendingAssignment_found", "target", targetStr)
-		assignees := encNamesToStrings(pending.Assignees)
-		if slices.Contains(assignees, r.myNodeName()) {
-			cmd := r.getCommand(target)
-			if cmd != nil {
-				r.doCmd(cmd)
-				r.publishNodeUpdate(&tlv.NodeUpdate{
-					Jobs: r.getMyJobs(),
-				})
-			}
+		cmd := r.commands[targetStr]
+		if cmd != nil {
+			r.doCmd(cmd)
+			r.publishNodeUpdate(&tlv.NodeUpdate{
+				Jobs: r.getMyJobs(),
+			})
 		}
 		delete(r.pendingAssignments, targetStr)
 	}
-	r.mu.Unlock()
 }
 
-func (r *Repo) processJobAssignments(assignments []*tlv.JobAssignment, publisherName string, mechanism string) {
+func (r *Repo) processJobAssignment(assignment *tlv.JobAssignment) {
+	r.processJobAssignments([]*tlv.JobAssignment{assignment})
+}
+
+func (r *Repo) processJobAssignments(assignments []*tlv.JobAssignment) {
 	addedJob := false
 
+	// iterate through assignments,
 	for _, assignment := range assignments {
 		target := assignment.Target
 		targetStr := target.String()
 		assignees := encNamesToStrings(assignment.Assignees)
 
-		if !slices.Contains(assignees, r.myNodeName()) {
+		// skip assignment that isn't for us
+		if !r.amAssignee(assignment) {
 			log.Info(r, "processJobAssignments_skipped", "reason", "not_in_assignees", "target", targetStr)
-			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "skipped", "not_in_assignees", assignees)
+			r.eventLogger.LogAssignmentHandled(targetStr, "unknown", "skipped", "not_in_assignees", assignees)
 			continue
 		}
 
+		// Check if command is in r.commands
 		cmd := r.getCommand(target)
 		if cmd == nil {
 			log.Info(r, "processJobAssignments_pending", "target", targetStr)
 			r.mu.Lock()
 			r.pendingAssignments[targetStr] = assignment
 			r.mu.Unlock()
-			r.eventLogger.LogAssignmentHandled(targetStr, publisherName, "pending", "command_not_received", assignees)
+			r.eventLogger.LogAssignmentHandled(targetStr, "unknown", "pending", "command_not_received", assignees)
 			continue
 		}
 
-		log.Info(r, "processJobAssignments_will_do_job", "target", targetStr, "myNode", r.myNodeName())
-		if r.doTarget(target) {
+		// we were assigned and have the command
+		if r.amIDoingJobStr(targetStr) {
+			log.Info(r, "processJobAssignments_alreadyDoing", "target", targetStr)
+			continue
+		}
+
+		// we are assigned and it still needs to be done
+		if r.countReplication(target) < r.rf && r.doCmd(cmd) {
+			log.Info(r, "processJobAssignments_will_do_job", "target", targetStr, "myNode", r.myNodeName())
 			addedJob = true
-			r.clearRetryDelay(targetStr)
-			r.mu.Lock()
-			currentReplication := r.countReplication(target)
-			if currentReplication >= r.rf {
-				r.cancelReevaluation(target)
-			}
-			r.mu.Unlock()
-		} else {
-			delay := r.advanceRetryDelay(targetStr)
-			log.Info(r, "processJobAssignments_failed_will_retry", "target", targetStr, "delay", delay.String())
-			go func(t enc.Name) {
-				time.Sleep(delay)
-				r.retryJobAssignment(t, mechanism)
-			}(target)
+			r.countReplication(target) // this will cancel the replication loop if it's no longer needed
 		}
 	}
 
@@ -81,59 +78,52 @@ func (r *Repo) processJobAssignments(assignments []*tlv.JobAssignment, publisher
 	}
 }
 
+// redistMu thread-safe
 func (r *Repo) scheduleReevaluationLoop(target enc.Name) {
 	targetStr := target.String()
-	delay := DEFAULT_HEARTBEAT_INTERVAL + time.Second
+	// NOTE: this should be longer than it takes for a distribution to happen
+	delay := 2 * time.Second
 
 	r.redistMu.Lock()
 	defer r.redistMu.Unlock()
 
-	if t, exists := r.scheduledRedistributions[targetStr]; exists {
-		t.Stop()
+	// if a redistribution is already scheduled, then let it continue
+	if _, exists := r.scheduledRedistributions[targetStr]; exists {
+		return
 	}
 
 	log.Info(r, "scheduleReevaluationLoop_scheduled", "target", targetStr, "delay", delay.String(), "isLeader", r.amILeader())
-
 	r.scheduledRedistributions[targetStr] = time.AfterFunc(delay, func() {
-		r.redistMu.Lock()
-		delete(r.scheduledRedistributions, targetStr)
-		r.redistMu.Unlock()
-
-		isLeader := r.amILeader()
-		log.Info(r, "scheduleReevaluationLoop_fired", "target", targetStr, "isLeader", isLeader)
-
-		if !isLeader {
-			r.scheduleReevaluationLoop(target)
-			return
-		}
-
-		currentReplication := r.countReplication(target)
-		log.Info(r, "scheduleReevaluationLoop_check", "target", targetStr, "currentReplication", currentReplication, "rf", r.rf)
-
-		if currentReplication >= r.rf {
-			log.Info(r, "scheduleReevaluationLoop_skip_satisfied", "target", targetStr)
-			return
-		}
-
-		cmd := r.getCommand(target)
-		if cmd == nil {
-			log.Info(r, "scheduleReevaluationLoop_skip_noCommand", "target", targetStr)
-			r.scheduleReevaluationLoop(target)
-			return
-		}
-
-		log.Info(r, "scheduleReevaluationLoop_runningDistribution", "target", targetStr)
-		r.distributor.RunDistribution(cmd)
-
-		r.mu.Lock()
-		currentReplication = r.countReplication(target)
-		if currentReplication >= r.rf {
-			r.cancelReevaluation(target)
-		}
-		r.mu.Unlock()
+		r.evaluate(target)
 	})
 }
 
+func (r *Repo) evaluate(target enc.Name) {
+	targetStr := target.String()
+	r.redistMu.Lock()
+	delete(r.scheduledRedistributions, targetStr)
+	r.redistMu.Unlock()
+
+	isLeader := r.amILeader()
+	log.Info(r, "scheduleReevaluationLoop_fired", "target", targetStr, "isLeader", isLeader)
+
+	if !isLeader {
+		r.scheduleReevaluationLoop(target)
+		return
+	}
+
+	cmd := r.getCommand(target)
+	if cmd == nil {
+		log.Info(r, "scheduleReevaluationLoop_skip_noCommand", "target", targetStr)
+		r.scheduleReevaluationLoop(target)
+		return
+	}
+
+	log.Info(r, "scheduleReevaluationLoop_runningDistribution", "target", targetStr)
+	r.distributor.RunDistribution(cmd)
+}
+
+// redistMu thread safe
 func (r *Repo) cancelReevaluation(target enc.Name) {
 	targetStr := target.String()
 	r.redistMu.Lock()

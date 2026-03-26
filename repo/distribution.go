@@ -15,10 +15,11 @@ import (
 type DistributionMechanism interface {
 	Mechanism() string
 
-	OnCommand(cmd *tlv.Command) *tlv.JobAssignment
+	// let the DistributionMechanism decide to add anything NodeUpdate
+	OnCommand(cmd *tlv.Command) *tlv.NodeUpdate
 
-	OnGroupSync(update *tlv.NodeUpdate, publisherName string)
-
+	// FIXME: this should be a unified function that repo.go or shared.go does:
+	// it should set the nodes to be viewed as dead and then evaluate all the jobs they were doing
 	OnNodeDead(nodeName string, jobs []enc.Name)
 
 	OnHeartbeatTick()
@@ -40,7 +41,7 @@ func NewDistributionMechanism(repo *Repo, name string) DistributionMechanism {
 	}
 }
 
-func DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus, myName string, rf int, eventLogger util.Logger) []string {
+func DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus, myName string, rf int, eventLogger util.Logger) *tlv.JobAssignment {
 	currentReplication := countReplicationInternal(target, nodeStatus)
 
 	candidates := make([]string, 0, len(nodeStatus))
@@ -134,5 +135,5 @@ func DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus, myName 
 			selectedCandidates,
 		)
 	}
-	return selectedCandidates
+	return &tlv.JobAssignment{Target: target, Assignees: stringNamesToEncNames(selectedCandidates)}
 }

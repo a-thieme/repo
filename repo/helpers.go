@@ -12,16 +12,22 @@ import (
 	"github.com/named-data/ndnd/std/log"
 )
 
-const NOTIFY = "notify"
-const DEFAULT_HEARTBEAT_INTERVAL = 5 * time.Second
-const HEARTBEAT_TIMEOUT = DEFAULT_HEARTBEAT_INTERVAL*3 + 500*time.Millisecond
-const STORAGE_TICK_TIME = 1 * time.Second
+const (
+	NOTIFY                     = "notify"
+	DEFAULT_HEARTBEAT_INTERVAL = 5 * time.Second
+	HEARTBEAT_TIMEOUT          = DEFAULT_HEARTBEAT_INTERVAL*3 + 500*time.Millisecond
+	STORAGE_TICK_TIME          = 1 * time.Second
+)
 
-const BASE_RETRY_DELAY = 500 * time.Millisecond
-const MAX_RETRY_DELAY = 30 * time.Second
+const (
+	BASE_RETRY_DELAY = 500 * time.Millisecond
+	MAX_RETRY_DELAY  = 30 * time.Second
+)
 
-const DefaultStorageCapacity = 500 * 1024 * 1024   // 500MB
-const MaxInsertCost = DefaultStorageCapacity / 100 // 1% = 5MB
+const (
+	DefaultStorageCapacity = 500 * 1024 * 1024            // 500MB
+	MaxInsertCost          = DefaultStorageCapacity / 100 // 1% = 5MB
+)
 
 const HEARTBEAT_SUFFIX = "heartbeat"
 
@@ -87,6 +93,12 @@ func (r *Repo) amIDoingJob(target enc.Name) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return slices.Contains(encNamesToStrings(r.jobs), target.String())
+}
+
+func (r *Repo) amIDoingJobStr(targetStr string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Contains(encNamesToStrings(r.jobs), targetStr)
 }
 
 func (r *Repo) SetEventLogger(logger util.Logger) {
@@ -155,7 +167,9 @@ func (r *Repo) getOtherNodeNames() []string {
 	return names
 }
 
+// FIXME: check thread-safety with this
 func (r *Repo) countReplication(target enc.Name) int {
+	r.mu.Lock()
 	count := 0
 	for _, status := range r.nodeStatus {
 		for _, job := range status.Jobs {
@@ -165,21 +179,12 @@ func (r *Repo) countReplication(target enc.Name) int {
 			}
 		}
 	}
-	r.mu.Lock()
-	for _, job := range r.jobs {
-		if job.Equal(target) {
-			count++
-			break
-		}
-	}
 	r.mu.Unlock()
 
-	log.Debug(r, "countReplication_result", "target", target.String(), "count", count,
-		"nodeStatus_len", len(r.nodeStatus),
-		"myNodeName", r.myNodeName(),
-		"r.jobs_len", len(r.jobs))
-	if myStatus, ok := r.nodeStatus[r.myNodeName()]; ok {
-		log.Debug(r, "countReplication_self_status", "jobs_len", len(myStatus.Jobs))
+	if count >= r.rf {
+		r.cancelReevaluation(target)
+	} else {
+		r.scheduleReevaluationLoop(target)
 	}
 	return count
 }
@@ -204,7 +209,7 @@ func (r *Repo) publishNodeUpdate(update *tlv.NodeUpdate) {
 		log.Fatal(r, "node_update_pub_failed", "err", err)
 	} else {
 		log.Info(r, "publishNodeUpdate_success", "name", name.String())
-		r.updateNodeStatusCommon(r.myNodeName(), update)
+		r.updateNodeStatus(r.myNodeName(), update)
 	}
 }
 
@@ -232,7 +237,7 @@ func (r *Repo) publishCommand(newCmd *tlv.Command, winners []string) {
 		log.Fatal(r, "node_update_pub_failed", "err", err)
 	}
 
-	r.updateNodeStatusCommon(r.myNodeName(), update)
+	r.updateNodeStatus(r.myNodeName(), update)
 }
 
 func (r *Repo) publishJobAssignments(assignments []*tlv.JobAssignment) {
@@ -242,12 +247,14 @@ func (r *Repo) publishJobAssignments(assignments []*tlv.JobAssignment) {
 }
 
 // used when you already have the full command to do
+// make sure to publishNodeUpdate with new jobs if it returns true
 func (r *Repo) doCmd(cmd *tlv.Command) bool {
 	c, u := r.getStorageStats()
 	return r.doJobWithStats(cmd, c, u)
 }
 
 // used when you want to do a target but don't have the command
+// make sure to publishNodeUpdate with new jobs if it returns true
 func (r *Repo) doTarget(target enc.Name) bool {
 	c, u := r.getStorageStats()
 	log.Info(r, "doTarget_called", "target", target.String(), "capacity", c, "used", u, "node", r.myNodeName())
@@ -287,6 +294,7 @@ func (r *Repo) doJobWithStats(cmd *tlv.Command, capacity, used uint64) bool {
 	return true
 }
 
+// TODO: see what this does
 func (r *Repo) advanceRetryDelay(target string) time.Duration {
 	r.retryMu.Lock()
 	defer r.retryMu.Unlock()

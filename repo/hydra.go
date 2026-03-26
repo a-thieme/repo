@@ -1,7 +1,7 @@
 package main
 
 import (
-	"slices"
+	"time"
 
 	"github.com/a-thieme/repo/tlv"
 
@@ -22,50 +22,40 @@ func (h *HydraMechanism) Mechanism() string {
 	return "hydra"
 }
 
-func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.JobAssignment {
+func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
 	log.Info(h.repo, "hydra_onCommand", "target", cmd.Target.String(), "node", h.repo.myNodeName())
-	winners := DetermineWinners(cmd.Target, h.repo.nodeStatus, h.repo.myNodeName(), h.repo.rf, h.repo.eventLogger)
-	log.Info(h.repo, "hydra_onCommand_winners", "target", cmd.Target.String(), "winners", winners)
-	if winners != nil {
-		myName := h.repo.myNodeName()
-		inWinners := slices.Contains(winners, myName)
-		log.Info(h.repo, "hydra_onCommand_doTarget_check", "target", cmd.Target.String(), "myName", myName, "inWinners", inWinners)
-		if inWinners {
-			claimed := h.repo.doTarget(cmd.Target)
-			log.Info(h.repo, "hydra_onCommand_claimed", "target", cmd.Target.String(), "claimed", claimed, "node", myName)
-		}
-		return &tlv.JobAssignment{
-			Target:    cmd.Target,
-			Assignees: stringNamesToEncNames(winners),
+
+	// Create nodeStatus copy that includes local node's r.jobs
+	// FIXME: once we put r.jobs into repo.nodeStatus, we won't need any of this extra logic
+	nodeStatusCopy := make(map[string]NodeStatus)
+	for k, v := range h.repo.nodeStatus {
+		nodeStatusCopy[k] = v
+	}
+	h.repo.mu.Lock()
+	nodeStatusCopy[h.repo.myNodeName()] = NodeStatus{
+		Capacity:    h.repo.storageCapacity,
+		Used:        h.repo.storageUsed,
+		Jobs:        make([]enc.Name, len(h.repo.jobs)),
+		LastUpdated: time.Now(),
+	}
+	copy(nodeStatusCopy[h.repo.myNodeName()].Jobs, h.repo.jobs)
+	h.repo.mu.Unlock()
+
+	assignment := DetermineWinners(cmd.Target, nodeStatusCopy, h.repo.myNodeName(), h.repo.rf, h.repo.eventLogger)
+	log.Info(h.repo, "hydra_onCommand_winners", "target", cmd.Target.String(), "winners", assignment)
+
+	update := &tlv.NodeUpdate{}
+	if assignment != nil {
+		update.JobAssignments = append(update.JobAssignments, assignment)
+		if h.repo.amAssignee(assignment) && h.repo.doTarget(cmd.Target) {
+			update.Jobs = h.repo.getMyJobs()
 		}
 	}
-	return nil
+	update.StorageUsed, update.StorageCapacity = h.repo.getStorageStats()
+	return update
 }
 
-func (h *HydraMechanism) OnGroupSync(update *tlv.NodeUpdate, publisherName string) {
-	log.Info(h.repo, "hydra_onGroupSync", "publisher", publisherName, "hasNewCmd", update.NewCommand != nil, "hasAssignments", len(update.JobAssignments) > 0)
-	if update.NewCommand != nil {
-		log.Info(h.repo, "hydra_onGroupSync_newCmd", "target", update.NewCommand.Target.String(), "publisher", publisherName)
-		h.repo.checkPendingAssignment(update.NewCommand.Target)
-	}
-
-	if len(update.JobAssignments) > 0 {
-		for _, ja := range update.JobAssignments {
-			log.Info(h.repo, "hydra_onGroupSync_assignment", "target", ja.Target.String(), "assignees", encNamesToStrings(ja.Assignees), "publisher", publisherName)
-		}
-		h.repo.processJobAssignments(update.JobAssignments, publisherName, "hydra")
-	}
-
-	if update.NewCommand != nil {
-		currentReplication := h.repo.countReplication(update.NewCommand.Target)
-		needed := h.repo.rf - currentReplication
-		log.Info(h.repo, "hydra_onGroupSync_reevaluate", "target", update.NewCommand.Target.String(), "currentRep", currentReplication, "needed", needed)
-		if needed > 0 {
-			h.repo.scheduleReevaluationLoop(update.NewCommand.Target)
-		}
-	}
-}
-
+// FIXME: unify OnNodeDead
 func (h *HydraMechanism) OnNodeDead(nodeName string, jobs []enc.Name) {
 	h.repo.mu.Lock()
 	status, exists := h.repo.nodeStatus[nodeName]
@@ -88,25 +78,38 @@ func (h *HydraMechanism) OnHeartbeatTick() {
 
 func (h *HydraMechanism) RunDistribution(cmd *tlv.Command) {
 	log.Info(h.repo, "hydra_runDistribution", "target", cmd.Target.String(), "node", h.repo.myNodeName())
-	winners := DetermineWinners(cmd.Target, h.repo.nodeStatus, h.repo.myNodeName(), h.repo.rf, h.repo.eventLogger)
-	if winners == nil {
-		log.Info(h.repo, "hydra_runDistribution_noWinners", "target", cmd.Target.String())
-		return
-	}
-	log.Info(h.repo, "hydra_runDistribution_winners", "target", cmd.Target.String(), "winners", winners)
 
-	myName := h.repo.myNodeName()
-	if slices.Contains(winners, myName) {
-		claimed := h.repo.doTarget(cmd.Target)
-		log.Info(h.repo, "hydra_runDistribution_claimed", "target", cmd.Target.String(), "claimed", claimed, "node", myName)
+	// Create nodeStatus copy that includes local node's unpublished r.jobs
+	// FIXME: we won't need this extra copy logic once r.jobs is merged into repo.nodeStatus
+	nodeStatusCopy := make(map[string]NodeStatus)
+	for k, v := range h.repo.nodeStatus {
+		nodeStatusCopy[k] = v
 	}
+	h.repo.mu.Lock()
+	nodeStatusCopy[h.repo.myNodeName()] = NodeStatus{
+		Capacity:    h.repo.storageCapacity,
+		Used:        h.repo.storageUsed,
+		Jobs:        make([]enc.Name, len(h.repo.jobs)),
+		LastUpdated: time.Now(),
+	}
+	copy(nodeStatusCopy[h.repo.myNodeName()].Jobs, h.repo.jobs)
+	h.repo.mu.Unlock()
 
-	assignments := []*tlv.JobAssignment{{
-		Target:    cmd.Target,
-		Assignees: stringNamesToEncNames(winners),
-	}}
-	h.repo.publishJobAssignments(assignments)
+	assignment := DetermineWinners(cmd.Target, nodeStatusCopy, h.repo.myNodeName(), h.repo.rf, h.repo.eventLogger)
+	log.Info(h.repo, "hydra_onCommand_winners", "target", cmd.Target.String(), "winners", assignment)
+
+	update := &tlv.NodeUpdate{NewCommand: cmd}
+
+	if assignment != nil {
+		update.JobAssignments = append(update.JobAssignments, assignment)
+		if h.repo.amAssignee(assignment) && h.repo.doTarget(cmd.Target) {
+			update.Jobs = h.repo.getMyJobs()
+		}
+	}
+	update.StorageUsed, update.StorageCapacity = h.repo.getStorageStats()
+	h.repo.publishNodeUpdate(update)
 }
 
+// NOTE: placeholder for auction compatability?
 func (h *HydraMechanism) AttachHandlers(client ndn.Client, bidPrefix enc.Name) {
 }

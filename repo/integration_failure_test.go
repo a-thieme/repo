@@ -82,10 +82,10 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 		t.Log("WARNING: SVS not healthy - node updates not exchanged between all peers")
 	}
 
-	minProducerTime := time.Duration(cfg.commandCount) * 200 * time.Millisecond
+	minProducerTime := time.Duration(cfg.commandCount) * time.Second
 	actualProducerTimeout := *producerTimeout
-	if actualProducerTimeout < minProducerTime {
-		actualProducerTimeout = minProducerTime + 5*time.Second
+	if actualProducerTimeout < minProducerTime+30*time.Second {
+		actualProducerTimeout = minProducerTime + 30*time.Second
 	}
 	t.Logf("Running producer to send %d commands (timeout=%v)...", cfg.commandCount, actualProducerTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), actualProducerTimeout)

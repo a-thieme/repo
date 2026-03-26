@@ -56,7 +56,6 @@ type Repo struct {
 
 	auctionTimeout          time.Duration
 	currentAuctionTimestamp uint64
-	scheduledAuctions       map[string]*time.Timer
 
 	pendingAssignments map[string]*tlv.JobAssignment
 
@@ -95,7 +94,7 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 		signingIdentity:          si,
 		nodeStatus:               make(map[string]NodeStatus),
 		commands:                 make(map[string]*tlv.Command),
-		jobs:                     make([]enc.Name, 0),
+		jobs:                     make([]enc.Name, 0), // FIXME: remove this, and use nodeStatus[myNodeName].jobs instead; keep things together
 		jobStorageUsage:          make(map[string]uint64),
 		rf:                       replicationFactor,
 		noRelease:                noRelease,
@@ -128,7 +127,7 @@ func (r *Repo) Start() (err error) {
 	}
 	r.mu.Unlock()
 
-	var face ndn.Face = engine.NewDefaultFace()
+	face := engine.NewDefaultFace()
 
 	if r.eventLogger != nil {
 		syncPrefix := r.groupPrefix.Append(enc.NewGenericComponent("group-messages")).Append(enc.NewKeywordComponent("svs")).String()
@@ -212,6 +211,7 @@ func (r *Repo) Start() (err error) {
 		Expose: true,
 	})
 
+	// FIXME: put this inside of auction.go in a distributor.Start() function
 	if r.distributionMechanism == "auction" {
 		heartbeatGroupPrefix := r.groupPrefix.Append(enc.NewGenericComponent(HEARTBEAT_SUFFIX))
 		r.auctionHeartbeatSvSync = svs.NewSvSync(svs.SvSyncOpts{
@@ -231,7 +231,9 @@ func (r *Repo) Start() (err error) {
 		}
 	}
 
-	r.client.AttachCommandHandler(*r.notifyPrefix, r.onCommand)
+	if r.client.AttachCommandHandler(*r.notifyPrefix, r.onCommand) == nil {
+		log.Error(r, "AttachCommandHandler", "failed", r.notifyPrefix)
+	}
 
 	err = r.client.Start()
 	if err != nil {
@@ -257,6 +259,10 @@ func (r *Repo) runHeartbeat() {
 	}
 }
 
+// FIXME: this shouldn't work this way. each node should have its own timer set to
+// HEARTBEAT_TIMEOUT and we call r.heartbeats[node].Reset() when we see an update for it.
+// the reset should call those OnNodeDead functions
+// after this, we can remove the LastUpdated field
 func (r *Repo) checkStaleNodes() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -270,6 +276,8 @@ func (r *Repo) checkStaleNodes() {
 		if elapsed > HEARTBEAT_TIMEOUT {
 			log.Info(r, "stale_node_detected", "node", nodeName, "elapsed", elapsed.String(), "jobs", len(status.Jobs))
 			r.eventLogger.LogNodeDetectedDead(nodeName, len(status.Jobs))
+			// FIXME: this should either remove the node from r.nodeStatus or we should have an "alive" field in
+			// r.nodeStatus so we don't count its jobs. we likely don't need the nodeName in the distributor's onNodeDead() call
 			r.distributor.OnNodeDead(nodeName, status.Jobs)
 		}
 	}
@@ -310,23 +318,16 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 		Target: cmd.Target,
 		Status: "received",
 	}
-	reply(response.Encode())
+	if reply(response.Encode()) == nil {
+		log.Error(r, "commandReply", "failed", name)
+	}
 
 	r.addCommand(cmd)
 	r.eventLogger.LogCommandReceived(cmd.Type, cmd.Target.String())
 
-	jobAssignment := r.distributor.OnCommand(cmd)
-	if jobAssignment != nil {
-		r.publishNodeUpdate(&tlv.NodeUpdate{
-			NewCommand:     cmd,
-			JobAssignments: []*tlv.JobAssignment{jobAssignment},
-		})
-	} else {
-		log.Info(r, "onCommand_noAssignment_publishingNewCmd", "target", cmd.Target.String())
-		r.publishNodeUpdate(&tlv.NodeUpdate{
-			NewCommand: cmd,
-		})
-	}
+	nodeUpdate := r.distributor.OnCommand(cmd)
+	nodeUpdate.NewCommand = cmd
+	r.publishNodeUpdate(nodeUpdate)
 }
 
 func (r *Repo) onGroupSync(pub svs.SvsPub) {
@@ -338,23 +339,25 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 
 	publisherName := pub.Publisher.String()
 	log.Info(r, "onGroupSync_received", "publisher", publisherName, "jobs", len(update.Jobs), "newCmd", update.NewCommand != nil)
-	r.updateNodeStatusCommon(publisherName, update)
+	r.updateNodeStatus(publisherName, update)
 	r.eventLogger.LogNodeUpdate(publisherName, update.Jobs, update.StorageCapacity, update.StorageUsed)
 
 	if update.NewCommand != nil {
-		r.addCommand(update.NewCommand)
+		cmd := update.NewCommand
+		r.addCommand(cmd)
 		r.eventLogger.LogCommandSynced(update.NewCommand.Type, update.NewCommand.Target.String(), publisherName)
+		r.checkPendingAssignment(cmd)
+		r.scheduleReevaluationLoop(update.NewCommand.Target)
 	}
-
-	r.distributor.OnGroupSync(update, publisherName)
+	if len(update.JobAssignments) > 0 {
+		r.processJobAssignments(update.JobAssignments)
+	}
 }
 
-func (r *Repo) updateNodeStatusCommon(publisher string, update *tlv.NodeUpdate) {
+// FIXME: this can be moved to shared or helper
+func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	oldLeader := selectLeader(r.nodeStatus)
-	wasILder := r.myNodeName() == oldLeader
 
 	r.nodeStatus[publisher] = NodeStatus{
 		Capacity:    update.StorageCapacity,
@@ -362,53 +365,8 @@ func (r *Repo) updateNodeStatusCommon(publisher string, update *tlv.NodeUpdate) 
 		LastUpdated: time.Now(),
 		Jobs:        update.Jobs,
 	}
-
-	nowLeader := selectLeader(r.nodeStatus)
-	amINowLeader := r.myNodeName() == nowLeader
-	if wasILder != amINowLeader || oldLeader != nowLeader {
-		log.Info(r, "leader_changed", "wasLeader", oldLeader, "nowLeader", nowLeader, "iWasLeader", wasILder, "iAmLeader", amINowLeader)
-	}
-}
-
-func (r *Repo) retryJobAssignment(target enc.Name, mechanism string) {
-	targetStr := target.String()
-
-	r.mu.Lock()
-	if r.amIDoingJob(target) {
-		r.mu.Unlock()
-		log.Info(r, "retryJobAssignment_skipped", "reason", "already_doing_job", "target", targetStr)
-		return
-	}
-
-	currentRep := r.countReplication(target)
-	if currentRep >= r.rf {
-		r.mu.Unlock()
-		r.clearRetryDelay(targetStr)
-		log.Info(r, "retryJobAssignment_skipped", "reason", "replication_satisfied", "target", targetStr)
-		return
-	}
-	r.mu.Unlock()
-
-	if r.doTarget(target) {
-		log.Info(r, "retryJobAssignment_success", "target", targetStr)
-		r.clearRetryDelay(targetStr)
-		r.mu.Lock()
-		currentRep := r.countReplication(target)
-		if currentRep >= r.rf && mechanism == "hydra" {
-			r.cancelReevaluation(target)
-		}
-		r.mu.Unlock()
-		r.publishNodeUpdate(&tlv.NodeUpdate{
-			Jobs: []enc.Name{target},
-		})
-	} else {
-		delay := r.advanceRetryDelay(targetStr)
-		log.Info(r, "retryJobAssignment_failed_will_retry", "target", targetStr, "delay", delay.String(), "mechanism", mechanism)
-		go func() {
-			time.Sleep(delay)
-			r.retryJobAssignment(target, mechanism)
-		}()
-	}
+	// FIXME: should evaluate any jobs that change from the previous node status to now
+	// for example, if Jobs was A,B,C before and now B,C,D, it should check both A and D
 }
 
 func (r *Repo) handleHeartbeatUpdate(update svs.SvSyncUpdate) {
@@ -426,6 +384,7 @@ func (r *Repo) handleHeartbeatUpdate(update svs.SvSyncUpdate) {
 	}
 }
 
+// FIXME: this should be handled inside auction
 func (r *Repo) handleAuctionHeartbeatSvSyncUpdate(update svs.SvSyncUpdate) {
 	r.handleHeartbeatUpdate(update)
 }

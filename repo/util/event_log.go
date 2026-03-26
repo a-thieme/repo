@@ -103,13 +103,13 @@ type Logger interface {
 	LogNodeUpdate(from string, jobs []enc.Name, capacity, used uint64)
 	LogStorageChanged(used, delta uint64)
 	LogJobAssignment(target string, assignees []string)
-	LogAssignmentHandled(target string, fromPublisher string, action string, reason string, assignees []string)
+	LogAssignmentHandled(target string, fromPublisher string, action string, reason string, assignees []string) // FIXME: this adds code complexity; remove or keep to target,action,reason after we know the system works
 	LogSeqStats(newSeq uint64, duplicateSeq uint64)
 	LogAssignStats(publishCount uint64, republishCount uint64)
 	LogAuctionStarted(target string, currentReplication int, needed int, nonce uint64)
 	LogAuctionWinners(target string, candidates []string, winnerScores map[string]float64, winners []string)
 	LogAuctionResults(target string, resultsName string, winners []string)
-	LogAuctionBid(target string, peer string, capacity uint64, used uint64, delay bool)
+	LogAuctionBid(target string, peer string, capacity uint64, used uint64, delay bool) // FIXME: remove delay
 	LogAuctionDelayed(target string, reason string)
 	LogNodeDetectedDead(deadNode string, jobsCount int)
 }
@@ -140,6 +140,7 @@ func (l *NullEventLogger) LogSeqStats(newSeq uint64, duplicateSeq uint64)       
 func (l *NullEventLogger) LogAssignStats(publishCount uint64, republishCount uint64) {}
 func (l *NullEventLogger) LogAuctionStarted(target string, currentReplication int, needed int, nonce uint64) {
 }
+
 func (l *NullEventLogger) LogAuctionWinners(target string, candidates []string, winnerScores map[string]float64, winners []string) {
 }
 func (l *NullEventLogger) LogAuctionResults(target string, resultsName string, winners []string) {}
