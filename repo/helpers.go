@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"hash/fnv"
 	"slices"
 	"time"
@@ -20,23 +21,15 @@ const (
 )
 
 const (
-	BASE_RETRY_DELAY = 500 * time.Millisecond
-	MAX_RETRY_DELAY  = 30 * time.Second
-)
-
-const (
 	DefaultStorageCapacity = 500 * 1024 * 1024            // 500MB
 	MaxInsertCost          = DefaultStorageCapacity / 100 // 1% = 5MB
 )
-
-const HEARTBEAT_SUFFIX = "heartbeat"
 
 type NodeStatus struct {
 	Capacity    uint64
 	Used        uint64
 	LastUpdated time.Time
 	Jobs        []enc.Name
-	TimerID     uint64
 }
 
 func hashFromString(s string) uint64 {
@@ -77,6 +70,34 @@ func selectLeader(nodeStatus map[string]NodeStatus) string {
 	return names[0]
 }
 
+func (r *Repo) resetHeartbeatTimer(nodeName string) {
+	r.heartbeatMu.Lock()
+	defer r.heartbeatMu.Unlock()
+
+	if nodeName == r.myNodeName() {
+		return
+	}
+
+	timeout := r.heartbeatInterval*3 + 500*time.Millisecond
+	if t, exists := r.heartbeats[nodeName]; exists {
+		t.Reset(timeout)
+	} else {
+		r.heartbeats[nodeName] = time.AfterFunc(timeout, func() {
+			r.handleNodeDeath(nodeName)
+		})
+	}
+}
+
+func (r *Repo) stopHeartbeatTimer(nodeName string) {
+	r.heartbeatMu.Lock()
+	defer r.heartbeatMu.Unlock()
+
+	if t, exists := r.heartbeats[nodeName]; exists {
+		t.Stop()
+		delete(r.heartbeats, nodeName)
+	}
+}
+
 func (r *Repo) amILeader() bool {
 	return r.myNodeName() == selectLeader(r.nodeStatus)
 }
@@ -90,33 +111,25 @@ func (r *Repo) myNodeName() string {
 }
 
 func (r *Repo) amIDoingJob(target enc.Name) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return slices.Contains(encNamesToStrings(r.jobs), target.String())
+	return r.amIDoingJobStr(target.String())
 }
 
 func (r *Repo) amIDoingJobStr(targetStr string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return slices.Contains(encNamesToStrings(r.jobs), targetStr)
+	status := r.nodeStatus[r.myNodeName()]
+	return slices.Contains(encNamesToStrings(status.Jobs), targetStr)
 }
 
 func (r *Repo) SetEventLogger(logger util.Logger) {
 	r.eventLogger = logger
 }
 
-func (r *Repo) GetCountingFace() *util.CountingFace {
-	return r.countingFace
-}
-
 func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.storageCapacity, r.storageUsed
-}
-
-func (r *Repo) getStorageStatsUnsafe() (capacity uint64, used uint64) {
-	return r.storageCapacity, r.storageUsed
+	status := r.nodeStatus[r.myNodeName()]
+	return status.Capacity, status.Used
 }
 
 func (r *Repo) addCommand(cmd *tlv.Command) {
@@ -142,8 +155,9 @@ func (r *Repo) getCommand(target enc.Name) *tlv.Command {
 func (r *Repo) getMyJobs() []enc.Name {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	dst := make([]enc.Name, len(r.jobs))
-	copy(dst, r.jobs)
+	status := r.nodeStatus[r.myNodeName()]
+	dst := make([]enc.Name, len(status.Jobs))
+	copy(dst, status.Jobs)
 	return dst
 }
 
@@ -167,7 +181,26 @@ func (r *Repo) getOtherNodeNames() []string {
 	return names
 }
 
-// FIXME: check thread-safety with this
+func (r *Repo) getOtherNodeNamesNotDoing(target enc.Name) []string {
+	names := make([]string, 0, len(r.nodeStatus))
+	for name, status := range r.nodeStatus {
+		if name == r.myNodeName() {
+			continue
+		}
+		isDoing := false
+		for _, job := range status.Jobs {
+			if job.Equal(target) {
+				isDoing = true
+				break
+			}
+		}
+		if !isDoing {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 func (r *Repo) countReplication(target enc.Name) int {
 	r.mu.Lock()
 	count := 0
@@ -183,66 +216,35 @@ func (r *Repo) countReplication(target enc.Name) int {
 
 	if count >= r.rf {
 		r.cancelReevaluation(target)
-	} else {
-		r.scheduleReevaluationLoop(target)
 	}
 	return count
 }
 
-func (r *Repo) publishNodeUpdate(update *tlv.NodeUpdate) {
-	if update == nil {
-		update = &tlv.NodeUpdate{}
-	}
+func (r *Repo) publishUpdateStats(update *tlv.NodeUpdate) {
 	capacity, used := r.getStorageStats()
-	update.Jobs = r.getMyJobs()
 	update.StorageCapacity = capacity
 	update.StorageUsed = used
 
 	if update.NewCommand != nil {
 		r.eventLogger.LogCommandPublished(update.NewCommand.Target.String())
 	}
+	r.publishUpdate(update)
+}
 
-	wire := update.Encode()
+func (r *Repo) publishUpdate(update *tlv.NodeUpdate) {
 	log.Info(r, "publishNodeUpdate", "myNode", r.myNodeName(), "jobs", len(update.Jobs))
+	wire := update.Encode()
 	name, _, err := r.groupSync.Publish(wire)
 	if err != nil {
 		log.Fatal(r, "node_update_pub_failed", "err", err)
-	} else {
-		log.Info(r, "publishNodeUpdate_success", "name", name.String())
-		r.updateNodeStatus(r.myNodeName(), update)
+		return
 	}
+	log.Info(r, "publishNodeUpdate_success", "name", name.String())
 }
 
-func (r *Repo) changeStorageUsed(delta uint64) {
-	r.storageUsed += delta
-	r.eventLogger.LogStorageChanged(r.storageUsed, delta)
-}
-
-func (r *Repo) publishCommand(newCmd *tlv.Command, winners []string) {
-	var jobAssignments []*tlv.JobAssignment
-	if len(winners) > 0 {
-		jobAssignments = []*tlv.JobAssignment{{
-			Target:    newCmd.Target,
-			Assignees: stringNamesToEncNames(winners),
-		}}
-	}
-
-	update := &tlv.NodeUpdate{
-		NewCommand:     newCmd,
-		JobAssignments: jobAssignments,
-	}
-
-	_, _, err := r.groupSync.Publish(update.Encode())
-	if err != nil {
-		log.Fatal(r, "node_update_pub_failed", "err", err)
-	}
-
-	r.updateNodeStatus(r.myNodeName(), update)
-}
-
-func (r *Repo) publishJobAssignments(assignments []*tlv.JobAssignment) {
-	r.publishNodeUpdate(&tlv.NodeUpdate{
-		JobAssignments: assignments,
+func (r *Repo) publishJobs() {
+	r.publishUpdate(&tlv.NodeUpdate{
+		Jobs: r.getMyJobs(),
 	})
 }
 
@@ -256,29 +258,23 @@ func (r *Repo) doCmd(cmd *tlv.Command) bool {
 // used when you want to do a target but don't have the command
 // make sure to publishNodeUpdate with new jobs if it returns true
 func (r *Repo) doTarget(target enc.Name) bool {
-	c, u := r.getStorageStats()
-	log.Info(r, "doTarget_called", "target", target.String(), "capacity", c, "used", u, "node", r.myNodeName())
+	log.Info(r, "doTarget_called", "target", target.String(), "node", r.myNodeName())
 	cmd := r.getCommand(target)
 	if cmd == nil {
-		log.Info(r, "doTarget_nilCmd", "target", target.String())
 		return false
 	}
-	result := r.doJobWithStats(cmd, c, u)
-	log.Info(r, "doTarget_result", "target", target.String(), "result", result)
+	result := r.doCmd(cmd)
 	return result
 }
 
 func (r *Repo) doJobWithStats(cmd *tlv.Command, capacity, used uint64) bool {
-	if capacity > 0 && (float64(used)/float64(capacity) >= 0.75) {
-		return false
-	}
 	r.mu.Lock()
-
-	r.jobs = append(r.jobs, cmd.Target)
+	status := r.nodeStatus[r.myNodeName()]
+	status.Jobs = append(status.Jobs, cmd.Target)
 
 	if cmd.Type == "INSERT" {
 		cost := (hashFromString(cmd.Target.String()) % MaxInsertCost)
-		r.storageUsed += cost
+		status.Used += cost
 
 		jobKey := cmd.Target.String()
 		if r.jobStorageUsage == nil {
@@ -286,37 +282,13 @@ func (r *Repo) doJobWithStats(cmd *tlv.Command, capacity, used uint64) bool {
 		}
 		r.jobStorageUsage[jobKey] += cost
 	}
+	r.nodeStatus[r.myNodeName()] = status
 	r.mu.Unlock()
 
 	if r.eventLogger != nil {
 		r.eventLogger.LogJobClaimed(cmd.Target.String())
 	}
 	return true
-}
-
-// TODO: see what this does
-func (r *Repo) advanceRetryDelay(target string) time.Duration {
-	r.retryMu.Lock()
-	defer r.retryMu.Unlock()
-
-	currentDelay, exists := r.retryDelays[target]
-	if !exists {
-		r.retryDelays[target] = BASE_RETRY_DELAY
-		return BASE_RETRY_DELAY
-	}
-
-	newDelay := currentDelay * 2
-	if newDelay > MAX_RETRY_DELAY {
-		newDelay = MAX_RETRY_DELAY
-	}
-	r.retryDelays[target] = newDelay
-	return newDelay
-}
-
-func (r *Repo) clearRetryDelay(target string) {
-	r.retryMu.Lock()
-	defer r.retryMu.Unlock()
-	delete(r.retryDelays, target)
 }
 
 func countReplicationInternal(target enc.Name, nodeStatus map[string]NodeStatus) int {
@@ -330,4 +302,111 @@ func countReplicationInternal(target enc.Name, nodeStatus map[string]NodeStatus)
 		}
 	}
 	return count
+}
+
+func (r *Repo) nodeStatusCopy() map[string]NodeStatus {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	copy := make(map[string]NodeStatus, len(r.nodeStatus))
+	for k, v := range r.nodeStatus {
+		copy[k] = v
+	}
+	return copy
+}
+
+func (r *Repo) DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus) *tlv.JobAssignment {
+	currentReplication := countReplicationInternal(target, nodeStatus)
+
+	candidates := make([]string, 0, len(nodeStatus))
+	usedPercentage := make(map[string]float64)
+	capacity := make(map[string]uint64)
+
+	for name, status := range nodeStatus {
+		isDoing := false
+		for _, job := range status.Jobs {
+			if job.Equal(target) {
+				isDoing = true
+				break
+			}
+		}
+		if !isDoing {
+			up := status.UsedSpace()
+			usedPercentage[name] = up
+			capacity[name] = status.Capacity
+			candidates = append(candidates, name)
+		}
+	}
+
+	log.Info(nil, "determineWinners_debug", "target", target.String(), "nodeStatus_len", len(nodeStatus), "candidates", candidates)
+
+	needed := r.rf - currentReplication
+
+	if needed <= 0 {
+		if r.eventLogger != nil {
+			r.eventLogger.LogDecisionMade(
+				target.String(),
+				false,
+				"replication_satisfied",
+				fmt.Sprintf("current=%d needed=%d", currentReplication, needed),
+				currentReplication,
+				needed,
+				candidates,
+				nil,
+				nil,
+			)
+		}
+		return nil
+	}
+
+	slices.SortFunc(candidates, func(i, j string) int {
+		if usedPercentage[i] != usedPercentage[j] {
+			if usedPercentage[i] < usedPercentage[j] {
+				return -1
+			}
+			return 1
+		}
+		if capacity[i] != capacity[j] {
+			if capacity[i] > capacity[j] {
+				return -1
+			}
+			return 1
+		}
+		if i < j {
+			return -1
+		}
+		if i > j {
+			return 1
+		}
+		return 0
+	})
+
+	limit := min(needed, len(candidates))
+	selectedCandidates := candidates[:limit]
+
+	candidateScores := make(map[string]int)
+	for i, c := range candidates {
+		candidateScores[c] = len(candidates) - i
+	}
+
+	shouldClaim := false
+	reason := "not_selected"
+	if slices.Contains(selectedCandidates, r.myNodeName()) {
+		shouldClaim = true
+		reason = "selected_as_candidate"
+	}
+
+	if r.eventLogger != nil {
+		r.eventLogger.LogDecisionMade(
+			target.String(),
+			shouldClaim,
+			reason,
+			fmt.Sprintf("current=%d needed=%d selected=%v", currentReplication, needed, selectedCandidates),
+			currentReplication,
+			needed,
+			candidates,
+			candidateScores,
+			selectedCandidates,
+		)
+	}
+	return &tlv.JobAssignment{Target: target, Assignees: stringNamesToEncNames(selectedCandidates)}
 }

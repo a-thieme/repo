@@ -49,6 +49,10 @@ type NodeUpdate struct {
 	//+field:sequence:*JobAssignment:struct:JobAssignment
 	JobAssignments []*JobAssignment `tlv:"0x297"`
 }
+type JobAssignmentBatch struct {
+	//+field:sequence:*JobAssignment:struct:JobAssignment
+	JobAssignments []*JobAssignment `tlv:"0x297"`
+}
 
 type MetricRequest struct {
 	//+field:name

@@ -33,37 +33,31 @@ type Repo struct {
 	store  ndn.Store
 	client ndn.Client
 
-	groupSync              *svs.SvsALO
-	auctionHeartbeatSvSync *svs.SvSync
+	groupSync *svs.SvsALO
 
 	mu sync.Mutex
 
 	nodeStatus map[string]NodeStatus
 	commands   map[string]*tlv.Command
 
-	storageCapacity uint64
-	storageUsed     uint64
-	jobs            []enc.Name
 	jobStorageUsage map[string]uint64
 
 	rf                int
-	noRelease         bool
 	maxJoinGrowthRate uint64
 	heartbeatInterval time.Duration
 
 	distributionMechanism string
 	distributor           DistributionMechanism
 
-	auctionTimeout          time.Duration
-	currentAuctionTimestamp uint64
+	auctionTimeout time.Duration
 
 	pendingAssignments map[string]*tlv.JobAssignment
 
 	scheduledRedistributions map[string]*time.Timer
 	redistMu                 sync.Mutex
 
-	retryDelays map[string]time.Duration
-	retryMu     sync.Mutex
+	heartbeats  map[string]*time.Timer
+	heartbeatMu sync.Mutex
 
 	eventLogger  util.Logger
 	countingFace *util.CountingFace
@@ -94,17 +88,15 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 		signingIdentity:          si,
 		nodeStatus:               make(map[string]NodeStatus),
 		commands:                 make(map[string]*tlv.Command),
-		jobs:                     make([]enc.Name, 0), // FIXME: remove this, and use nodeStatus[myNodeName].jobs instead; keep things together
 		jobStorageUsage:          make(map[string]uint64),
 		rf:                       replicationFactor,
-		noRelease:                noRelease,
 		maxJoinGrowthRate:        maxJoinGrowthRate,
 		heartbeatInterval:        heartbeatInterval,
 		distributionMechanism:    distributionMechanism,
 		eventLogger:              eventLogger,
 		pendingAssignments:       make(map[string]*tlv.JobAssignment),
 		scheduledRedistributions: make(map[string]*time.Timer),
-		retryDelays:              make(map[string]time.Duration),
+		heartbeats:               make(map[string]*time.Timer),
 	}
 
 	r.distributor = NewDistributionMechanism(r, distributionMechanism)
@@ -115,14 +107,14 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 func (r *Repo) Start() (err error) {
 	log.Info(r, "repo_start")
 
-	r.storageCapacity = (10 * 1024 * 1024 * 1024) + (hashFromString(r.nodePrefix.String()) % (5 * 1024 * 1024 * 1024))
-	r.storageUsed = (hashFromString(r.nodePrefix.String()) % (100 * 1024 * 1024))
+	storageCapacity := (10 * 1024 * 1024 * 1024) + (hashFromString(r.nodePrefix.String()) % (5 * 1024 * 1024 * 1024))
+	storageUsed := (hashFromString(r.nodePrefix.String()) % (100 * 1024 * 1024))
 
 	r.mu.Lock()
 	r.nodeStatus[r.myNodeName()] = NodeStatus{
-		Capacity:    r.storageCapacity,
-		Used:        r.storageUsed,
-		Jobs:        r.jobs,
+		Capacity:    storageCapacity,
+		Used:        storageUsed,
+		Jobs:        []enc.Name{},
 		LastUpdated: time.Now(),
 	}
 	r.mu.Unlock()
@@ -197,38 +189,8 @@ func (r *Repo) Start() (err error) {
 		Expose: true,
 	})
 
-	bidPrefix := r.nodePrefix.Append(enc.NewGenericComponent(BID_SUFFIX))
-	resultsPrefix := r.nodePrefix.Append(enc.NewGenericComponent(RESULTS_SUFFIX))
-
-	r.client.AnnouncePrefix(ndn.Announcement{
-		Name:   bidPrefix,
-		Expose: true,
-	})
-	r.distributor.AttachHandlers(r.client, bidPrefix)
-
-	r.client.AnnouncePrefix(ndn.Announcement{
-		Name:   resultsPrefix,
-		Expose: true,
-	})
-
-	// FIXME: put this inside of auction.go in a distributor.Start() function
-	if r.distributionMechanism == "auction" {
-		heartbeatGroupPrefix := r.groupPrefix.Append(enc.NewGenericComponent(HEARTBEAT_SUFFIX))
-		r.auctionHeartbeatSvSync = svs.NewSvSync(svs.SvSyncOpts{
-			Client:      r.client,
-			GroupPrefix: heartbeatGroupPrefix,
-			OnUpdate: func(update svs.SvSyncUpdate) {
-				r.handleAuctionHeartbeatSvSyncUpdate(update)
-			},
-			SyncDataName: r.nodePrefix,
-		})
-		r.client.AnnouncePrefix(ndn.Announcement{
-			Name:   heartbeatGroupPrefix,
-			Expose: true,
-		})
-		if err := r.auctionHeartbeatSvSync.Start(); err != nil {
-			return err
-		}
+	if err := r.distributor.Start(r.client, r.groupPrefix); err != nil {
+		return err
 	}
 
 	if r.client.AttachCommandHandler(*r.notifyPrefix, r.onCommand) == nil {
@@ -240,47 +202,8 @@ func (r *Repo) Start() (err error) {
 		return err
 	}
 
-	go r.runHeartbeat()
 	go r.runStorageSimulation()
 	return nil
-}
-
-func (r *Repo) runHeartbeat() {
-	ticker := time.NewTicker(r.heartbeatInterval)
-	defer ticker.Stop()
-
-	r.publishNodeUpdate(nil)
-	r.distributor.OnHeartbeatTick()
-
-	for range ticker.C {
-		r.publishNodeUpdate(nil)
-		r.checkStaleNodes()
-		r.distributor.OnHeartbeatTick()
-	}
-}
-
-// FIXME: this shouldn't work this way. each node should have its own timer set to
-// HEARTBEAT_TIMEOUT and we call r.heartbeats[node].Reset() when we see an update for it.
-// the reset should call those OnNodeDead functions
-// after this, we can remove the LastUpdated field
-func (r *Repo) checkStaleNodes() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	now := time.Now()
-	for nodeName, status := range r.nodeStatus {
-		if nodeName == r.myNodeName() {
-			continue
-		}
-		elapsed := now.Sub(status.LastUpdated)
-		if elapsed > HEARTBEAT_TIMEOUT {
-			log.Info(r, "stale_node_detected", "node", nodeName, "elapsed", elapsed.String(), "jobs", len(status.Jobs))
-			r.eventLogger.LogNodeDetectedDead(nodeName, len(status.Jobs))
-			// FIXME: this should either remove the node from r.nodeStatus or we should have an "alive" field in
-			// r.nodeStatus so we don't count its jobs. we likely don't need the nodeName in the distributor's onNodeDead() call
-			r.distributor.OnNodeDead(nodeName, status.Jobs)
-		}
-	}
 }
 
 func (r *Repo) runStorageSimulation() {
@@ -289,7 +212,8 @@ func (r *Repo) runStorageSimulation() {
 
 	for range ticker.C {
 		r.mu.Lock()
-		for _, target := range r.jobs {
+		status := r.nodeStatus[r.myNodeName()]
+		for _, target := range status.Jobs {
 			cmd := r.getCommandInternal(target)
 			if cmd != nil && cmd.Type == "JOIN" {
 				jobKey := target.String()
@@ -298,7 +222,9 @@ func (r *Repo) runStorageSimulation() {
 				}
 				growth := (hashFromString(cmd.Target.String()) % r.maxJoinGrowthRate)
 				r.jobStorageUsage[jobKey] += growth
-				r.changeStorageUsed(growth)
+				status.Used += growth
+				r.nodeStatus[r.myNodeName()] = status
+				r.eventLogger.LogStorageChanged(status.Used, growth)
 			}
 		}
 		r.mu.Unlock()
@@ -327,7 +253,7 @@ func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wi
 
 	nodeUpdate := r.distributor.OnCommand(cmd)
 	nodeUpdate.NewCommand = cmd
-	r.publishNodeUpdate(nodeUpdate)
+	r.publishUpdateStats(nodeUpdate)
 }
 
 func (r *Repo) onGroupSync(pub svs.SvsPub) {
@@ -340,6 +266,7 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 	publisherName := pub.Publisher.String()
 	log.Info(r, "onGroupSync_received", "publisher", publisherName, "jobs", len(update.Jobs), "newCmd", update.NewCommand != nil)
 	r.updateNodeStatus(publisherName, update)
+	r.resetHeartbeatTimer(publisherName)
 	r.eventLogger.LogNodeUpdate(publisherName, update.Jobs, update.StorageCapacity, update.StorageUsed)
 
 	if update.NewCommand != nil {
@@ -350,43 +277,8 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 		r.scheduleReevaluationLoop(update.NewCommand.Target)
 	}
 	if len(update.JobAssignments) > 0 {
-		r.processJobAssignments(update.JobAssignments)
+		r.ProcessJobAssignments(update.JobAssignments)
 	}
-}
-
-// FIXME: this can be moved to shared or helper
-func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.nodeStatus[publisher] = NodeStatus{
-		Capacity:    update.StorageCapacity,
-		Used:        update.StorageUsed,
-		LastUpdated: time.Now(),
-		Jobs:        update.Jobs,
-	}
-	// FIXME: should evaluate any jobs that change from the previous node status to now
-	// for example, if Jobs was A,B,C before and now B,C,D, it should check both A and D
-}
-
-func (r *Repo) handleHeartbeatUpdate(update svs.SvSyncUpdate) {
-	nodeName := update.Name.String()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if status, exists := r.nodeStatus[nodeName]; exists {
-		status.LastUpdated = time.Now()
-		r.nodeStatus[nodeName] = status
-	} else {
-		r.nodeStatus[nodeName] = NodeStatus{
-			LastUpdated: time.Now(),
-		}
-	}
-}
-
-// FIXME: this should be handled inside auction
-func (r *Repo) handleAuctionHeartbeatSvSyncUpdate(update svs.SvSyncUpdate) {
-	r.handleHeartbeatUpdate(update)
 }
 
 type BasicSchema struct {

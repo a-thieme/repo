@@ -1,4 +1,3 @@
-TODO: remove repeated information, make it more concise
 # Distributed NDN Data Repository
 
 ## Overview

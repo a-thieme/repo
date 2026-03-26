@@ -9,40 +9,41 @@ import (
 	"github.com/named-data/ndnd/std/log"
 )
 
+// if the target is still under-replicated, do it
 func (r *Repo) checkPendingAssignment(cmd *tlv.Command) {
 	targetStr := cmd.Target.String()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.pendingAssignments[targetStr]; ok {
 		log.Info(r, "checkPendingAssignment_found", "target", targetStr)
-		cmd := r.commands[targetStr]
-		if cmd != nil {
-			r.doCmd(cmd)
-			r.publishNodeUpdate(&tlv.NodeUpdate{
-				Jobs: r.getMyJobs(),
-			})
-		}
 		delete(r.pendingAssignments, targetStr)
+		if r.countReplication(cmd.Target) < r.rf {
+			r.scheduleReevaluationLoop(cmd.Target)
+			if r.doCmd(cmd) {
+				r.publishUpdateStats(&tlv.NodeUpdate{
+					Jobs: r.getMyJobs(),
+				})
+			}
+		}
 	}
 }
 
 func (r *Repo) processJobAssignment(assignment *tlv.JobAssignment) {
-	r.processJobAssignments([]*tlv.JobAssignment{assignment})
+	r.ProcessJobAssignments([]*tlv.JobAssignment{assignment})
 }
 
-func (r *Repo) processJobAssignments(assignments []*tlv.JobAssignment) {
+func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) {
 	addedJob := false
 
 	// iterate through assignments,
 	for _, assignment := range assignments {
 		target := assignment.Target
 		targetStr := target.String()
-		assignees := encNamesToStrings(assignment.Assignees)
 
 		// skip assignment that isn't for us
 		if !r.amAssignee(assignment) {
 			log.Info(r, "processJobAssignments_skipped", "reason", "not_in_assignees", "target", targetStr)
-			r.eventLogger.LogAssignmentHandled(targetStr, "unknown", "skipped", "not_in_assignees", assignees)
+			r.eventLogger.LogAssignmentHandled(targetStr, "skipped", "not_in_assignees")
 			continue
 		}
 
@@ -53,7 +54,7 @@ func (r *Repo) processJobAssignments(assignments []*tlv.JobAssignment) {
 			r.mu.Lock()
 			r.pendingAssignments[targetStr] = assignment
 			r.mu.Unlock()
-			r.eventLogger.LogAssignmentHandled(targetStr, "unknown", "pending", "command_not_received", assignees)
+			r.eventLogger.LogAssignmentHandled(targetStr, "pending", "command_not_received")
 			continue
 		}
 
@@ -64,15 +65,17 @@ func (r *Repo) processJobAssignments(assignments []*tlv.JobAssignment) {
 		}
 
 		// we are assigned and it still needs to be done
-		if r.countReplication(target) < r.rf && r.doCmd(cmd) {
-			log.Info(r, "processJobAssignments_will_do_job", "target", targetStr, "myNode", r.myNodeName())
-			addedJob = true
-			r.countReplication(target) // this will cancel the replication loop if it's no longer needed
+		if r.countReplication(target) < r.rf {
+			if r.doCmd(cmd) {
+				log.Info(r, "processJobAssignments_will_do_job", "target", targetStr, "myNode", r.myNodeName())
+				addedJob = true
+			}
+			r.evaluate(target)
 		}
 	}
 
 	if addedJob {
-		r.publishNodeUpdate(&tlv.NodeUpdate{
+		r.publishUpdateStats(&tlv.NodeUpdate{
 			Jobs: r.getMyJobs(),
 		})
 	}
@@ -104,9 +107,13 @@ func (r *Repo) evaluate(target enc.Name) {
 	delete(r.scheduledRedistributions, targetStr)
 	r.redistMu.Unlock()
 
+	if r.countReplication(target) >= r.rf {
+		log.Debug(r, "loopCancelled", "target", targetStr)
+		return
+	}
+
 	isLeader := r.amILeader()
 	log.Info(r, "scheduleReevaluationLoop_fired", "target", targetStr, "isLeader", isLeader)
-
 	if !isLeader {
 		r.scheduleReevaluationLoop(target)
 		return
@@ -131,5 +138,85 @@ func (r *Repo) cancelReevaluation(target enc.Name) {
 	if t, ok := r.scheduledRedistributions[targetStr]; ok {
 		t.Stop()
 		delete(r.scheduledRedistributions, targetStr)
+	}
+}
+
+func (r *Repo) handleNodeDeath(nodeName string) {
+	r.mu.Lock()
+	status, exists := r.nodeStatus[nodeName]
+	if !exists {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.nodeStatus, nodeName)
+	r.eventLogger.LogNodeDetectedDead(nodeName, len(status.Jobs))
+	r.mu.Unlock()
+
+	r.stopHeartbeatTimer(nodeName)
+	r.evaluateBatch(status.Jobs)
+}
+
+func (r *Repo) evaluateBatch(jobs []enc.Name) {
+	if len(jobs) == 0 {
+		return
+	}
+
+	r.mu.Lock()
+	nodeStatusCopy := make(map[string]NodeStatus, len(r.nodeStatus))
+	for k, v := range r.nodeStatus {
+		nodeStatusCopy[k] = v
+	}
+	r.mu.Unlock()
+
+	underReplicated := make([]enc.Name, 0, len(jobs))
+	for _, job := range jobs {
+		if countReplicationInternal(job, nodeStatusCopy) < r.rf {
+			underReplicated = append(underReplicated, job)
+		}
+	}
+
+	if len(underReplicated) == 0 {
+		return
+	}
+
+	for _, target := range underReplicated {
+		r.scheduleReevaluationLoop(target)
+	}
+
+	r.distributor.BatchedDistribution(underReplicated)
+}
+
+func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	oldStatus, hadOldStatus := r.nodeStatus[publisher]
+	r.nodeStatus[publisher] = NodeStatus{
+		Capacity:    update.StorageCapacity,
+		Used:        update.StorageUsed,
+		LastUpdated: time.Now(),
+		Jobs:        update.Jobs,
+	}
+
+	if hadOldStatus {
+		oldJobs := make(map[string]bool)
+		for _, job := range oldStatus.Jobs {
+			oldJobs[job.String()] = true
+		}
+		newJobs := make(map[string]bool)
+		for _, job := range update.Jobs {
+			newJobs[job.String()] = true
+		}
+
+		var removedJobs []enc.Name
+		for _, job := range oldStatus.Jobs {
+			if !newJobs[job.String()] {
+				removedJobs = append(removedJobs, job)
+			}
+		}
+
+		if len(removedJobs) > 0 {
+			go r.evaluateBatch(removedJobs)
+		}
 	}
 }
