@@ -25,6 +25,7 @@ const (
 	EventJobClaimed        EventType = "job_claimed"
 	EventJobReleased       EventType = "job_released"
 	EventNodeUpdate        EventType = "node_update"
+	EventHeartbeatReceived EventType = "heartbeat_received"
 	EventReplicationCheck  EventType = "replication_check"
 	EventStorageChanged    EventType = "storage_changed"
 	EventJobAssignment     EventType = "job_assignment"
@@ -112,6 +113,7 @@ type Logger interface {
 	LogAuctionBid(target string, peer string, capacity uint64, used uint64)
 	LogAuctionDelayed(target string, reason string)
 	LogNodeDetectedDead(deadNode string, jobsCount int)
+	LogHeartbeatReceived(node string)
 }
 
 type NullEventLogger struct{}
@@ -148,6 +150,7 @@ func (l *NullEventLogger) LogAuctionBid(target string, peer string, capacity uin
 }
 func (l *NullEventLogger) LogAuctionDelayed(target string, reason string)     {}
 func (l *NullEventLogger) LogNodeDetectedDead(deadNode string, jobsCount int) {}
+func (l *NullEventLogger) LogHeartbeatReceived(node string)                   {}
 
 func NewEventLogger(path string, nodeID string) (*EventLogger, error) {
 	f, err := os.Create(path)
@@ -340,6 +343,13 @@ func (l *EventLogger) LogNodeUpdate(from string, jobs []enc.Name, capacity, used
 		Jobs:      jobsString,
 		Capacity:  capacity,
 		Used:      used,
+	})
+}
+
+func (l *EventLogger) LogHeartbeatReceived(node string) {
+	l.Log(Event{
+		EventType: EventHeartbeatReceived,
+		From:      node,
 	})
 }
 

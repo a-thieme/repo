@@ -125,7 +125,7 @@ func waitForHeartbeatConvergence(t *testing.T, repos []*heartbeatRepoProcess, mi
 				continue
 			}
 
-			nodeUpdates := testutil.FilterEvents(events, testutil.EventNodeUpdate)
+			nodeUpdates := testutil.FilterEvents(events, testutil.EventHeartbeatReceived)
 			if len(nodeUpdates) < minHeartbeats {
 				allHealthy = false
 				continue
@@ -133,7 +133,7 @@ func waitForHeartbeatConvergence(t *testing.T, repos []*heartbeatRepoProcess, mi
 
 			otherNodes := make(map[string]bool)
 			for _, e := range events {
-				if e.EventType == testutil.EventNodeUpdate && e.From != "" && e.From != r.prefix {
+				if e.EventType == testutil.EventHeartbeatReceived && e.From != "" && e.From != r.prefix {
 					otherNodes[e.From] = true
 				}
 			}
@@ -151,13 +151,13 @@ func waitForHeartbeatConvergence(t *testing.T, repos []*heartbeatRepoProcess, mi
 }
 
 func countHeartbeats(events []testutil.Event, prefix string) int {
-	count := 0
+	uniqueNodes := make(map[string]bool)
 	for _, e := range events {
-		if e.EventType == testutil.EventNodeUpdate && e.From == prefix {
-			count++
+		if e.EventType == testutil.EventHeartbeatReceived && e.From != "" && e.From != prefix {
+			uniqueNodes[e.From] = true
 		}
 	}
-	return count
+	return len(uniqueNodes)
 }
 
 func TestAuctionHeartbeat_Integration(t *testing.T) {
@@ -178,7 +178,7 @@ func TestAuctionHeartbeat_Integration(t *testing.T) {
 		nodeCount:         3,
 		distribution:      "auction",
 		heartbeatInterval: 500 * time.Millisecond,
-		waitForHeartbeats: 3,
+		waitForHeartbeats: 2,
 	}
 
 	tmpDir := t.TempDir()
@@ -208,7 +208,7 @@ func TestAuctionHeartbeat_Integration(t *testing.T) {
 
 		otherNodes := make(map[string]bool)
 		for _, e := range events {
-			if e.EventType == testutil.EventNodeUpdate && e.From != "" && e.From != r.prefix {
+			if e.EventType == testutil.EventHeartbeatReceived && e.From != "" && e.From != r.prefix {
 				otherNodes[e.From] = true
 			}
 		}
@@ -236,7 +236,7 @@ func TestHydraHeartbeat_Integration(t *testing.T) {
 		nodeCount:         3,
 		distribution:      "hydra",
 		heartbeatInterval: 500 * time.Millisecond,
-		waitForHeartbeats: 3,
+		waitForHeartbeats: 2,
 	}
 
 	tmpDir := t.TempDir()

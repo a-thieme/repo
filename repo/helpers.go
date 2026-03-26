@@ -78,6 +78,8 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 		return
 	}
 
+	r.eventLogger.LogHeartbeatReceived(nodeName)
+
 	timeout := r.heartbeatInterval*3 + 500*time.Millisecond
 	if t, exists := r.heartbeats[nodeName]; exists {
 		t.Reset(timeout)
