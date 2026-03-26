@@ -52,6 +52,7 @@ func (h *HydraMechanism) Stop() {
 }
 
 func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
+	log.Debug(h.repo, "hydra_onCommand_enter", "target", cmd.Target.String())
 	log.Info(h.repo, "hydra_onCommand", "target", cmd.Target.String(), "node", h.repo.myNodeName())
 
 	nodeStatusCopy := h.repo.nodeStatusCopy()
@@ -71,11 +72,14 @@ func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
 }
 
 func (h *HydraMechanism) RunDistribution(cmd *tlv.Command) {
+	log.Debug(h.repo, "hydra_runDistribution_enter", "target", cmd.Target.String())
 	log.Info(h.repo, "hydra_runDistribution", "target", cmd.Target.String(), "node", h.repo.myNodeName())
 
 	nodeStatusCopy := h.repo.nodeStatusCopy()
 
+	log.Debug(h.repo, "hydra_runDistribution_determineWinners", "target", cmd.Target.String())
 	assignment := h.repo.DetermineWinners(cmd.Target, nodeStatusCopy)
+	log.Debug(h.repo, "hydra_runDistribution_winners", "target", cmd.Target.String(), "assignees", assignment.Assignees)
 	log.Info(h.repo, "hydra_onCommand_winners", "target", cmd.Target.String(), "winners", assignment)
 
 	update := &tlv.NodeUpdate{NewCommand: cmd}
@@ -91,6 +95,7 @@ func (h *HydraMechanism) RunDistribution(cmd *tlv.Command) {
 }
 
 func (h *HydraMechanism) BatchedDistribution(jobs []enc.Name) {
+	log.Debug(h.repo, "hydra_batchedDistribution_enter", "jobCount", len(jobs))
 	log.Info(h.repo, "hydra_batchedDistribution", "jobCount", len(jobs))
 
 	nodeStatusCopy := h.repo.nodeStatusCopy()

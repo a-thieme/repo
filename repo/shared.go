@@ -12,6 +12,7 @@ import (
 // if the target is still under-replicated, do it
 func (r *Repo) checkPendingAssignment(cmd *tlv.Command) {
 	targetStr := cmd.Target.String()
+	log.Debug(r, "checkPendingAssignment", "target", targetStr)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.pendingAssignments[targetStr]; ok {
@@ -33,12 +34,14 @@ func (r *Repo) processJobAssignment(assignment *tlv.JobAssignment) {
 }
 
 func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) {
+	log.Debug(r, "ProcessJobAssignments_enter", "count", len(assignments))
 	addedJob := false
 
 	// iterate through assignments,
 	for _, assignment := range assignments {
 		target := assignment.Target
 		targetStr := target.String()
+		log.Debug(r, "ProcessJobAssignment_processing", "target", targetStr, "assignees", assignment.Assignees)
 
 		// skip assignment that isn't for us
 		if !r.amAssignee(assignment) {
@@ -103,11 +106,15 @@ func (r *Repo) scheduleReevaluationLoop(target enc.Name) {
 
 func (r *Repo) evaluate(target enc.Name) {
 	targetStr := target.String()
+	log.Debug(r, "evaluate_enter", "target", targetStr)
 	r.redistMu.Lock()
 	delete(r.scheduledRedistributions, targetStr)
 	r.redistMu.Unlock()
 
-	if r.countReplication(target) >= r.rf {
+	log.Debug(r, "evaluate_checkingReplication", "target", targetStr)
+	count := r.countReplication(target)
+	log.Debug(r, "evaluate_replicationCount", "target", targetStr, "count", count, "rf", r.rf)
+	if count >= r.rf {
 		log.Debug(r, "loopCancelled", "target", targetStr)
 		return
 	}
@@ -142,6 +149,7 @@ func (r *Repo) cancelReevaluation(target enc.Name) {
 }
 
 func (r *Repo) handleNodeDeath(nodeName string) {
+	log.Debug(r, "handleNodeDeath", "node", nodeName)
 	r.mu.Lock()
 	status, exists := r.nodeStatus[nodeName]
 	if !exists {
@@ -157,6 +165,7 @@ func (r *Repo) handleNodeDeath(nodeName string) {
 }
 
 func (r *Repo) evaluateBatch(jobs []enc.Name) {
+	log.Debug(r, "evaluateBatch", "jobCount", len(jobs))
 	if len(jobs) == 0 {
 		return
 	}
@@ -179,6 +188,8 @@ func (r *Repo) evaluateBatch(jobs []enc.Name) {
 		return
 	}
 
+	log.Debug(r, "evaluateBatch_underReplicated", "count", len(underReplicated))
+
 	for _, target := range underReplicated {
 		r.scheduleReevaluationLoop(target)
 	}
@@ -187,6 +198,7 @@ func (r *Repo) evaluateBatch(jobs []enc.Name) {
 }
 
 func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
+	log.Debug(r, "updateNodeStatus", "publisher", publisher, "jobs", len(update.Jobs), "capacity", update.StorageCapacity, "used", update.StorageUsed)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -216,6 +228,7 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 		}
 
 		if len(removedJobs) > 0 {
+			log.Debug(r, "updateNodeStatus_jobsChanged", "removedJobs", len(removedJobs))
 			go r.evaluateBatch(removedJobs)
 		}
 	}

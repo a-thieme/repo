@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,7 +14,8 @@ import (
 
 func main() {
 	eventLogPath := flag.String("event-log", "events.jsonl", "Path to write machine-readable event log")
-	nodePrefix := flag.String("node-prefix", "/ndn/repo.teame.dev/repo", "Unique node prefix for this repo instance")
+	defaultNodePrefix := fmt.Sprintf("/ndn/repo.teame.dev/repo-%d", time.Now().UnixMilli())
+	nodePrefix := flag.String("node-prefix", defaultNodePrefix, "Unique node prefix for this repo instance")
 	signingIdentity := flag.String("signing-identity", "/ndn/repo.teame.dev/repo", "Signing identity (must match key in keychain)")
 	noRelease := flag.Bool("no-release", false, "Disable automatic job release when storage exceeds 75%")
 	maxJoinGrowthRate := flag.Uint64("max-join-growth-rate", 10*1024*1024, "Maximum JOIN storage growth per second in bytes")

@@ -74,6 +74,8 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 	r.heartbeatMu.Lock()
 	defer r.heartbeatMu.Unlock()
 
+	log.Debug(r, "resetHeartbeatTimer", "node", nodeName)
+
 	if nodeName == r.myNodeName() {
 		return
 	}
@@ -120,7 +122,9 @@ func (r *Repo) amIDoingJobStr(targetStr string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	status := r.nodeStatus[r.myNodeName()]
-	return slices.Contains(encNamesToStrings(status.Jobs), targetStr)
+	doing := slices.Contains(encNamesToStrings(status.Jobs), targetStr)
+	log.Debug(r, "amIDoingJobStr_check", "target", targetStr, "doing", doing)
+	return doing
 }
 
 func (r *Repo) SetEventLogger(logger util.Logger) {
@@ -137,6 +141,7 @@ func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
 func (r *Repo) addCommand(cmd *tlv.Command) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	log.Debug(r, "addCommand", "target", cmd.Target.String(), "type", cmd.Type)
 	r.commands[cmd.Target.String()] = cmd
 }
 
@@ -167,9 +172,11 @@ func (r *Repo) amAssignee(assignment *tlv.JobAssignment) bool {
 	myPrefix := r.myNodeName()
 	for _, a := range assignment.Assignees {
 		if a.String() == myPrefix {
+			log.Debug(r, "amAssignee_check", "assignees", assignment.Assignees, "myNode", myPrefix, "isAssignee", true)
 			return true
 		}
 	}
+	log.Debug(r, "amAssignee_check", "assignees", assignment.Assignees, "myNode", myPrefix, "isAssignee", false)
 	return false
 }
 
@@ -216,6 +223,8 @@ func (r *Repo) countReplication(target enc.Name) int {
 	}
 	r.mu.Unlock()
 
+	log.Debug(r, "countReplication", "target", target.String(), "count", count, "rf", r.rf)
+
 	if count >= r.rf {
 		r.cancelReevaluation(target)
 	}
@@ -256,6 +265,7 @@ func (r *Repo) publishJobs() {
 // used when you already have the full command to do
 // make sure to publishNodeUpdate with new jobs if it returns true
 func (r *Repo) doCmd(cmd *tlv.Command) bool {
+	log.Debug(r, "doCmd_enter", "target", cmd.Target.String(), "type", cmd.Type)
 	c, u := r.getStorageStats()
 	return r.doJobWithStats(cmd, c, u)
 }
@@ -264,6 +274,7 @@ func (r *Repo) doCmd(cmd *tlv.Command) bool {
 // make sure to publishNodeUpdate with new jobs if it returns true
 func (r *Repo) doTarget(target enc.Name) bool {
 	log.Info(r, "doTarget_called", "target", target.String(), "node", r.myNodeName())
+	log.Debug(r, "doTarget_enter", "target", target.String())
 	cmd := r.getCommand(target)
 	if cmd == nil {
 		return false
@@ -273,6 +284,7 @@ func (r *Repo) doTarget(target enc.Name) bool {
 }
 
 func (r *Repo) doJobWithStats(cmd *tlv.Command, capacity, used uint64) bool {
+	log.Debug(r, "doJobWithStats", "target", cmd.Target.String(), "capacity", capacity, "used", used)
 	r.mu.Lock()
 	status := r.nodeStatus[r.myNodeName()]
 	status.Jobs = append(status.Jobs, cmd.Target)

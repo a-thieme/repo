@@ -223,9 +223,12 @@ func main() {
 			Target: target,
 		}
 
+		log.Debug(nil, "producer_command_created", "type", commandType, "target", target.String())
+
 		done := make(chan struct{})
 
 		fmt.Printf("Sending command %d/%d (type=%s)...\n", i+1, *count, commandType)
+		log.Debug(nil, "producer_sending_command", "attempt", i+1, "total", *count)
 		ExpressCommand(client, notify, target, command.Encode(), *retries,
 			func(w enc.Wire, e error) {
 				defer close(done)

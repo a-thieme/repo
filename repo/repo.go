@@ -240,6 +240,8 @@ func (r *Repo) onNewCommandFromProducer(name enc.Name, content enc.Wire, reply f
 		return
 	}
 
+	log.Debug(r, "command_parsed", "type", cmd.Type, "target", cmd.Target.String())
+
 	response := tlv.StatusResponse{
 		Target: cmd.Target,
 		Status: "received",
@@ -249,6 +251,7 @@ func (r *Repo) onNewCommandFromProducer(name enc.Name, content enc.Wire, reply f
 	}
 
 	r.addCommand(cmd)
+	log.Debug(r, "command_added", "target", cmd.Target.String())
 	r.eventLogger.LogCommandReceived(cmd.Type, cmd.Target.String())
 
 	nodeUpdate := r.distributor.OnCommand(cmd)
@@ -267,18 +270,21 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 
 	publisherName := pub.Publisher.String()
 	log.Info(r, "onGroupSync_received", "publisher", publisherName, "jobs", len(update.Jobs), "newCmd", update.NewCommand != nil)
+	log.Debug(r, "groupSync_update_received", "publisher", publisherName, "jobs", len(update.Jobs))
 	r.updateNodeStatus(publisherName, update)
 	r.resetHeartbeatTimer(publisherName)
 	r.eventLogger.LogNodeUpdate(publisherName, update.Jobs, update.StorageCapacity, update.StorageUsed)
 
 	if update.NewCommand != nil {
 		cmd := update.NewCommand
+		log.Debug(r, "groupSync_processing_newCommand", "target", update.NewCommand.Target.String())
 		r.addCommand(cmd)
 		r.eventLogger.LogCommandSynced(update.NewCommand.Type, update.NewCommand.Target.String(), publisherName)
 		r.checkPendingAssignment(cmd)
 		r.scheduleReevaluationLoop(update.NewCommand.Target)
 	}
 	if len(update.JobAssignments) > 0 {
+		log.Debug(r, "groupSync_processing_assignments", "count", len(update.JobAssignments))
 		r.ProcessJobAssignments(update.JobAssignments)
 	}
 }

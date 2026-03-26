@@ -86,6 +86,7 @@ func (a *AuctionMechanism) runHeartbeatTick() {
 
 func (a *AuctionMechanism) HandleHeartbeatUpdate(update svs.SvSyncUpdate) {
 	nodeName := update.Name.String()
+	log.Debug(a, "heartbeat", "node", nodeName)
 	a.repo.mu.Lock()
 	if status, exists := a.repo.nodeStatus[nodeName]; exists {
 		status.LastUpdated = time.Now()
