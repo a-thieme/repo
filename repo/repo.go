@@ -92,6 +92,7 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 		rf:                       replicationFactor,
 		maxJoinGrowthRate:        maxJoinGrowthRate,
 		heartbeatInterval:        heartbeatInterval,
+		auctionTimeout:           auctionTimeout,
 		distributionMechanism:    distributionMechanism,
 		eventLogger:              eventLogger,
 		pendingAssignments:       make(map[string]*tlv.JobAssignment),

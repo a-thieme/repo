@@ -115,7 +115,7 @@ func (a *AuctionMechanism) Mechanism() string {
 
 func (a *AuctionMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
 	go a.RunDistribution(cmd)
-	return nil
+	return &tlv.NodeUpdate{NewCommand: cmd}
 }
 
 func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
@@ -176,9 +176,18 @@ func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
 
 	batched := &tlv.JobAssignmentBatch{JobAssignments: assignments}
 	log.Info(a.repo, "runAuctionBatched_published", "assignmentCount", len(assignments))
-	err := a.repo.client.Store().Put(resultsName, batched.Bytes())
+	signer := a.repo.client.SuggestSigner(resultsName)
+	if signer == nil {
+		log.Error(a, "onBidInterest_no_signer")
+		return
+	}
+	data, err := spec.Spec{}.MakeData(resultsName, &ndn.DataConfig{}, batched.Encode(), signer)
 	if err != nil {
-		log.Warn(a.repo, "runAuctionBatched_put_failed", "err", err, "resultsName", resultsName.String())
+		log.Warn(a.repo, "MakeData", "failed", err, "resultsName", resultsName.String())
+	}
+	err = a.repo.client.Store().Put(resultsName, data.Wire.Join())
+	if err != nil {
+		log.Warn(a.repo, "PutData", "failed", err, "resultsName", resultsName.String())
 	}
 	if shouldPublishJobs {
 		a.repo.publishJobs()
@@ -192,9 +201,13 @@ func (a *AuctionMechanism) collectPeerMetrics(peers []string, jobs []enc.Name, r
 
 	timestamp := uint64(time.Now().UnixNano())
 
+	auctionTimer := time.NewTimer(a.repo.auctionTimeout)
+
 	var wg sync.WaitGroup
+	var callbackWg sync.WaitGroup
 	for _, peer := range peers {
 		wg.Add(1)
+		callbackWg.Add(1)
 		go func(peer string) {
 			defer wg.Done()
 
@@ -217,6 +230,8 @@ func (a *AuctionMechanism) collectPeerMetrics(peers []string, jobs []enc.Name, r
 				AppParam: metricReq.Encode(),
 				Retries:  3,
 				Callback: func(args ndn.ExpressCallbackArgs) {
+					defer callbackWg.Done()
+
 					if args.Result != ndn.InterestResultData {
 						return
 					}
@@ -240,9 +255,9 @@ func (a *AuctionMechanism) collectPeerMetrics(peers []string, jobs []enc.Name, r
 			})
 		}(peer)
 	}
+
 	wg.Wait()
 
-	auctionTimer := time.NewTimer(a.repo.auctionTimeout)
 	receivedCount := 0
 	for {
 		select {
@@ -295,9 +310,13 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 	var metricsMu sync.Mutex
 	responsesCh := make(chan string, len(peers))
 
+	auctionTimer := time.NewTimer(a.repo.auctionTimeout)
+
 	var wg sync.WaitGroup
+	var callbackWg sync.WaitGroup
 	for _, peer := range peers {
 		wg.Add(1)
+		callbackWg.Add(1)
 		go func(peer string) {
 			defer wg.Done()
 
@@ -321,6 +340,8 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 				AppParam: metricReq.Encode(),
 				Retries:  3,
 				Callback: func(args ndn.ExpressCallbackArgs) {
+					defer callbackWg.Done()
+
 					if args.Result != ndn.InterestResultData {
 						log.Warn(a.repo, "runAuction_bid_failed", "peer", peer, "result", args.Result)
 						return
@@ -348,9 +369,10 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 			})
 		}(peer)
 	}
+
+	// Wait for goroutines to finish calling ExpressR
 	wg.Wait()
 
-	auctionTimer := time.NewTimer(a.repo.auctionTimeout)
 	receivedCount := 0
 	for {
 		select {
@@ -426,7 +448,17 @@ func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsNa
 	batched := &tlv.JobAssignmentBatch{
 		JobAssignments: []*tlv.JobAssignment{assignment},
 	}
-	err := a.repo.client.Store().Put(resultsName, batched.Bytes())
+	signer := a.repo.client.SuggestSigner(resultsName)
+	if signer == nil {
+		log.Error(a, "determineAndPublishWinners_no_signer")
+		return
+	}
+	data, err := spec.Spec{}.MakeData(resultsName, &ndn.DataConfig{}, batched.Encode(), signer)
+	if err != nil {
+		log.Warn(a.repo, "runAuction_make_data_failed", "err", err, "resultsName", resultsName.String())
+		return
+	}
+	err = a.repo.client.Store().Put(resultsName, data.Wire.Join())
 	if err != nil {
 		log.Warn(a.repo, "runAuction_publish_failed", "err", err, "resultsName", resultsName.String())
 	}
