@@ -193,7 +193,7 @@ func (r *Repo) Start() (err error) {
 		return err
 	}
 
-	if r.client.AttachCommandHandler(*r.notifyPrefix, r.onCommand) == nil {
+	if r.client.AttachCommandHandler(*r.notifyPrefix, r.onNewCommandFromProducer) == nil {
 		log.Error(r, "AttachCommandHandler", "failed", r.notifyPrefix)
 	}
 
@@ -231,7 +231,7 @@ func (r *Repo) runStorageSimulation() {
 	}
 }
 
-func (r *Repo) onCommand(name enc.Name, content enc.Wire, reply func(wire enc.Wire) error) {
+func (r *Repo) onNewCommandFromProducer(name enc.Name, content enc.Wire, reply func(wire enc.Wire) error) {
 	log.Info(r, "onCommand_received")
 
 	cmd, err := tlv.ParseCommand(enc.NewWireView(content), false)
