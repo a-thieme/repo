@@ -11,7 +11,8 @@ import (
 )
 
 type HydraMechanism struct {
-	repo *Repo
+	repo   *Repo
+	quitCh chan struct{}
 }
 
 func NewHydraMechanism(repo *Repo) *HydraMechanism {
@@ -23,6 +24,7 @@ func (h *HydraMechanism) Mechanism() string {
 }
 
 func (h *HydraMechanism) Start(client ndn.Client, groupPrefix enc.Name) error {
+	h.quitCh = make(chan struct{})
 	go h.runHeartbeat()
 	return nil
 }
@@ -33,9 +35,18 @@ func (h *HydraMechanism) runHeartbeat() {
 
 	h.repo.publishUpdateStats(nil)
 
-	for range ticker.C {
-		h.repo.publishUpdateStats(nil)
+	for {
+		select {
+		case <-h.quitCh:
+			return
+		case <-ticker.C:
+			h.repo.publishUpdateStats(nil)
+		}
 	}
+}
+
+func (h *HydraMechanism) Stop() {
+	close(h.quitCh)
 }
 
 func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {

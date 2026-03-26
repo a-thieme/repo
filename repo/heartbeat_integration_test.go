@@ -98,7 +98,7 @@ func stopHeartbeatRepos(repos []*heartbeatRepoProcess) {
 		}(r)
 	}
 
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(10 * time.Second)
 	for i := 0; i < len(repos); i++ {
 		select {
 		case <-done:

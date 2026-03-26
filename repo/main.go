@@ -36,7 +36,6 @@ func main() {
 	if err != nil {
 		log.Fatal(nil, "Failed to create event logger", "err", err)
 	}
-	defer eventLogger.Close()
 	repo.SetEventLogger(eventLogger)
 
 	if err := repo.Start(); err != nil {
@@ -47,5 +46,6 @@ func main() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
 
-	eventLogger.Flush()
+	repo.Close()
+	eventLogger.Close()
 }

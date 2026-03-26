@@ -143,10 +143,10 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 		reposToKill = repos[:cfg.failureCount]
 	}
 
-	t.Logf("Killing %d repo(s) to simulate failure...", len(reposToKill))
+	t.Logf("Stopping %d repo(s) to simulate failure...", len(reposToKill))
 	for _, r := range reposToKill {
-		t.Logf("  Killing repo %s", r.nodeID)
-		r.cmd.Process.Kill()
+		t.Logf("  Stopping repo %s gracefully", r.nodeID)
+		r.cmd.Process.Signal(syscall.SIGTERM)
 		r.cmd.Wait()
 	}
 
@@ -273,7 +273,7 @@ func stopFailureRepos(repos []*repoProcess) {
 		}(r)
 	}
 
-	timeout := time.After(2 * time.Second)
+	timeout := time.After(5 * time.Second)
 	for i := 0; i < len(repos); i++ {
 		select {
 		case <-done:

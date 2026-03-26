@@ -18,6 +18,8 @@ type DistributionMechanism interface {
 	RunDistribution(cmd *tlv.Command)
 
 	BatchedDistribution(jobs []enc.Name)
+
+	Stop()
 }
 
 func NewDistributionMechanism(repo *Repo, name string) DistributionMechanism {

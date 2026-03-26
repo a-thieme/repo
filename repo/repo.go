@@ -281,6 +281,44 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 	}
 }
 
+func (r *Repo) Close() error {
+	r.heartbeatMu.Lock()
+	for name, t := range r.heartbeats {
+		t.Stop()
+		delete(r.heartbeats, name)
+	}
+	r.heartbeatMu.Unlock()
+
+	r.redistMu.Lock()
+	for target, t := range r.scheduledRedistributions {
+		t.Stop()
+		delete(r.scheduledRedistributions, target)
+	}
+	r.redistMu.Unlock()
+
+	if r.distributor != nil {
+		r.distributor.Stop()
+	}
+
+	if r.groupSync != nil {
+		r.groupSync.Stop()
+	}
+
+	if r.client != nil {
+		r.client.Stop()
+	}
+
+	if r.engine != nil {
+		r.engine.Stop()
+	}
+
+	if r.countingFace != nil {
+		r.countingFace.Close()
+	}
+
+	return nil
+}
+
 type BasicSchema struct {
 	signingIdentity enc.Name
 }

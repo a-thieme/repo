@@ -21,6 +21,7 @@ const (
 type AuctionMechanism struct {
 	repo            *Repo
 	heartbeatSvSync *svs.SvSync
+	quitCh          chan struct{}
 }
 
 func NewAuctionMechanism(repo *Repo) *AuctionMechanism {
@@ -32,6 +33,7 @@ func (a *AuctionMechanism) String() string {
 }
 
 func (a *AuctionMechanism) Start(client ndn.Client, groupPrefix enc.Name) error {
+	a.quitCh = make(chan struct{})
 	heartbeatGroupPrefix := groupPrefix.Append(enc.NewGenericComponent(HEARTBEAT_SUFFIX))
 	a.heartbeatSvSync = svs.NewSvSync(svs.SvSyncOpts{
 		Client:      client,
@@ -71,8 +73,13 @@ func (a *AuctionMechanism) Start(client ndn.Client, groupPrefix enc.Name) error 
 func (a *AuctionMechanism) runHeartbeatTick() {
 	ticker := time.NewTicker(a.repo.heartbeatInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		a.heartbeatSvSync.IncrSeqNo(a.repo.nodePrefix)
+	for {
+		select {
+		case <-a.quitCh:
+			return
+		case <-ticker.C:
+			a.heartbeatSvSync.IncrSeqNo(a.repo.nodePrefix)
+		}
 	}
 }
 
@@ -89,6 +96,13 @@ func (a *AuctionMechanism) HandleHeartbeatUpdate(update svs.SvSyncUpdate) {
 	}
 	a.repo.mu.Unlock()
 	a.repo.resetHeartbeatTimer(nodeName)
+}
+
+func (a *AuctionMechanism) Stop() {
+	close(a.quitCh)
+	if a.heartbeatSvSync != nil {
+		a.heartbeatSvSync.Stop()
+	}
 }
 
 func (a *AuctionMechanism) Mechanism() string {

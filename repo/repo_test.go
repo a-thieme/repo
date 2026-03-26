@@ -13,6 +13,18 @@ import (
 	svs "github.com/named-data/ndnd/std/sync"
 )
 
+func cleanupRepo(repo *Repo) {
+	if repo != nil {
+		repo.Close()
+	}
+}
+
+func cleanupRepos(repos []*Repo) {
+	for _, r := range repos {
+		cleanupRepo(r)
+	}
+}
+
 func TestEventLogger_WriteAndParse(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "test.jsonl")
@@ -154,6 +166,7 @@ func TestCountingFace_ExtractPacketInfo(t *testing.T) {
 
 func TestRepo_ReplicationLogic(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
@@ -177,6 +190,7 @@ func TestRepo_ReplicationLogic(t *testing.T) {
 
 func TestRepo_ReplicationAlreadySatisfied(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 2, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	target, _ := enc.NameFromStr("/ndn/target/1")
 	cmd := &tlv.Command{
@@ -226,6 +240,7 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 	}
 
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
@@ -278,6 +293,7 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 		repo.mu.Unlock()
 		repos[i] = repo
 	}
+	defer cleanupRepos(repos)
 
 	target, _ := enc.NameFromStr("/ndn/target/multi-sync-test")
 	cmd := &tlv.Command{
@@ -370,6 +386,7 @@ func TestHydraLeaderRedistribution(t *testing.T) {
 		nodeNames[i] = fmt.Sprintf("/ndn/repo/n%d", i)
 		repos[i] = NewRepo("/ndn/drepo", nodeNames[i], "/ndn/repo.teame.dev/repo", replicationFactor, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
 	}
+	defer cleanupRepos(repos)
 
 	target, _ := enc.NameFromStr("/ndn/target/test")
 	cmd := &tlv.Command{
@@ -442,6 +459,7 @@ func TestHydraLeaderRedistribution(t *testing.T) {
 
 func TestHydraCancelWhenReplicated(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	target, _ := enc.NameFromStr("/ndn/target/cancel-test")
 	cmd := &tlv.Command{
@@ -491,6 +509,7 @@ func TestHydraCancelWhenReplicated(t *testing.T) {
 
 func TestHydraRescheduleOnAssignment(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	target, _ := enc.NameFromStr("/ndn/target/reschedule-test")
 	cmd := &tlv.Command{
@@ -534,6 +553,7 @@ func TestHydraRescheduleOnAssignment(t *testing.T) {
 
 func TestAuctionHeartbeatUpdate_NewPeer(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "auction", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
@@ -570,6 +590,7 @@ func TestAuctionHeartbeatUpdate_NewPeer(t *testing.T) {
 
 func TestAuctionHeartbeatUpdate_ExistingPeer(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "auction", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	oldTime := time.Now().Add(-10 * time.Second)
 	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
@@ -613,6 +634,7 @@ func TestAuctionHeartbeatUpdate_ExistingPeer(t *testing.T) {
 
 func TestHydraHeartbeatUpdate_NewPeer(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
@@ -652,6 +674,7 @@ func TestHydraHeartbeatUpdate_NewPeer(t *testing.T) {
 
 func TestHydraHeartbeatUpdate_ExistingPeer(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	oldTime := time.Now().Add(-10 * time.Second)
 	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
@@ -698,6 +721,7 @@ func TestHydraHeartbeatUpdate_ExistingPeer(t *testing.T) {
 
 func TestHeartbeatUpdate_ResetsTimer(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
@@ -742,6 +766,7 @@ func TestHeartbeatUpdate_ResetsTimer(t *testing.T) {
 
 func TestHeartbeatUpdate_NoTimerForSelf(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	selfName := repo.myNodeName()
 
@@ -778,6 +803,7 @@ func TestHeartbeatUpdate_NoTimerForSelf(t *testing.T) {
 
 func TestHeartbeatTimeout_TriggersNodeDeath(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 10*time.Millisecond, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
 
@@ -822,6 +848,7 @@ func TestHeartbeatTimeout_TriggersNodeDeath(t *testing.T) {
 
 func TestHeartbeatTimeout_OnlyTimedOutPeerRemoved(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 10*time.Millisecond, "hydra", nil, 500*time.Millisecond)
+	defer cleanupRepo(repo)
 
 	peer1, _ := enc.NameFromStr("/ndn/repo/peer1")
 	peer2, _ := enc.NameFromStr("/ndn/repo/peer2")

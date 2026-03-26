@@ -3,7 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/a-thieme/repo/tlv"
@@ -159,6 +162,16 @@ func main() {
 	fmt.Println("starting")
 	engine := engine.NewBasicEngine(engine.NewDefaultFace())
 	engine.Start()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-sig
+		engine.Stop()
+		os.Exit(1)
+	}()
+
 	store := local_storage.NewMemoryStore()
 	notify, _ := enc.NameFromStr("/ndn/drepo/notify")
 	prefix, _ := enc.NameFromStr("/ndn/repo.teame.dev/producer")
@@ -233,9 +246,11 @@ func main() {
 		case <-done:
 		case <-time.After(*timeout):
 			fmt.Println("Error: command timed out")
+			engine.Stop()
 			return
 		}
 	}
 
+	engine.Stop()
 	fmt.Println("finished")
 }
