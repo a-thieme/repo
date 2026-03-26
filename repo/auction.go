@@ -284,6 +284,7 @@ func (a *AuctionMechanism) collectPeerMetrics(peers []string, jobs []enc.Name, r
 	}
 
 	wg.Wait()
+	callbackWg.Wait()
 
 	receivedCount := 0
 	for {
@@ -400,8 +401,9 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 		}(peer)
 	}
 
-	// Wait for goroutines to finish calling ExpressR
+	// Wait for goroutines to finish calling ExpressR and for all callbacks to fire
 	wg.Wait()
+	callbackWg.Wait()
 
 	receivedCount := 0
 	for {
