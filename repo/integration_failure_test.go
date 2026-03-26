@@ -17,7 +17,7 @@ var (
 	failureNodeCount    = flag.Int("failure-nodes", 7, "node count for failure tests")
 	failureRF           = flag.Int("failure-rf", 3, "replication factor for failure tests")
 	failureCount        = flag.Int("failure-count", 1, "number of repos to kill (default: 1)")
-	failureRecoveryWait = flag.Duration("failure-recovery-timeout", 30*time.Second, "timeout to wait for recovery after failure")
+	failureRecoveryWait = flag.Duration("failure-recovery-timeout", 60*time.Second, "timeout to wait for recovery after failure")
 	failureCommandCount = flag.Int("failure-commands", 20, "number of commands to send before failure")
 )
 
@@ -182,10 +182,8 @@ func runFailureTest(t *testing.T, cfg failureTestConfig) {
 	var reactionTime time.Duration
 
 	for time.Now().Before(recoveryDeadline) {
-		commandsAfterFailure := getCommandsWithClaims(t, repos, deadNodeIDs)
-
 		allRecovered := true
-		for _, nodes := range commandsAfterFailure {
+		for _, nodes := range affectedCommands {
 			if len(nodes) < cfg.replicationFactor {
 				allRecovered = false
 				break

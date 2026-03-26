@@ -82,12 +82,12 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 
 	timeout := r.heartbeatInterval*3 + 500*time.Millisecond
 	if t, exists := r.heartbeats[nodeName]; exists {
-		t.Reset(timeout)
-	} else {
-		r.heartbeats[nodeName] = time.AfterFunc(timeout, func() {
-			r.handleNodeDeath(nodeName)
-		})
+		t.Stop()
+		delete(r.heartbeats, nodeName)
 	}
+	r.heartbeats[nodeName] = time.AfterFunc(timeout, func() {
+		r.handleNodeDeath(nodeName)
+	})
 }
 
 func (r *Repo) stopHeartbeatTimer(nodeName string) {

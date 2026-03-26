@@ -25,7 +25,7 @@ var testbedRootCert []byte
 
 type Repo struct {
 	groupPrefix     enc.Name
-	notifyPrefix    *enc.Name
+	notifyPrefix    enc.Name
 	nodePrefix      enc.Name
 	signingIdentity enc.Name
 
@@ -83,7 +83,7 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 
 	r := &Repo{
 		groupPrefix:              gp,
-		notifyPrefix:             &nf,
+		notifyPrefix:             nf,
 		nodePrefix:               np,
 		signingIdentity:          si,
 		nodeStatus:               make(map[string]NodeStatus),
@@ -193,7 +193,7 @@ func (r *Repo) Start() (err error) {
 		return err
 	}
 
-	if r.client.AttachCommandHandler(*r.notifyPrefix, r.onNewCommandFromProducer) == nil {
+	if r.client.AttachCommandHandler(r.notifyPrefix, r.onNewCommandFromProducer) == nil {
 		log.Error(r, "AttachCommandHandler", "failed", r.notifyPrefix)
 	}
 
@@ -252,7 +252,9 @@ func (r *Repo) onNewCommandFromProducer(name enc.Name, content enc.Wire, reply f
 	r.eventLogger.LogCommandReceived(cmd.Type, cmd.Target.String())
 
 	nodeUpdate := r.distributor.OnCommand(cmd)
-	nodeUpdate.NewCommand = cmd
+	if nodeUpdate != nil {
+		nodeUpdate.NewCommand = cmd
+	}
 	r.publishUpdateStats(nodeUpdate)
 }
 

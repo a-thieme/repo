@@ -65,7 +65,7 @@ func runAuctionFailureTest(t *testing.T, cfg auctionFailureTestConfig) {
 	t.Logf("nfdc strategy set: %s", string(out))
 	exec.Command("nfdc", "strategy", "set", "/ndn/drepo/notify", "/localhost/nfd/strategy/best-route").Run()
 
-	out3, _ := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/heartbeat/v=3", "/localhost/nfd/strategy/multicast").CombinedOutput()
+	out3, _ := exec.Command("nfdc", "strategy", "set", "/ndn/drepo/heartbeat", "/localhost/nfd/strategy/multicast").CombinedOutput()
 	t.Logf("nfdc strategy set heartbeat (auction): %s", string(out3))
 
 	t.Logf("Waiting for routing convergence (%v)...", *routingConvergeWait)

@@ -9,6 +9,7 @@ import (
 	enc "github.com/named-data/ndnd/std/encoding"
 	"github.com/named-data/ndnd/std/log"
 	"github.com/named-data/ndnd/std/ndn"
+	spec "github.com/named-data/ndnd/std/ndn/spec_2022"
 	svs "github.com/named-data/ndnd/std/sync"
 )
 
@@ -53,8 +54,8 @@ func (a *AuctionMechanism) Start(client ndn.Client, groupPrefix enc.Name) error 
 	go a.runHeartbeatTick()
 
 	bidPrefix := a.repo.nodePrefix.Append(enc.NewGenericComponent(BID_SUFFIX))
-	if client.AttachCommandHandler(bidPrefix, a.onBidInterest) == nil {
-		log.Error(a, "AttachCommandHandler", "bidPrefix", bidPrefix)
+	if err := client.Engine().AttachHandler(bidPrefix, a.onBidInterest); err != nil {
+		log.Error(a, "AttachHandler", "bidPrefix", bidPrefix, "err", err)
 	}
 	a.repo.client.AnnouncePrefix(ndn.Announcement{
 		Name:   bidPrefix,
@@ -158,11 +159,12 @@ func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
 		a.repo.mu.Unlock()
 
 		assignment := a.repo.DetermineWinners(target, nodeStatus)
+		isAssignee := a.repo.amAssignee(assignment)
 		if assignment != nil {
 			log.Info(a.repo, "runAuctionBatched_winner", "target", targetStr, "winners", assignment.Assignees)
 			assignments = append(assignments, assignment)
 
-			if a.repo.amAssignee(assignment) {
+			if isAssignee {
 				log.Info(a.repo, "runAuctionBatched_claiming", "target", targetStr)
 				if a.repo.doTarget(target) {
 					shouldPublishJobs = true
@@ -171,16 +173,14 @@ func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
 		}
 	}
 
-	if len(assignments) > 0 {
-		batched := &tlv.JobAssignmentBatch{JobAssignments: assignments}
-		log.Info(a.repo, "runAuctionBatched_published", "assignmentCount", len(assignments))
-		err := a.repo.client.Store().Put(resultsName, batched.Bytes())
-		if err != nil {
-			log.Warn(a.repo, "runAuctionBatched_put_failed", "err", err, "resultsName", resultsName.String())
-		}
-		if shouldPublishJobs {
-			a.repo.publishJobs()
-		}
+	batched := &tlv.JobAssignmentBatch{JobAssignments: assignments}
+	log.Info(a.repo, "runAuctionBatched_published", "assignmentCount", len(assignments))
+	err := a.repo.client.Store().Put(resultsName, batched.Bytes())
+	if err != nil {
+		log.Warn(a.repo, "runAuctionBatched_put_failed", "err", err, "resultsName", resultsName.String())
+	}
+	if shouldPublishJobs {
+		a.repo.publishJobs()
 	}
 }
 
@@ -436,10 +436,17 @@ func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsNa
 	a.repo.eventLogger.LogAuctionResults(targetStr, resultsName.String(), encNamesToStrings(assignment.Assignees))
 }
 
-func (a *AuctionMechanism) onBidInterest(name enc.Name, params enc.Wire, reply func(wire enc.Wire) error) {
-	log.Debug(a.repo, "onBidInterest_received", "name", name.String())
+func (a *AuctionMechanism) onBidInterest(args ndn.InterestHandlerArgs) {
+	interest := args.Interest
+	log.Debug(a.repo, "onBidInterest_received", "name", interest.Name().String())
 
-	metricReq, err := tlv.ParseMetricRequest(enc.NewWireView(params), false)
+	appParam := interest.AppParam()
+	if len(appParam) == 0 {
+		log.Warn(a.repo, "onBidInterest_no_app_param", "name", interest.Name().String())
+		return
+	}
+
+	metricReq, err := tlv.ParseMetricRequest(enc.NewWireView(appParam), false)
 	if err != nil {
 		log.Warn(a.repo, "onBidInterest_parse_failed", "err", err)
 		return
@@ -452,9 +459,22 @@ func (a *AuctionMechanism) onBidInterest(name enc.Name, params enc.Wire, reply f
 		StorageUsed:     used,
 	}
 
-	log.Debug(a.repo, "replyingToBid", "name", name)
-	if reply(response.Encode()) != nil {
-		log.Error(a, "bidReply", "failed", name)
+	signer := a.repo.client.SuggestSigner(interest.Name())
+	if signer == nil {
+		log.Error(a, "onBidInterest_no_signer")
+		return
+	}
+
+	resName := interest.Name()
+	data, err := spec.Spec{}.MakeData(resName, &ndn.DataConfig{}, response.Encode(), signer)
+	if err != nil {
+		log.Error(a, "onBidInterest_make_data_failed", "err", err)
+		return
+	}
+
+	log.Debug(a.repo, "replyingToBid", "name", resName.String())
+	if err := args.Reply(data.Wire); err != nil {
+		log.Error(a, "bidReply", "failed", resName.String(), "err", err)
 	}
 
 	resultsName := metricReq.ResultsName
