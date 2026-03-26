@@ -193,7 +193,7 @@ func (r *Repo) Start() (err error) {
 		return err
 	}
 
-	if r.client.AttachCommandHandler(r.notifyPrefix, r.onNewCommandFromProducer) == nil {
+	if r.client.AttachCommandHandler(r.notifyPrefix, r.onNewCommandFromProducer) != nil {
 		log.Error(r, "AttachCommandHandler", "failed", r.notifyPrefix)
 	}
 
@@ -246,7 +246,7 @@ func (r *Repo) onNewCommandFromProducer(name enc.Name, content enc.Wire, reply f
 		Target: cmd.Target,
 		Status: "received",
 	}
-	if reply(response.Encode()) == nil {
+	if reply(response.Encode()) != nil {
 		log.Error(r, "commandReply", "failed", name)
 	}
 

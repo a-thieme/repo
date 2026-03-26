@@ -369,9 +369,12 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 	}
 }
 
-func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsName enc.Name, peerMetrics map[string]*tlv.NodeUpdate,
-) {
+func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsName enc.Name, peerMetrics map[string]*tlv.NodeUpdate) {
 	targetStr := target.String()
+
+	if peerMetrics == nil {
+		peerMetrics = make(map[string]*tlv.NodeUpdate)
+	}
 
 	a.repo.mu.Lock()
 	status := a.repo.nodeStatus[a.repo.myNodeName()]
