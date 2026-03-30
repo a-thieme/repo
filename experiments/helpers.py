@@ -741,29 +741,18 @@ def compute_rtt_normalized_stats(results_dir: Path, topo_path: Path) -> Dict[str
         if ct["first_claim_ts"] is None or ct["rf_claim_ts"] is None:
             continue
 
-        # Replication time: first claim to RF claim
-        first_claim_time = parse_ts(ct["first_claim_ts"])
+        # Replication time: command received to RF claim achieved
+        start_time = parse_ts(ct["start_ts"])
         rf_claim_time = parse_ts(ct["rf_claim_ts"])
 
-        if first_claim_time and rf_claim_time:
-            rep_time_ms = (rf_claim_time - first_claim_time).total_seconds() * 1000
+        if start_time and rf_claim_time:
+            rep_time_ms = (rf_claim_time - start_time).total_seconds() * 1000
             rep_times_ms.append(rep_time_ms)
 
-            # For RTT: find the maximum link delay among claims
-            # The bottleneck link is the one with highest delay
-            max_link_delay = 0.0
-            for claim in ct["claims"]:
-                link_delay = get_link_delay(
-                    claim["node"], claim["node"], delays, fallback_delay
-                )
-                # Actually we need the delay from first claimer to this claimer
-                first_claimer = ct["claims"][0]["node"]
-                link_delay = get_link_delay(first_claimer, claim["node"], delays, fallback_delay)
-                if link_delay > max_link_delay:
-                    max_link_delay = link_delay
-
-            if max_link_delay > 0:
-                expected_rtt = 2 * max_link_delay
+            # For RTT normalization: use the median link delay across the topology
+            # as a representative network RTT baseline
+            if fallback_delay > 0:
+                expected_rtt = 2 * fallback_delay  # median RTT
                 rep_time_rtt = rep_time_ms / expected_rtt
                 rep_times_rtt.append(rep_time_rtt)
 

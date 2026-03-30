@@ -33,14 +33,14 @@ func (h *HydraMechanism) runHeartbeat() {
 	ticker := time.NewTicker(h.repo.heartbeatInterval)
 	defer ticker.Stop()
 
-	h.repo.publishUpdateStats(nil)
+	h.repo.publishJobs()
 
 	for {
 		select {
 		case <-h.quitCh:
 			return
 		case <-ticker.C:
-			h.repo.publishUpdateStats(nil)
+			h.repo.publishJobs()
 		}
 	}
 }

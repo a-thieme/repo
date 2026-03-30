@@ -25,6 +25,8 @@ type AuctionMechanism struct {
 	heartbeatSvSync *svs.SvSync
 	quitCh          chan struct{}
 	auctionSeq      uint64
+	interestMap     map[string]ndn.InterestHandlerArgs
+	interestMu      sync.Mutex
 }
 
 func NewAuctionMechanism(repo *Repo) *AuctionMechanism {
@@ -37,6 +39,7 @@ func (a *AuctionMechanism) String() string {
 
 func (a *AuctionMechanism) Start(client ndn.Client, groupPrefix enc.Name) error {
 	a.quitCh = make(chan struct{})
+	a.interestMap = make(map[string]ndn.InterestHandlerArgs)
 	heartbeatGroupPrefix := groupPrefix.Append(enc.NewGenericComponent(HEARTBEAT_SUFFIX))
 	a.heartbeatSvSync = svs.NewSvSync(svs.SvSyncOpts{
 		Client:      client,
@@ -65,12 +68,42 @@ func (a *AuctionMechanism) Start(client ndn.Client, groupPrefix enc.Name) error 
 	})
 
 	resultsPrefix := a.repo.nodePrefix.Append(enc.NewGenericComponent(RESULTS_SUFFIX))
+	if err := client.Engine().AttachHandler(resultsPrefix, a.onResultsInterest); err != nil {
+		log.Error(a, "AttachHandler", "bidPrefix", resultsPrefix, "err", err)
+	}
 	a.repo.client.AnnouncePrefix(ndn.Announcement{
 		Name:   resultsPrefix,
 		Expose: true,
 	})
 
 	return nil
+}
+
+func (a *AuctionMechanism) onResultsInterest(args ndn.InterestHandlerArgs) {
+	iname := args.Interest.Name().String()
+	log.Debug(a, "resultsInterest", "name", iname)
+	a.interestMu.Lock()
+	a.interestMap[iname] = args
+	a.interestMu.Unlock()
+}
+
+func (a *AuctionMechanism) publishData(name enc.Name, wire enc.Wire) {
+	nStr := name.String()
+	err := a.repo.client.Store().Put(name, wire.Join())
+	if err != nil {
+		log.Warn(a.repo, "PutData", "failed", err, "resultsName", nStr)
+	}
+	a.interestMu.Lock()
+	args, exists := a.interestMap[nStr]
+	if exists {
+		delete(a.interestMap, nStr)
+	}
+	a.interestMu.Unlock()
+	if exists {
+		if args.Reply(wire) == nil {
+			log.Debug(a, "repliedToBuffered", "name", nStr)
+		}
+	}
 }
 
 func (a *AuctionMechanism) runHeartbeatTick() {
@@ -214,10 +247,7 @@ func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
 	if err != nil {
 		log.Warn(a.repo, "MakeData", "failed", err, "resultsName", resultsName.String())
 	}
-	err = a.repo.client.Store().Put(resultsName, data.Wire.Join())
-	if err != nil {
-		log.Warn(a.repo, "PutData", "failed", err, "resultsName", resultsName.String())
-	}
+	a.publishData(resultsName, data.Wire)
 	if shouldPublishJobs {
 		a.repo.publishJobs()
 	}
@@ -498,10 +528,7 @@ func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsNa
 		log.Warn(a.repo, "runAuction_make_data_failed", "err", err, "resultsName", resultsName.String())
 		return
 	}
-	err = a.repo.client.Store().Put(resultsName, data.Wire.Join())
-	if err != nil {
-		log.Warn(a.repo, "runAuction_publish_failed", "err", err, "resultsName", resultsName.String())
-	}
+	a.publishData(resultsName, data.Wire)
 
 	if a.repo.amAssignee(assignment) {
 		log.Info(a.repo, "runAuction_claiming_job", "target", targetStr, "myNode", a.repo.myNodeName())
