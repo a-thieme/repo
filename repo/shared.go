@@ -21,16 +21,10 @@ func (r *Repo) checkPendingAssignment(cmd *tlv.Command) {
 		if r.countReplication(cmd.Target) < r.rf {
 			r.scheduleReevaluationLoop(cmd.Target)
 			if r.doCmd(cmd) {
-				r.publishUpdateStats(&tlv.NodeUpdate{
-					Jobs: r.getMyJobs(),
-				})
+				r.distributor.PublishJobs()
 			}
 		}
 	}
-}
-
-func (r *Repo) processJobAssignment(assignment *tlv.JobAssignment) {
-	r.ProcessJobAssignments([]*tlv.JobAssignment{assignment})
 }
 
 func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) {
@@ -78,9 +72,7 @@ func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) {
 	}
 
 	if addedJob {
-		r.publishUpdateStats(&tlv.NodeUpdate{
-			Jobs: r.getMyJobs(),
-		})
+		r.distributor.PublishJobs()
 	}
 }
 
@@ -147,26 +139,6 @@ func (r *Repo) cancelReevaluation(target enc.Name) {
 		t.Stop()
 		delete(r.scheduledRedistributions, targetStr)
 	}
-}
-
-func (r *Repo) handleNodeDeath(nodeName string) {
-	log.Debug(r, "handleNodeDeath", "node", nodeName)
-	r.mu.Lock()
-	status, exists := r.nodeStatus[nodeName]
-	if !exists {
-		r.mu.Unlock()
-		return
-	}
-	delete(r.nodeStatus, nodeName)
-	r.eventLogger.LogNodeDetectedDead(nodeName, len(status.Jobs))
-	r.mu.Unlock()
-
-	r.heartbeatMu.Lock()
-	r.deadNodes[nodeName] = true
-	r.heartbeatMu.Unlock()
-
-	r.stopHeartbeatTimer(nodeName)
-	r.evaluateBatch(status.Jobs)
 }
 
 func (r *Repo) evaluateBatch(jobs []enc.Name) {

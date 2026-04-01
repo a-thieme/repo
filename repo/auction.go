@@ -37,6 +37,15 @@ func (a *AuctionMechanism) String() string {
 	return "auction"
 }
 
+// publish update with nothing attached
+func (a *AuctionMechanism) PublishUpdate(update *tlv.NodeUpdate) {
+	a.repo.publishUpdate(update)
+}
+
+func (h *AuctionMechanism) PublishJobs() {
+	h.PublishUpdate(&tlv.NodeUpdate{Jobs: h.repo.getMyJobs()})
+}
+
 func (a *AuctionMechanism) Start(client ndn.Client, groupPrefix enc.Name) error {
 	a.quitCh = make(chan struct{})
 	a.interestMap = make(map[string]ndn.InterestHandlerArgs)
@@ -87,9 +96,23 @@ func (a *AuctionMechanism) onResultsInterest(args ndn.InterestHandlerArgs) {
 	a.interestMu.Unlock()
 }
 
-func (a *AuctionMechanism) publishData(name enc.Name, wire enc.Wire) {
-	nStr := name.String()
-	err := a.repo.client.Store().Put(name, wire.Join())
+func (a *AuctionMechanism) publishAssignment(resultsName enc.Name, assignment *tlv.JobAssignment) {
+	a.publishAssignmentBatch(resultsName, []*tlv.JobAssignment{assignment})
+}
+
+func (a *AuctionMechanism) publishAssignmentBatch(resultsName enc.Name, assignments []*tlv.JobAssignment) {
+	batched := &tlv.JobAssignmentBatch{JobAssignments: assignments}
+	signer := a.repo.client.SuggestSigner(resultsName)
+	if signer == nil {
+		log.Error(a, "onBidInterest_no_signer")
+		return
+	}
+	data, err := spec.Spec{}.MakeData(resultsName, &ndn.DataConfig{}, batched.Encode(), signer)
+	if err != nil {
+		log.Warn(a.repo, "MakeData", "failed", err, "resultsName", resultsName.String())
+	}
+	nStr := resultsName.String()
+	err = a.repo.client.Store().Put(resultsName, data.Wire.Join())
 	if err != nil {
 		log.Warn(a.repo, "PutData", "failed", err, "resultsName", nStr)
 	}
@@ -100,10 +123,12 @@ func (a *AuctionMechanism) publishData(name enc.Name, wire enc.Wire) {
 	}
 	a.interestMu.Unlock()
 	if exists {
-		if args.Reply(wire) == nil {
+		if args.Reply(data.Wire) == nil {
 			log.Debug(a, "repliedToBuffered", "name", nStr)
 		}
 	}
+	a.repo.store.Put(resultsName, data.Wire.Join())
+	log.Info(a.repo, "runAuctionBatched_published", "assignmentCount", len(batched.JobAssignments))
 }
 
 func (a *AuctionMechanism) runHeartbeatTick() {
@@ -122,14 +147,6 @@ func (a *AuctionMechanism) runHeartbeatTick() {
 func (a *AuctionMechanism) HandleHeartbeatUpdate(update svs.SvSyncUpdate) {
 	nodeName := update.Name.String()
 	log.Debug(a, "heartbeat", "node", nodeName)
-
-	a.repo.heartbeatMu.Lock()
-	if a.repo.deadNodes[nodeName] {
-		a.repo.heartbeatMu.Unlock()
-		log.Debug(a, "heartbeat_from_dead_node", "node", nodeName)
-		return
-	}
-	a.repo.heartbeatMu.Unlock()
 
 	a.repo.mu.Lock()
 	if status, exists := a.repo.nodeStatus[nodeName]; exists {
@@ -236,20 +253,9 @@ func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
 		}
 	}
 
-	batched := &tlv.JobAssignmentBatch{JobAssignments: assignments}
-	log.Info(a.repo, "runAuctionBatched_published", "assignmentCount", len(assignments))
-	signer := a.repo.client.SuggestSigner(resultsName)
-	if signer == nil {
-		log.Error(a, "onBidInterest_no_signer")
-		return
-	}
-	data, err := spec.Spec{}.MakeData(resultsName, &ndn.DataConfig{}, batched.Encode(), signer)
-	if err != nil {
-		log.Warn(a.repo, "MakeData", "failed", err, "resultsName", resultsName.String())
-	}
-	a.publishData(resultsName, data.Wire)
+	a.publishAssignmentBatch(resultsName, assignments)
 	if shouldPublishJobs {
-		a.repo.publishJobs()
+		a.PublishJobs()
 	}
 }
 
@@ -453,11 +459,17 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 	}
 }
 
+// FIXME: all returns should publish empty data
 func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsName enc.Name, peerMetrics map[string]*tlv.NodeUpdate) {
 	targetStr := target.String()
 
 	if peerMetrics == nil {
 		peerMetrics = make(map[string]*tlv.NodeUpdate)
+	}
+
+	cmd := a.repo.getCommand(target)
+	if cmd == nil {
+		return
 	}
 
 	a.repo.mu.Lock()
@@ -477,11 +489,6 @@ func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsNa
 		}
 	}
 	a.repo.mu.Unlock()
-
-	cmd := a.repo.getCommand(target)
-	if cmd == nil {
-		return
-	}
 
 	assignment := a.repo.DetermineWinners(target, nodeStatus)
 
@@ -515,25 +522,11 @@ func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsNa
 		a.repo.eventLogger.LogAuctionWinners(targetStr, candidates, nil, winners)
 	}
 
-	batched := &tlv.JobAssignmentBatch{
-		JobAssignments: []*tlv.JobAssignment{assignment},
-	}
-	signer := a.repo.client.SuggestSigner(resultsName)
-	if signer == nil {
-		log.Error(a, "determineAndPublishWinners_no_signer")
-		return
-	}
-	data, err := spec.Spec{}.MakeData(resultsName, &ndn.DataConfig{}, batched.Encode(), signer)
-	if err != nil {
-		log.Warn(a.repo, "runAuction_make_data_failed", "err", err, "resultsName", resultsName.String())
-		return
-	}
-	a.publishData(resultsName, data.Wire)
-
+	a.publishAssignment(resultsName, assignment)
 	if a.repo.amAssignee(assignment) {
 		log.Info(a.repo, "runAuction_claiming_job", "target", targetStr, "myNode", a.repo.myNodeName())
 		a.repo.doTarget(target)
-		a.repo.publishJobs()
+		a.PublishJobs()
 	}
 
 	a.repo.eventLogger.LogAuctionResults(targetStr, resultsName.String(), encNamesToStrings(assignment.Assignees))

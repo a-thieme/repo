@@ -9,6 +9,10 @@ import (
 )
 
 type DistributionMechanism interface {
+	PublishUpdate(update *tlv.NodeUpdate)
+
+	PublishJobs()
+
 	Mechanism() string
 
 	Start(client ndn.Client, groupPrefix enc.Name) error

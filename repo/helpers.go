@@ -88,7 +88,19 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 		delete(r.heartbeats, nodeName)
 	}
 	r.heartbeats[nodeName] = time.AfterFunc(timeout, func() {
-		r.handleNodeDeath(nodeName)
+		log.Debug(r, "nodeDied", "node", nodeName)
+		r.mu.Lock()
+		status, exists := r.nodeStatus[nodeName]
+		if !exists {
+			r.mu.Unlock()
+			return
+		}
+		delete(r.nodeStatus, nodeName)
+		r.eventLogger.LogNodeDetectedDead(nodeName, len(status.Jobs))
+		r.mu.Unlock()
+
+		r.stopHeartbeatTimer(nodeName)
+		r.evaluateBatch(status.Jobs)
 	})
 }
 
@@ -112,10 +124,6 @@ func (r *Repo) String() string {
 
 func (r *Repo) myNodeName() string {
 	return r.nodePrefix.String()
-}
-
-func (r *Repo) amIDoingJob(target enc.Name) bool {
-	return r.amIDoingJobStr(target.String())
 }
 
 func (r *Repo) amIDoingJobStr(targetStr string) bool {
@@ -180,7 +188,9 @@ func (r *Repo) amAssignee(assignment *tlv.JobAssignment) bool {
 	return false
 }
 
+// FIXME: write a unit test for this. I think it might be failing
 func (r *Repo) getOtherNodeNames() []string {
+	// FIXME: do we need a mutex here?
 	names := make([]string, 0, len(r.nodeStatus))
 	for name := range r.nodeStatus {
 		if name != r.myNodeName() {
@@ -211,20 +221,6 @@ func (r *Repo) countReplication(target enc.Name) int {
 	return count
 }
 
-func (r *Repo) publishUpdateStats(update *tlv.NodeUpdate) {
-	if update == nil {
-		update = &tlv.NodeUpdate{}
-	}
-	capacity, used := r.getStorageStats()
-	update.StorageCapacity = capacity
-	update.StorageUsed = used
-
-	if update.NewCommand != nil {
-		r.eventLogger.LogCommandPublished(update.NewCommand.Target.String())
-	}
-	r.publishUpdate(update)
-}
-
 func (r *Repo) publishUpdate(update *tlv.NodeUpdate) {
 	log.Info(r, "publishNodeUpdate", "myNode", r.myNodeName(), "jobs", len(update.Jobs))
 	wire := update.Encode()
@@ -234,46 +230,28 @@ func (r *Repo) publishUpdate(update *tlv.NodeUpdate) {
 		return
 	}
 	log.Info(r, "publishNodeUpdate_success", "name", name.String())
+	if update.NewCommand != nil {
+		r.eventLogger.LogCommandPublished(update.NewCommand.Target.String())
+	}
 }
 
-func (r *Repo) publishJobs() {
-	r.publishUpdate(&tlv.NodeUpdate{
-		Jobs: r.getMyJobs(),
-	})
-}
-
-// used when you already have the full command to do
+// do a command
 // make sure to publishNodeUpdate with new jobs if it returns true
 func (r *Repo) doCmd(cmd *tlv.Command) bool {
-	log.Debug(r, "doCmd_enter", "target", cmd.Target.String(), "type", cmd.Type)
-	c, u := r.getStorageStats()
-	return r.doJobWithStats(cmd, c, u)
-}
+	target := cmd.Target
+	targetStr := target.String()
 
-// used when you want to do a target but don't have the command
-// make sure to publishNodeUpdate with new jobs if it returns true
-func (r *Repo) doTarget(target enc.Name) bool {
-	log.Info(r, "doTarget_called", "target", target.String(), "node", r.myNodeName())
-	log.Debug(r, "doTarget_enter", "target", target.String())
-	cmd := r.getCommand(target)
-	if cmd == nil {
-		return false
-	}
-	result := r.doCmd(cmd)
-	return result
-}
+	log.Debug(r, "doCmd", "target", targetStr, "type", cmd.Type)
 
-func (r *Repo) doJobWithStats(cmd *tlv.Command, capacity, used uint64) bool {
-	log.Debug(r, "doJobWithStats", "target", cmd.Target.String(), "capacity", capacity, "used", used)
 	r.mu.Lock()
 	status := r.nodeStatus[r.myNodeName()]
-	status.Jobs = append(status.Jobs, cmd.Target)
+	status.Jobs = append(status.Jobs, target)
 
 	if cmd.Type == "INSERT" {
-		cost := (hashFromString(cmd.Target.String()) % MaxInsertCost)
+		cost := (hashFromString(targetStr) % MaxInsertCost)
 		status.Used += cost
 
-		jobKey := cmd.Target.String()
+		jobKey := targetStr
 		if r.jobStorageUsage == nil {
 			r.jobStorageUsage = make(map[string]uint64)
 		}
@@ -283,9 +261,21 @@ func (r *Repo) doJobWithStats(cmd *tlv.Command, capacity, used uint64) bool {
 	r.mu.Unlock()
 
 	if r.eventLogger != nil {
-		r.eventLogger.LogJobClaimed(cmd.Target.String())
+		r.eventLogger.LogJobClaimed(targetStr)
 	}
 	return true
+}
+
+// do a command but you only have the target
+// make sure to publishNodeUpdate with new jobs if it returns true
+func (r *Repo) doTarget(target enc.Name) bool {
+	cmd := r.getCommand(target)
+	if cmd == nil {
+		log.Info(r, "doTarget_failed", "target", target.String(), "node", r.myNodeName())
+		return false
+	}
+	result := r.doCmd(cmd)
+	return result
 }
 
 func countReplicationInternal(target enc.Name, nodeStatus map[string]NodeStatus) int {
@@ -334,7 +324,7 @@ func (r *Repo) DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatu
 		}
 	}
 
-	log.Info(nil, "determineWinners_debug", "target", target.String(), "nodeStatus_len", len(nodeStatus), "candidates", candidates)
+	log.Info(r, "determineWinners_debug", "target", target.String(), "nodeStatus_len", len(nodeStatus), "candidates", candidates)
 
 	needed := r.rf - currentReplication
 
@@ -355,6 +345,7 @@ func (r *Repo) DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatu
 		return nil
 	}
 
+	// sort by used usedPercentage, total capacity, then name
 	slices.SortFunc(candidates, func(i, j string) int {
 		if usedPercentage[i] != usedPercentage[j] {
 			if usedPercentage[i] < usedPercentage[j] {
@@ -374,7 +365,8 @@ func (r *Repo) DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatu
 		if i > j {
 			return 1
 		}
-		return 0
+		log.Warn(r, "tied", i, j)
+		return 0 // shouldn't happen
 	})
 
 	limit := min(needed, len(candidates))

@@ -1,4 +1,4 @@
-.PHONY: build keys image calibrate run single shell results clean clean-all help
+.PHONY: build keys image calibrate run single shell results clean clean-all help compare compare-run compare-analyze
 
 # === Configuration ===
 # Experiment settings
@@ -225,17 +225,20 @@ help:
 	@echo "Usage: make [target] [VARIABLE=value ...]"
 	@echo ""
 	@echo "Targets:"
-	@echo "  build       Build Go binaries + copy keys + build Docker image"
-	@echo "  keys        Copy NDN keys (~/.ndn/keys -> ./keys)"
-	@echo "  image       Build Docker image only"
-	@echo "  calibrate   Run timeout calibration"
-	@echo "  run         Run experiment suite (use -j for parallel)"
-	@echo "  single      Run single experiment"
-	@echo "  shell       Interactive Docker shell for debugging"
-	@echo "  results     Show summary of last run"
-	@echo "  clean       Remove results (keep calibration)"
-	@echo "  clean-all   Remove all results + Docker cleanup"
-	@echo "  help        Show this help"
+	@echo "  build           Build Go binaries + copy keys + build Docker image"
+	@echo "  keys            Copy NDN keys (~/.ndn/keys -> ./keys)"
+	@echo "  image           Build Docker image only"
+	@echo "  calibrate       Run timeout calibration"
+	@echo "  run             Run experiment suite (use -j for parallel)"
+	@echo "  single          Run single experiment"
+	@echo "  shell           Interactive Docker shell for debugging"
+	@echo "  results         Show summary of last run"
+	@echo "  compare         Full comparison: build + run both distributions + analyze"
+	@echo "  compare-run     Run both hydra and auction experiments in parallel"
+	@echo "  compare-analyze Analyze comparison results"
+	@echo "  clean           Remove results (keep calibration)"
+	@echo "  clean-all       Remove all results + Docker cleanup"
+	@echo "  help            Show this help"
 	@echo ""
 	@echo "Variables:"
 	@echo "  NODE_COUNTS      Node counts for 'run' (default: 24)"
@@ -260,3 +263,79 @@ help:
 	@echo "  make single NODES=5 PRODUCERS=1"
 	@echo "  make shell NODES=5"
 	@echo "  make results"
+	@echo ""
+	@echo "Comparison targets (Hydra vs Auction):"
+	@echo "  make compare                    # Full workflow: build + run + analyze"
+	@echo "  make compare-run               # Run both distributions in parallel"
+	@echo "  make compare-analyze           # Analyze existing comparison results"
+	@echo "  make compare COMPARE_PRODUCER_COUNTS=\"1 2 4\"  # Custom producer counts"
+
+# === Hydra vs Auction Comparison ===
+
+COMPARE_PRODUCER_COUNTS ?= 1 2 4 8 16 24
+COMPARE_DIR := $(RESULTS_DIR)/compare_$(TIMESTAMP)
+
+compare: build compare-run compare-analyze
+	@echo ""
+	@echo "=== Comparison complete ==="
+	@echo "Results saved to: $(RESULTS_DIR)/compare_$(TIMESTAMP)"
+
+compare-run:
+	@echo "=== Hydra vs Auction Comparison Run ==="
+	@echo "Producer counts: $(COMPARE_PRODUCER_COUNTS)"
+	@echo ""
+	$(eval HYDRA_TS := $(shell date +%Y%m%d_%H%M%S))
+	$(eval AUCTION_TS := $(shell date +%Y%m%d_%H%M%S))
+	@mkdir -p $(COMPARE_DIR)
+	@echo "$(HYDRA_TS)" > $(COMPARE_DIR)/.hydra_ts
+	@echo "$(AUCTION_TS)" > $(COMPARE_DIR)/.auction_ts
+	@echo "Starting Hydra experiments (timestamp: $(HYDRA_TS))..."
+	@$(MAKE) run DISTRIBUTION=hydra PRODUCER_COUNTS="$(COMPARE_PRODUCER_COUNTS)" TIMESTAMP=$(HYDRA_TS) &
+	@echo "Starting Auction experiments (timestamp: $(AUCTION_TS))..."
+	@$(MAKE) run DISTRIBUTION=auction PRODUCER_COUNTS="$(COMPARE_PRODUCER_COUNTS)" TIMESTAMP=$(AUCTION_TS) &
+	@wait
+	@echo ""
+	@echo "=== Both distribution runs complete ==="
+
+compare-analyze:
+	@echo "=== Analyzing Comparison Results ==="
+	@if [ ! -f $(COMPARE_DIR)/.hydra_ts ] || [ ! -f $(COMPARE_DIR)/.auction_ts ]; then \
+		echo "Error: Run 'make compare-run' first, or specify TIMESTAMP=<run_timestamp>"; \
+		echo "Example: make compare-analyze TIMESTAMP=20260330_120000"; \
+		exit 1; \
+	fi
+	@HYDRA_TS=$$(cat $(COMPARE_DIR)/.hydra_ts) && \
+	AUCTION_TS=$$(cat $(COMPARE_DIR)/.auction_ts) && \
+	echo "Hydra timestamp: $$HYDRA_TS" && \
+	echo "Auction timestamp: $$AUCTION_TS" && \
+	echo "" && \
+	echo "Collecting Hydra results..." && \
+	python3 $(MAKEFILE_DIR)/helpers.py collect $(RESULTS_DIR)/run_$$HYDRA_TS \
+		--csv $(COMPARE_DIR)/hydra_summary.csv \
+		--md $(COMPARE_DIR)/hydra_results.md && \
+	echo "Collecting Auction results..." && \
+	python3 $(MAKEFILE_DIR)/helpers.py collect $(RESULTS_DIR)/run_$$AUCTION_TS \
+		--csv $(COMPARE_DIR)/auction_summary.csv \
+		--md $(COMPARE_DIR)/auction_results.md && \
+	echo "" && \
+	python3 -c "import pandas as pd; from datetime import datetime; \
+hydra=pd.read_csv('$(COMPARE_DIR)/hydra_summary.csv'); \
+auction=pd.read_csv('$(COMPARE_DIR)/auction_summary.csv'); \
+target=[1,2,4,8,16,24]; \
+hydra=hydra[hydra['producers'].isin(target)].sort_values('producers'); \
+auction=auction[auction['producers'].isin(target)].sort_values('producers'); \
+print('='*80); \
+print('HYDRA vs AUCTION COMPARISON'); \
+print(f'Generated: {datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\")}'); \
+print('='*80); \
+print(); \
+print(f'{\"Producers\":>10} | {\"Dist\":>8} | {\"RepMed(ms)\":>10} | {\"RepMed(RTT)\":>10} | {\"Sync/Cmd\":>8} | {\"AtRF\":>6}'); \
+print('-'*80); \
+for p in target: \
+  h=hydra[hydra['producers']==p].iloc[0] if p in hydra['producers'].values else None; \
+  a=auction[auction['producers']==p].iloc[0] if p in auction['producers'].values else None; \
+  if h is not None: print(f'{p:>10} | {\"HYDRA\":>8} | {h[\"rep_med_ms\"]:>10.1f} | {h[\"rep_med_rtt\"]:>10.2f} | {h[\"sync_per_cmd\"]:>8.1f} | {h[\"commands_at_rf\"]:>6}'); \
+  if a is not None: print(f'{p:>10} | {\"AUCTION\":>8} | {a[\"rep_med_ms\"]:>10.1f} | {a[\"rep_med_rtt\"]:>10.2f} | {a[\"sync_per_cmd\"]:>8.1f} | {a[\"commands_at_rf\"]:>6}'); \
+  print()"
+	@echo ""
+	@echo "Analysis complete. Results saved to: $(COMPARE_DIR)"

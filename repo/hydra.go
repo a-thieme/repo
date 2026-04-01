@@ -19,6 +19,10 @@ func NewHydraMechanism(repo *Repo) *HydraMechanism {
 	return &HydraMechanism{repo: repo}
 }
 
+func (h *HydraMechanism) String() string {
+	return "hydra"
+}
+
 func (h *HydraMechanism) Mechanism() string {
 	return "hydra"
 }
@@ -33,14 +37,14 @@ func (h *HydraMechanism) runHeartbeat() {
 	ticker := time.NewTicker(h.repo.heartbeatInterval)
 	defer ticker.Stop()
 
-	h.repo.publishJobs()
+	h.PublishUpdate(nil)
 
 	for {
 		select {
 		case <-h.quitCh:
 			return
 		case <-ticker.C:
-			h.repo.publishJobs()
+			h.PublishUpdate(nil)
 		}
 	}
 }
@@ -72,26 +76,45 @@ func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
 }
 
 func (h *HydraMechanism) RunDistribution(cmd *tlv.Command) {
-	log.Debug(h.repo, "hydra_runDistribution_enter", "target", cmd.Target.String())
 	log.Info(h.repo, "hydra_runDistribution", "target", cmd.Target.String(), "node", h.repo.myNodeName())
 
 	nodeStatusCopy := h.repo.nodeStatusCopy()
 
 	log.Debug(h.repo, "hydra_runDistribution_determineWinners", "target", cmd.Target.String())
 	assignment := h.repo.DetermineWinners(cmd.Target, nodeStatusCopy)
-	log.Debug(h.repo, "hydra_runDistribution_winners", "target", cmd.Target.String(), "assignees", assignment.Assignees)
-	log.Info(h.repo, "hydra_onCommand_winners", "target", cmd.Target.String(), "winners", assignment)
+	if assignment == nil || assignment.Assignees == nil {
+		log.Warn(h, "nilAssignment", "target", cmd.Target.String())
+		return
+	}
 
-	update := &tlv.NodeUpdate{NewCommand: cmd}
+	log.Info(h.repo, "hydra_onCommand_winners", "target", cmd.Target.String(), "winners", assignment.Assignees)
 
-	if assignment != nil {
-		update.JobAssignments = append(update.JobAssignments, assignment)
-		if h.repo.amAssignee(assignment) && h.repo.doTarget(cmd.Target) {
+	update := &tlv.NodeUpdate{}
+	update.JobAssignments = append(update.JobAssignments, assignment)
+	if h.repo.amAssignee(assignment) {
+		if h.repo.doTarget(cmd.Target) {
 			update.Jobs = h.repo.getMyJobs()
+		} else {
+			// NOTE: this means we were assigned but didn't do it, which will always cause some failure
+			// so the behavior is to re-run the distribution
+			h.RunDistribution(cmd)
+			return
 		}
 	}
-	update.StorageUsed, update.StorageCapacity = h.repo.getStorageStats()
-	h.repo.publishUpdateStats(update)
+	h.PublishUpdate(update)
+}
+
+func (h *HydraMechanism) PublishJobs() {
+	h.PublishUpdate(&tlv.NodeUpdate{Jobs: h.repo.getMyJobs()})
+}
+
+// publish update with stats attached
+func (h *HydraMechanism) PublishUpdate(update *tlv.NodeUpdate) {
+	if update == nil {
+		update = &tlv.NodeUpdate{}
+	}
+	update.StorageCapacity, update.StorageUsed = h.repo.getStorageStats()
+	h.repo.publishUpdate(update)
 }
 
 func (h *HydraMechanism) BatchedDistribution(jobs []enc.Name) {
@@ -119,8 +142,7 @@ func (h *HydraMechanism) BatchedDistribution(jobs []enc.Name) {
 			JobAssignments: assignments,
 			NewCommand:     nil,
 		}
-		update.StorageUsed, update.StorageCapacity = h.repo.getStorageStats()
-		h.repo.publishUpdateStats(update)
+		h.PublishUpdate(update)
 		log.Info(h.repo, "hydra_batched_published", "assignmentCount", len(assignments))
 	}
 }
