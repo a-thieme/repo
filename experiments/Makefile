@@ -83,7 +83,7 @@ cal_iter_%: pre_calibrate
 	echo "--- Starting Iteration $$i/$(CALIBRATE_ITER) ---"; \
 	iter_dir="$(RESULTS_DIR)/calibration/run_$(TIMESTAMP)_$(DISTRIBUTION)/iter_$$i"; \
 	mkdir -p "$$iter_dir"; \
-	routing_wait=$$((30 + ($(CALIBRATE_NODES) - 5) * 2)); \
+	routing_wait=$$((30 + ($(CALIBRATE_NODES) - 5) * 5)); \
 	docker run --rm --privileged \
 		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
 		-v /lib/modules:/lib/modules \
@@ -145,7 +145,7 @@ post_run: $(EXP_TARGETS)
 single:
 	@mkdir -p $(RESULTS_DIR)/run_$(TIMESTAMP)/nodes_$(NODES)_producers_$(PRODUCERS)
 	@result_dir="$$(cd $(RESULTS_DIR)/run_$(TIMESTAMP)/nodes_$(NODES)_producers_$(PRODUCERS) && pwd)"; \
-	routing_wait=$$((30 + ($(NODES) - 5) * 2)); \
+	routing_wait=$$((30 + ($(NODES) - 5) * 5)); \
 	cal_file="$(RESULTS_DIR)/calibration/latest_calibration_$(DISTRIBUTION).json"; \
 	if [ -f "$$cal_file" ]; then \
 		safe_interval=$$(python3 -c "import json; d=json.load(open('$$cal_file')); mv=d.get('max_values',{}); print(mv.get('safe_interval_ms', mv.get('replication_time_p99_ms', mv.get('replication_time_ms', 10))))" 2>/dev/null || echo "10"); \
@@ -184,7 +184,7 @@ single:
 shell:
 	@echo "Starting interactive Docker shell with $(NODES) nodes..."
 	@tmp_dir=$$(mktemp -d); \
-	routing_wait=$$((30 + ($(NODES) - 5) * 2)); \
+	routing_wait=$$((30 + ($(NODES) - 5) * 5)); \
 	docker run --rm -it --privileged \
 		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
 		-v /lib/modules:/lib/modules \

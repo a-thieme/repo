@@ -21,4 +21,4 @@ COPY keys/ /root/.ndn/keys/
 
 COPY experiments/testbed_topology.conf /usr/local/share/testbed_topology.conf
 
-ENTRYPOINT ["/bin/bash"]
+ENTRYPOINT ["/mini-ndn/docker/entrypoint.sh"]

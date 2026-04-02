@@ -113,10 +113,9 @@ func (r *Repo) Start() (err error) {
 
 	r.mu.Lock()
 	r.nodeStatus[r.myNodeName()] = NodeStatus{
-		Capacity:    storageCapacity,
-		Used:        storageUsed,
-		Jobs:        []enc.Name{},
-		LastUpdated: time.Now(),
+		Capacity: storageCapacity,
+		Used:     storageUsed,
+		Jobs:     []enc.Name{},
 	}
 	r.mu.Unlock()
 
@@ -261,6 +260,7 @@ func (r *Repo) onNewCommandFromProducer(name enc.Name, content enc.Wire, reply f
 	}
 	nodeUpdate.NewCommand = cmd
 	r.publishUpdate(nodeUpdate)
+	r.scheduleReevaluationLoop(cmd.Target)
 }
 
 func (r *Repo) onGroupSync(pub svs.SvsPub) {
@@ -269,26 +269,40 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 		log.Warn(r, "node_update_parse_failed", "name", pub.DataName, "err", err)
 		return
 	}
-
+	if pub.Publisher.Equal(r.nodePrefix) {
+		log.Info(r, "selfPublication", "name", pub.DataName)
+		return
+	}
 	publisherName := pub.Publisher.String()
 	log.Info(r, "onGroupSync_received", "publisher", publisherName, "jobs", len(update.Jobs), "newCmd", update.NewCommand != nil)
-	log.Debug(r, "groupSync_update_received", "publisher", publisherName, "jobs", len(update.Jobs))
 
-	r.updateNodeStatus(publisherName, update)
 	r.resetHeartbeatTimer(publisherName)
-	r.eventLogger.LogNodeUpdate(publisherName, update.Jobs, update.StorageCapacity, update.StorageUsed)
-
-	if update.NewCommand != nil {
-		cmd := update.NewCommand
-		log.Debug(r, "groupSync_processing_newCommand", "target", update.NewCommand.Target.String())
-		r.addCommand(cmd)
-		r.eventLogger.LogCommandSynced(update.NewCommand.Type, update.NewCommand.Target.String(), publisherName)
-		r.checkPendingAssignment(cmd)
-		r.scheduleReevaluationLoop(update.NewCommand.Target)
-	}
+	r.updateNodeStatus(publisherName, update)
+	shouldPublishJobs := false
 	if len(update.JobAssignments) > 0 {
 		log.Debug(r, "groupSync_processing_assignments", "count", len(update.JobAssignments))
-		r.ProcessJobAssignments(update.JobAssignments)
+		shouldPublishJobs = r.ProcessJobAssignments(update.JobAssignments)
+	}
+	r.eventLogger.LogNodeUpdate(publisherName, update.Jobs, update.StorageCapacity, update.StorageUsed)
+	if update.NewCommand != nil {
+		cmd := update.NewCommand
+		targetStr := cmd.Target.String()
+		log.Debug(r, "groupSync_processing_newCommand", "target", targetStr)
+		r.addCommand(cmd)
+		r.eventLogger.LogCommandSynced(update.NewCommand.Type, targetStr, publisherName)
+		r.mu.Lock()
+		if assignment, ok := r.pendingAssignments[targetStr]; ok {
+			log.Info(r, "checkPendingAssignment_found", "target", targetStr)
+			delete(r.pendingAssignments, targetStr)
+			if r.ProcessJobAssignment(assignment) {
+				shouldPublishJobs = true
+			}
+		}
+		r.mu.Unlock()
+		r.evaluate(update.NewCommand.Target)
+	}
+	if shouldPublishJobs {
+		r.distributor.PublishJobs()
 	}
 }
 

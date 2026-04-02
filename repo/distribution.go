@@ -19,11 +19,16 @@ type DistributionMechanism interface {
 
 	OnCommand(cmd *tlv.Command) *tlv.NodeUpdate
 
-	RunDistribution(cmd *tlv.Command)
+	GetAvailability(under []UnderStats) map[string]Availability
 
-	BatchedDistribution(jobs []enc.Name)
+	PublishAssignments(assignments []*tlv.JobAssignment)
 
 	Stop()
+}
+
+type Availability struct {
+	PercentUsed   float64
+	TotalCapacity uint64
 }
 
 func NewDistributionMechanism(repo *Repo, name string) DistributionMechanism {

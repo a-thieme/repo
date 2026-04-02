@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,7 @@ type AuctionMechanism struct {
 	auctionSeq      uint64
 	interestMap     map[string]ndn.InterestHandlerArgs
 	interestMu      sync.Mutex
+	resultsLookup   map[string]enc.Name
 }
 
 func NewAuctionMechanism(repo *Repo) *AuctionMechanism {
@@ -49,12 +51,15 @@ func (h *AuctionMechanism) PublishJobs() {
 func (a *AuctionMechanism) Start(client ndn.Client, groupPrefix enc.Name) error {
 	a.quitCh = make(chan struct{})
 	a.interestMap = make(map[string]ndn.InterestHandlerArgs)
+	a.resultsLookup = make(map[string]enc.Name)
 	heartbeatGroupPrefix := groupPrefix.Append(enc.NewGenericComponent(HEARTBEAT_SUFFIX))
 	a.heartbeatSvSync = svs.NewSvSync(svs.SvSyncOpts{
 		Client:      client,
 		GroupPrefix: heartbeatGroupPrefix,
 		OnUpdate: func(update svs.SvSyncUpdate) {
-			a.HandleHeartbeatUpdate(update)
+			nodeName := update.Name.String()
+			log.Debug(a, "heartbeat", "node", nodeName)
+			a.repo.resetHeartbeatTimer(nodeName)
 		},
 		SyncDataName: a.repo.nodePrefix,
 	})
@@ -97,38 +102,54 @@ func (a *AuctionMechanism) onResultsInterest(args ndn.InterestHandlerArgs) {
 }
 
 func (a *AuctionMechanism) publishAssignment(resultsName enc.Name, assignment *tlv.JobAssignment) {
-	a.publishAssignmentBatch(resultsName, []*tlv.JobAssignment{assignment})
+	a.PublishAssignments([]*tlv.JobAssignment{assignment})
 }
 
-func (a *AuctionMechanism) publishAssignmentBatch(resultsName enc.Name, assignments []*tlv.JobAssignment) {
-	batched := &tlv.JobAssignmentBatch{JobAssignments: assignments}
-	signer := a.repo.client.SuggestSigner(resultsName)
-	if signer == nil {
-		log.Error(a, "onBidInterest_no_signer")
-		return
-	}
-	data, err := spec.Spec{}.MakeData(resultsName, &ndn.DataConfig{}, batched.Encode(), signer)
-	if err != nil {
-		log.Warn(a.repo, "MakeData", "failed", err, "resultsName", resultsName.String())
-	}
-	nStr := resultsName.String()
-	err = a.repo.client.Store().Put(resultsName, data.Wire.Join())
-	if err != nil {
-		log.Warn(a.repo, "PutData", "failed", err, "resultsName", nStr)
-	}
-	a.interestMu.Lock()
-	args, exists := a.interestMap[nStr]
-	if exists {
-		delete(a.interestMap, nStr)
-	}
-	a.interestMu.Unlock()
-	if exists {
-		if args.Reply(data.Wire) == nil {
-			log.Debug(a, "repliedToBuffered", "name", nStr)
+func (a *AuctionMechanism) PublishAssignments(assignments []*tlv.JobAssignment) {
+	// NOTE: every target will have all the same assignments, so just go through all of them, publishing for each resultsName
+	for _, assignment := range assignments {
+		targetStr := assignment.Target.String()
+		resultsName, exists := a.resultsLookup[targetStr]
+
+		// only do this once per resultsName
+		if exists {
+			delete(a.resultsLookup, targetStr)
+		} else {
+			continue
 		}
+
+		batched := &tlv.JobAssignmentBatch{JobAssignments: assignments}
+		signer := a.repo.client.SuggestSigner(resultsName)
+		if signer == nil {
+			log.Error(a, "onBidInterest_no_signer")
+			return
+		}
+		data, err := spec.Spec{}.MakeData(resultsName, &ndn.DataConfig{}, batched.Encode(), signer)
+		if err != nil {
+			log.Warn(a.repo, "MakeData", "failed", err, "resultsName", resultsName.String())
+		}
+		nStr := resultsName.String()
+		err = a.repo.client.Store().Put(resultsName, data.Wire.Join())
+		if err != nil {
+			log.Warn(a.repo, "PutData", "failed", err, "resultsName", nStr)
+		}
+		a.interestMu.Lock()
+		args, exists := a.interestMap[nStr]
+		if exists {
+			delete(a.interestMap, nStr)
+		}
+		a.interestMu.Unlock()
+		if exists {
+			if args.Reply(data.Wire) == nil {
+				log.Debug(a, "repliedToBuffered", "name", nStr)
+			}
+		}
+		a.repo.store.Put(resultsName, data.Wire.Join())
+		log.Info(a.repo, "runAuctionBatched_published", "assignmentCount", len(batched.JobAssignments))
 	}
-	a.repo.store.Put(resultsName, data.Wire.Join())
-	log.Info(a.repo, "runAuctionBatched_published", "assignmentCount", len(batched.JobAssignments))
+	if a.repo.ProcessJobAssignments(assignments) {
+		a.PublishJobs()
+	}
 }
 
 func (a *AuctionMechanism) runHeartbeatTick() {
@@ -142,23 +163,6 @@ func (a *AuctionMechanism) runHeartbeatTick() {
 			a.heartbeatSvSync.IncrSeqNo(a.repo.nodePrefix)
 		}
 	}
-}
-
-func (a *AuctionMechanism) HandleHeartbeatUpdate(update svs.SvSyncUpdate) {
-	nodeName := update.Name.String()
-	log.Debug(a, "heartbeat", "node", nodeName)
-
-	a.repo.mu.Lock()
-	if status, exists := a.repo.nodeStatus[nodeName]; exists {
-		status.LastUpdated = time.Now()
-		a.repo.nodeStatus[nodeName] = status
-	} else {
-		a.repo.nodeStatus[nodeName] = NodeStatus{
-			LastUpdated: time.Now(),
-		}
-	}
-	a.repo.mu.Unlock()
-	a.repo.resetHeartbeatTimer(nodeName)
 }
 
 func (a *AuctionMechanism) Stop() {
@@ -175,92 +179,38 @@ func (a *AuctionMechanism) Mechanism() string {
 }
 
 func (a *AuctionMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
-	go a.RunDistribution(cmd)
 	return &tlv.NodeUpdate{NewCommand: cmd}
 }
 
-func (a *AuctionMechanism) BatchedDistribution(jobs []enc.Name) {
-	peers := a.repo.getOtherNodeNames()
-	if len(peers) == 0 {
-		log.Info(a.repo, "runAuctionBatched_no_peers", "jobCount", len(jobs))
-		return
-	}
-
+func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availability {
 	auctionID := atomic.AddUint64(&a.auctionSeq, 1)
 	resultsName := a.repo.nodePrefix.Append(enc.NewGenericComponent(RESULTS_SUFFIX))
 	resultsName = resultsName.Append(enc.NewTimestampComponent(auctionID))
+	log.Info(a.repo, "runAuction_started", "auctionID", auctionID)
 
-	peerMetrics := a.collectPeerMetrics(peers, jobs, resultsName, auctionID)
-	if len(peerMetrics) == 0 {
-		log.Info(a.repo, "runAuctionBatched_no_metrics", "jobCount", len(jobs))
-		return
-	}
-
-	var assignments []*tlv.JobAssignment
-	shouldPublishJobs := false
-	for _, target := range jobs {
-		targetStr := target.String()
-
-		// Check if replication is needed before scheduling reevaluation
-		currentReplication := a.repo.countReplication(target)
-		needed := a.repo.rf - currentReplication
-		if needed <= 0 {
-			log.Info(a.repo, "runAuctionBatched_skip", "reason", "replication_satisfied", "target", targetStr)
-			continue
-		}
-
-		// Only schedule reevaluation AFTER confirming we need more replicas
-		a.repo.scheduleReevaluationLoop(target)
-
-		a.repo.mu.Lock()
-		status := a.repo.nodeStatus[a.repo.myNodeName()]
-		peerMetrics[a.repo.myNodeName()] = &tlv.NodeUpdate{
-			StorageCapacity: status.Capacity,
-			StorageUsed:     status.Used,
-			Jobs:            status.Jobs,
-		}
-
-		nodeStatus := make(map[string]NodeStatus)
-		for name, metric := range peerMetrics {
-			nodeStatus[name] = NodeStatus{
-				Capacity: metric.StorageCapacity,
-				Used:     metric.StorageUsed,
-				Jobs:     metric.Jobs,
-			}
-		}
-		a.repo.mu.Unlock()
-
-		assignment := a.repo.DetermineWinners(target, nodeStatus)
-
-		// If assignment is nil, replication is satisfied - cancel pending reevaluation
-		if assignment == nil {
-			log.Info(a.repo, "runAuctionBatched_skip", "reason", "replication_satisfied_in_determineWinners", "target", targetStr)
-			a.repo.cancelReevaluation(target)
-			continue
-		}
-
-		isAssignee := a.repo.amAssignee(assignment)
-		if assignment != nil {
-			log.Info(a.repo, "runAuctionBatched_winner", "target", targetStr, "winners", assignment.Assignees)
-			assignments = append(assignments, assignment)
-
-			if isAssignee {
-				log.Info(a.repo, "runAuctionBatched_claiming", "target", targetStr)
-				if a.repo.doTarget(target) {
-					shouldPublishJobs = true
+	peerMetrics := make(map[string]Availability)
+	myPrefix := a.repo.nodePrefix.String()
+	// get all the candidates from under and request their availability
+	target := under[0].Target
+	peers := []string{}
+	for _, stat := range under {
+		for _, nodeName := range stat.Candidates {
+			if !slices.Contains(peers, nodeName) {
+				// NOTE: we don't need to fetch our own metrics, so if we are a candidate, we add it manually
+				if nodeName == myPrefix {
+					mine := a.repo.nodeStatusCopy()[myPrefix]
+					peerMetrics[myPrefix] = Availability{
+						PercentUsed:   mine.UsedSpace(),
+						TotalCapacity: mine.Capacity,
+					}
+				} else {
+					peers = append(peers, nodeName)
 				}
 			}
 		}
+		a.resultsLookup[stat.Target.String()] = resultsName
 	}
 
-	a.publishAssignmentBatch(resultsName, assignments)
-	if shouldPublishJobs {
-		a.PublishJobs()
-	}
-}
-
-func (a *AuctionMechanism) collectPeerMetrics(peers []string, jobs []enc.Name, resultsName enc.Name, auctionID uint64) map[string]*tlv.NodeUpdate {
-	peerMetrics := make(map[string]*tlv.NodeUpdate)
 	var metricsMu sync.Mutex
 	responsesCh := make(chan string, len(peers))
 
@@ -279,120 +229,7 @@ func (a *AuctionMechanism) collectPeerMetrics(peers []string, jobs []enc.Name, r
 			bidName = bidName.Append(enc.NewTimestampComponent(auctionID))
 
 			metricReq := &tlv.MetricRequest{
-				Target:      jobs[0],
-				ResultsName: resultsName,
-				Auctioneer:  a.repo.nodePrefix,
-			}
-
-			a.repo.client.ExpressR(ndn.ExpressRArgs{
-				Name: bidName,
-				Config: &ndn.InterestConfig{
-					CanBePrefix: false,
-					MustBeFresh: true,
-				},
-				AppParam: metricReq.Encode(),
-				Retries:  3,
-				Callback: func(args ndn.ExpressCallbackArgs) {
-					defer callbackWg.Done()
-
-					if args.Result != ndn.InterestResultData {
-						return
-					}
-
-					metricResp, err := tlv.ParseNodeUpdate(enc.NewWireView(args.Data.Content()), false)
-					if err != nil {
-						return
-					}
-
-					metricsMu.Lock()
-					peerMetrics[peer] = metricResp
-					metricsMu.Unlock()
-
-					a.repo.resetHeartbeatTimer(peer)
-
-					select {
-					case responsesCh <- peer:
-					default:
-					}
-				},
-			})
-		}(peer)
-	}
-
-	wg.Wait()
-	callbackWg.Wait()
-
-	receivedCount := 0
-	for {
-		select {
-		case <-auctionTimer.C:
-			return peerMetrics
-		case <-responsesCh:
-			receivedCount++
-			if receivedCount == len(peers) {
-				return peerMetrics
-			}
-		}
-	}
-}
-
-func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
-	targetStr := cmd.Target.String()
-	currentReplication := a.repo.countReplication(cmd.Target)
-	needed := a.repo.rf - currentReplication
-
-	if needed <= 0 {
-		log.Info(a.repo, "runAuction_skip", "reason", "replication_satisfied", "target", targetStr, "current", currentReplication)
-		if a.repo.eventLogger != nil {
-			a.repo.eventLogger.LogAuctionDelayed(targetStr, "replication_satisfied")
-		}
-		a.repo.cancelReevaluation(cmd.Target)
-		return
-	}
-
-	// Only schedule reevaluation AFTER confirming we need more replicas
-	a.repo.scheduleReevaluationLoop(cmd.Target)
-
-	auctionID := atomic.AddUint64(&a.auctionSeq, 1)
-	resultsName := a.repo.nodePrefix.Append(enc.NewGenericComponent(RESULTS_SUFFIX))
-	resultsName = resultsName.Append(enc.NewTimestampComponent(auctionID))
-
-	log.Info(a.repo, "runAuction_started", "target", targetStr, "auctionID", auctionID, "current", currentReplication, "needed", needed)
-
-	if a.repo.eventLogger != nil {
-		a.repo.eventLogger.LogAuctionStarted(targetStr, currentReplication, needed, auctionID)
-	}
-
-	peers := a.repo.getOtherNodeNames()
-	log.Info(a.repo, "runAuction_peers", "target", targetStr, "peers", peers)
-
-	// edge case where we get a command before seeing peers
-	if len(peers) == 0 {
-		log.Info(a.repo, "runAuction_no_peers", "target", targetStr)
-		a.determineAndPublishWinners(cmd.Target, resultsName, nil)
-		return
-	}
-
-	peerMetrics := make(map[string]*tlv.NodeUpdate)
-	var metricsMu sync.Mutex
-	responsesCh := make(chan string, len(peers))
-
-	auctionTimer := time.NewTimer(a.repo.auctionTimeout)
-
-	var wg sync.WaitGroup
-	var callbackWg sync.WaitGroup
-	for _, peer := range peers {
-		wg.Add(1)
-		callbackWg.Add(1)
-		go func(peer string) {
-			defer wg.Done()
-
-			peerPrefix, _ := enc.NameFromStr(peer)
-			bidName := peerPrefix.Append(enc.NewGenericComponent(BID_SUFFIX))
-			bidName = bidName.Append(enc.NewTimestampComponent(auctionID))
-
-			metricReq := &tlv.MetricRequest{
-				Target:      cmd.Target,
+				Target:      target,
 				ResultsName: resultsName,
 				Auctioneer:  a.repo.nodePrefix,
 			}
@@ -423,7 +260,10 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 
 					// save response
 					metricsMu.Lock()
-					peerMetrics[peer] = metricResp
+					peerMetrics[peer] = Availability{
+						PercentUsed:   float64(metricResp.StorageUsed) / float64(metricResp.StorageCapacity),
+						TotalCapacity: metricResp.StorageCapacity,
+					}
 					metricsMu.Unlock()
 
 					a.repo.resetHeartbeatTimer(peer)
@@ -445,91 +285,16 @@ func (a *AuctionMechanism) RunDistribution(cmd *tlv.Command) {
 	for {
 		select {
 		case <-auctionTimer.C:
-			log.Info(a.repo, "runAuction_timeout", "target", targetStr, "received", receivedCount, "total_peers", len(peers))
-			a.determineAndPublishWinners(cmd.Target, resultsName, peerMetrics)
-			return
+			log.Info(a.repo, "runAuction_timeout", "target", target.String(), "received", receivedCount, "total_peers", len(peers))
+			return peerMetrics
 		case <-responsesCh:
 			receivedCount++
 			log.Debug(a.repo, "runAuction_bid_received", "peer", "unknown", "count", receivedCount, "total", len(peers))
 			if receivedCount == len(peers) {
-				a.determineAndPublishWinners(cmd.Target, resultsName, peerMetrics)
-				return
+				return peerMetrics
 			}
 		}
 	}
-}
-
-// FIXME: all returns should publish empty data
-func (a *AuctionMechanism) determineAndPublishWinners(target enc.Name, resultsName enc.Name, peerMetrics map[string]*tlv.NodeUpdate) {
-	targetStr := target.String()
-
-	if peerMetrics == nil {
-		peerMetrics = make(map[string]*tlv.NodeUpdate)
-	}
-
-	cmd := a.repo.getCommand(target)
-	if cmd == nil {
-		return
-	}
-
-	a.repo.mu.Lock()
-	status := a.repo.nodeStatus[a.repo.myNodeName()]
-	peerMetrics[a.repo.myNodeName()] = &tlv.NodeUpdate{
-		StorageCapacity: status.Capacity,
-		StorageUsed:     status.Used,
-		Jobs:            status.Jobs,
-	}
-
-	nodeStatus := make(map[string]NodeStatus)
-	for name, metric := range peerMetrics {
-		nodeStatus[name] = NodeStatus{
-			Capacity: metric.StorageCapacity,
-			Used:     metric.StorageUsed,
-			Jobs:     metric.Jobs,
-		}
-	}
-	a.repo.mu.Unlock()
-
-	assignment := a.repo.DetermineWinners(target, nodeStatus)
-
-	// If assignment is nil, replication is already satisfied - cancel any pending reevaluation
-	if assignment == nil {
-		log.Info(a.repo, "runAuction_skip", "reason", "replication_satisfied_in_determineWinners", "target", targetStr)
-		a.repo.cancelReevaluation(target)
-		return
-	}
-
-	log.Info(a.repo, "runAuction_winners", "target", targetStr, "winners", assignment.Assignees)
-
-	if a.repo.eventLogger != nil {
-		candidates := make([]string, 0, len(nodeStatus))
-		for name, status := range nodeStatus {
-			isDoing := false
-			for _, job := range status.Jobs {
-				if job.Equal(target) {
-					isDoing = true
-					break
-				}
-			}
-			if !isDoing {
-				candidates = append(candidates, name)
-			}
-		}
-		winners := make([]string, len(assignment.Assignees))
-		for i, a := range assignment.Assignees {
-			winners[i] = a.String()
-		}
-		a.repo.eventLogger.LogAuctionWinners(targetStr, candidates, nil, winners)
-	}
-
-	a.publishAssignment(resultsName, assignment)
-	if a.repo.amAssignee(assignment) {
-		log.Info(a.repo, "runAuction_claiming_job", "target", targetStr, "myNode", a.repo.myNodeName())
-		a.repo.doTarget(target)
-		a.PublishJobs()
-	}
-
-	a.repo.eventLogger.LogAuctionResults(targetStr, resultsName.String(), encNamesToStrings(assignment.Assignees))
 }
 
 func (a *AuctionMechanism) onBidInterest(args ndn.InterestHandlerArgs) {
@@ -596,7 +361,9 @@ func (a *AuctionMechanism) onBidInterest(args ndn.InterestHandlerArgs) {
 				log.Error(a, "ParseJobAssignmentBatch", "failed", target)
 				return
 			}
-			a.repo.ProcessJobAssignments(assignments.JobAssignments)
+			if a.repo.ProcessJobAssignments(assignments.JobAssignments) {
+				a.PublishJobs()
+			}
 		},
 	})
 }

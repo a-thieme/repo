@@ -55,54 +55,51 @@ func (h *HydraMechanism) Stop() {
 	}
 }
 
-func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
-	log.Debug(h.repo, "hydra_onCommand_enter", "target", cmd.Target.String())
-	log.Info(h.repo, "hydra_onCommand", "target", cmd.Target.String(), "node", h.repo.myNodeName())
+func (h *HydraMechanism) GetAvailability(under []UnderStats) map[string]Availability {
+	cpy := h.repo.nodeStatusCopy()
+	out := make(map[string]Availability)
+	for _, stat := range under {
+		for _, nodeName := range stat.Candidates {
+			status, exists := cpy[nodeName]
+			if exists {
+				out[nodeName] = Availability{
+					PercentUsed:   status.UsedSpace(),
+					TotalCapacity: status.Capacity,
+				}
+			}
 
-	nodeStatusCopy := h.repo.nodeStatusCopy()
-
-	assignment := h.repo.DetermineWinners(cmd.Target, nodeStatusCopy)
-	log.Info(h.repo, "hydra_onCommand_winners", "target", cmd.Target.String(), "winners", assignment)
-
-	update := &tlv.NodeUpdate{}
-	if assignment != nil {
-		update.JobAssignments = append(update.JobAssignments, assignment)
-		if h.repo.amAssignee(assignment) && h.repo.doTarget(cmd.Target) {
-			update.Jobs = h.repo.getMyJobs()
 		}
 	}
+	return out
+}
+
+func (h *HydraMechanism) PublishAssignments(assignments []*tlv.JobAssignment) {
+	update := &tlv.NodeUpdate{JobAssignments: assignments}
+	if h.repo.ProcessJobAssignments(assignments) {
+		update.Jobs = h.repo.getMyJobs()
+	}
+	h.PublishUpdate(update)
+}
+
+// on producer command
+func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
+	log.Info(h.repo, "hydra_onCommand", "target", cmd.Target.String(), "node", h.repo.myNodeName())
+	// assignment := h.repo.DetermineWinners(cmd.Target)
+
+	update := &tlv.NodeUpdate{}
+	// if assignment != nil {
+	// 	update.JobAssignments = append(update.JobAssignments, assignment)
+	// 	if h.repo.amAssignee(assignment) && h.repo.doTarget(cmd.Target) {
+	// 		update.Jobs = h.repo.getMyJobs()
+	// 	}
+	// }
 	update.StorageUsed, update.StorageCapacity = h.repo.getStorageStats()
 	return update
 }
 
-func (h *HydraMechanism) RunDistribution(cmd *tlv.Command) {
-	log.Info(h.repo, "hydra_runDistribution", "target", cmd.Target.String(), "node", h.repo.myNodeName())
-
-	nodeStatusCopy := h.repo.nodeStatusCopy()
-
-	log.Debug(h.repo, "hydra_runDistribution_determineWinners", "target", cmd.Target.String())
-	assignment := h.repo.DetermineWinners(cmd.Target, nodeStatusCopy)
-	if assignment == nil || assignment.Assignees == nil {
-		log.Warn(h, "nilAssignment", "target", cmd.Target.String())
-		return
-	}
-
-	log.Info(h.repo, "hydra_onCommand_winners", "target", cmd.Target.String(), "winners", assignment.Assignees)
-
-	update := &tlv.NodeUpdate{}
-	update.JobAssignments = append(update.JobAssignments, assignment)
-	if h.repo.amAssignee(assignment) {
-		if h.repo.doTarget(cmd.Target) {
-			update.Jobs = h.repo.getMyJobs()
-		} else {
-			// NOTE: this means we were assigned but didn't do it, which will always cause some failure
-			// so the behavior is to re-run the distribution
-			h.RunDistribution(cmd)
-			return
-		}
-	}
-	h.PublishUpdate(update)
-}
+// func (h *HydraMechanism) RunDistribution(cmd *tlv.Command) {
+// 	h.BatchedDistribution([]enc.Name{cmd.Target})
+// }
 
 func (h *HydraMechanism) PublishJobs() {
 	h.PublishUpdate(&tlv.NodeUpdate{Jobs: h.repo.getMyJobs()})
@@ -117,32 +114,29 @@ func (h *HydraMechanism) PublishUpdate(update *tlv.NodeUpdate) {
 	h.repo.publishUpdate(update)
 }
 
-func (h *HydraMechanism) BatchedDistribution(jobs []enc.Name) {
-	log.Debug(h.repo, "hydra_batchedDistribution_enter", "jobCount", len(jobs))
-	log.Info(h.repo, "hydra_batchedDistribution", "jobCount", len(jobs))
-
-	nodeStatusCopy := h.repo.nodeStatusCopy()
-
-	var assignments []*tlv.JobAssignment
-	for _, target := range jobs {
-		assignment := h.repo.DetermineWinners(target, nodeStatusCopy)
-		if assignment != nil {
-			log.Info(h.repo, "hydra_batched_winner", "target", target.String(), "winners", assignment.Assignees)
-			assignments = append(assignments, assignment)
-
-			if h.repo.amAssignee(assignment) {
-				log.Info(h.repo, "hydra_batched_claiming", "target", target.String())
-				h.repo.doTarget(target)
-			}
-		}
-	}
-
-	if len(assignments) > 0 {
-		update := &tlv.NodeUpdate{
-			JobAssignments: assignments,
-			NewCommand:     nil,
-		}
-		h.PublishUpdate(update)
-		log.Info(h.repo, "hydra_batched_published", "assignmentCount", len(assignments))
-	}
-}
+// func (h *HydraMechanism) BatchedDistribution(jobs []enc.Name) {
+// 	log.Info(h.repo, "hydra_batchedDistribution", "jobCount", len(jobs))
+//
+// 	var assignments []*tlv.JobAssignment
+// 	includeJobs := false
+// 	for _, target := range jobs {
+// 		assignment := h.repo.DetermineWinners(target)
+// 		if assignment != nil {
+// 			log.Info(h.repo, "hydra_batched_winner", "target", target.String(), "winners", assignment.Assignees)
+// 			assignments = append(assignments, assignment)
+//
+// 			if h.repo.amAssignee(assignment) && h.repo.doTarget(target) {
+// 				includeJobs = true
+// 			}
+// 		}
+// 	}
+//
+// 	if len(assignments) > 0 {
+// 		update := &tlv.NodeUpdate{JobAssignments: assignments}
+// 		if includeJobs {
+// 			update.Jobs = h.repo.getMyJobs()
+// 		}
+// 		h.PublishUpdate(update)
+// 		log.Info(h.repo, "hydra_batched_published", "assignmentCount", len(assignments))
+// 	}
+// }

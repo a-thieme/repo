@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"hash/fnv"
 	"slices"
 	"time"
@@ -26,10 +25,9 @@ const (
 )
 
 type NodeStatus struct {
-	Capacity    uint64
-	Used        uint64
-	LastUpdated time.Time
-	Jobs        []enc.Name
+	Capacity uint64
+	Used     uint64
+	Jobs     []enc.Name
 }
 
 func hashFromString(s string) uint64 {
@@ -188,16 +186,32 @@ func (r *Repo) amAssignee(assignment *tlv.JobAssignment) bool {
 	return false
 }
 
-// FIXME: write a unit test for this. I think it might be failing
-func (r *Repo) getOtherNodeNames() []string {
-	// FIXME: do we need a mutex here?
-	names := make([]string, 0, len(r.nodeStatus))
-	for name := range r.nodeStatus {
-		if name != r.myNodeName() {
-			names = append(names, name)
+type UnderStats struct {
+	Target     enc.Name
+	Candidates []string
+	Needed     int
+}
+
+func (r *Repo) checkUnder(target enc.Name) UnderStats {
+	currentReplication := 0
+	nodeStatus := r.nodeStatusCopy()
+	candidates := make([]string, 0, len(nodeStatus))
+	for name, status := range nodeStatus {
+		isDoing := false
+		for _, job := range status.Jobs {
+			if job.Equal(target) {
+				isDoing = true
+				break
+			}
+		}
+		if isDoing {
+			currentReplication += 1
+		} else {
+			candidates = append(candidates, name)
 		}
 	}
-	return names
+	needed := r.rf - currentReplication
+	return UnderStats{Target: target, Candidates: candidates, Needed: needed}
 }
 
 func (r *Repo) countReplication(target enc.Name) int {
@@ -299,103 +313,4 @@ func (r *Repo) nodeStatusCopy() map[string]NodeStatus {
 		copy[k] = v
 	}
 	return copy
-}
-
-func (r *Repo) DetermineWinners(target enc.Name, nodeStatus map[string]NodeStatus) *tlv.JobAssignment {
-	currentReplication := countReplicationInternal(target, nodeStatus)
-
-	candidates := make([]string, 0, len(nodeStatus))
-	usedPercentage := make(map[string]float64)
-	capacity := make(map[string]uint64)
-
-	for name, status := range nodeStatus {
-		isDoing := false
-		for _, job := range status.Jobs {
-			if job.Equal(target) {
-				isDoing = true
-				break
-			}
-		}
-		if !isDoing {
-			up := status.UsedSpace()
-			usedPercentage[name] = up
-			capacity[name] = status.Capacity
-			candidates = append(candidates, name)
-		}
-	}
-
-	log.Info(r, "determineWinners_debug", "target", target.String(), "nodeStatus_len", len(nodeStatus), "candidates", candidates)
-
-	needed := r.rf - currentReplication
-
-	if needed <= 0 {
-		if r.eventLogger != nil {
-			r.eventLogger.LogDecisionMade(
-				target.String(),
-				false,
-				"replication_satisfied",
-				fmt.Sprintf("current=%d needed=%d", currentReplication, needed),
-				currentReplication,
-				needed,
-				candidates,
-				nil,
-				nil,
-			)
-		}
-		return nil
-	}
-
-	// sort by used usedPercentage, total capacity, then name
-	slices.SortFunc(candidates, func(i, j string) int {
-		if usedPercentage[i] != usedPercentage[j] {
-			if usedPercentage[i] < usedPercentage[j] {
-				return -1
-			}
-			return 1
-		}
-		if capacity[i] != capacity[j] {
-			if capacity[i] > capacity[j] {
-				return -1
-			}
-			return 1
-		}
-		if i < j {
-			return -1
-		}
-		if i > j {
-			return 1
-		}
-		log.Warn(r, "tied", i, j)
-		return 0 // shouldn't happen
-	})
-
-	limit := min(needed, len(candidates))
-	selectedCandidates := candidates[:limit]
-
-	candidateScores := make(map[string]int)
-	for i, c := range candidates {
-		candidateScores[c] = len(candidates) - i
-	}
-
-	shouldClaim := false
-	reason := "not_selected"
-	if slices.Contains(selectedCandidates, r.myNodeName()) {
-		shouldClaim = true
-		reason = "selected_as_candidate"
-	}
-
-	if r.eventLogger != nil {
-		r.eventLogger.LogDecisionMade(
-			target.String(),
-			shouldClaim,
-			reason,
-			fmt.Sprintf("current=%d needed=%d selected=%v", currentReplication, needed, selectedCandidates),
-			currentReplication,
-			needed,
-			candidates,
-			candidateScores,
-			selectedCandidates,
-		)
-	}
-	return &tlv.JobAssignment{Target: target, Assignees: stringNamesToEncNames(selectedCandidates)}
 }

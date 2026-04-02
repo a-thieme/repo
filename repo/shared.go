@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"time"
 
 	"github.com/a-thieme/repo/tlv"
@@ -9,25 +10,11 @@ import (
 	"github.com/named-data/ndnd/std/log"
 )
 
-// if the target is still under-replicated, do it
-func (r *Repo) checkPendingAssignment(cmd *tlv.Command) {
-	targetStr := cmd.Target.String()
-	log.Debug(r, "checkPendingAssignment", "target", targetStr)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.pendingAssignments[targetStr]; ok {
-		log.Info(r, "checkPendingAssignment_found", "target", targetStr)
-		delete(r.pendingAssignments, targetStr)
-		if r.countReplication(cmd.Target) < r.rf {
-			r.scheduleReevaluationLoop(cmd.Target)
-			if r.doCmd(cmd) {
-				r.distributor.PublishJobs()
-			}
-		}
-	}
+func (r *Repo) ProcessJobAssignment(assignment *tlv.JobAssignment) bool {
+	return r.ProcessJobAssignments([]*tlv.JobAssignment{assignment})
 }
 
-func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) {
+func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) bool {
 	log.Debug(r, "ProcessJobAssignments_enter", "count", len(assignments))
 	addedJob := false
 
@@ -55,7 +42,6 @@ func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) {
 			continue
 		}
 
-		// we were assigned and have the command
 		if r.amIDoingJobStr(targetStr) {
 			log.Info(r, "processJobAssignments_alreadyDoing", "target", targetStr)
 			continue
@@ -67,21 +53,18 @@ func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) {
 				log.Info(r, "processJobAssignments_will_do_job", "target", targetStr, "myNode", r.myNodeName())
 				addedJob = true
 			}
-			r.evaluate(target)
+			r.scheduleReevaluationLoop(target)
 		}
 	}
-
-	if addedJob {
-		r.distributor.PublishJobs()
-	}
+	return addedJob
 }
 
 // redistMu thread-safe
 func (r *Repo) scheduleReevaluationLoop(target enc.Name) {
 	targetStr := target.String()
 	// NOTE: this should be longer than it takes for a distribution to happen
-	// 5 seconds gives enough time for SVS propagation and auction completion
-	delay := 5 * time.Second
+	// 10 seconds gives enough time for SVS propagation and auction completion
+	delay := 10 * time.Second
 
 	r.redistMu.Lock()
 	defer r.redistMu.Unlock()
@@ -98,36 +81,7 @@ func (r *Repo) scheduleReevaluationLoop(target enc.Name) {
 }
 
 func (r *Repo) evaluate(target enc.Name) {
-	targetStr := target.String()
-	log.Debug(r, "evaluate_enter", "target", targetStr)
-	r.redistMu.Lock()
-	delete(r.scheduledRedistributions, targetStr)
-	r.redistMu.Unlock()
-
-	log.Debug(r, "evaluate_checkingReplication", "target", targetStr)
-	count := r.countReplication(target)
-	log.Debug(r, "evaluate_replicationCount", "target", targetStr, "count", count, "rf", r.rf)
-	if count >= r.rf {
-		log.Debug(r, "loopCancelled", "target", targetStr)
-		return
-	}
-
-	isLeader := r.amILeader()
-	log.Info(r, "scheduleReevaluationLoop_fired", "target", targetStr, "isLeader", isLeader)
-	if !isLeader {
-		r.scheduleReevaluationLoop(target)
-		return
-	}
-
-	cmd := r.getCommand(target)
-	if cmd == nil {
-		log.Info(r, "scheduleReevaluationLoop_skip_noCommand", "target", targetStr)
-		r.scheduleReevaluationLoop(target)
-		return
-	}
-
-	log.Info(r, "scheduleReevaluationLoop_runningDistribution", "target", targetStr)
-	r.distributor.RunDistribution(cmd)
+	r.evaluateBatch([]enc.Name{target})
 }
 
 // redistMu thread safe
@@ -146,32 +100,77 @@ func (r *Repo) evaluateBatch(jobs []enc.Name) {
 	if len(jobs) == 0 {
 		return
 	}
-
-	r.mu.Lock()
-	nodeStatusCopy := make(map[string]NodeStatus, len(r.nodeStatus))
-	for k, v := range r.nodeStatus {
-		nodeStatusCopy[k] = v
-	}
-	r.mu.Unlock()
-
-	underReplicated := make([]enc.Name, 0, len(jobs))
-	for _, job := range jobs {
-		if countReplicationInternal(job, nodeStatusCopy) < r.rf {
-			underReplicated = append(underReplicated, job)
+	allUnder := make([]UnderStats, 0, len(jobs))
+	for _, target := range jobs {
+		stats := r.checkUnder(target)
+		if stats.Needed > 0 {
+			allUnder = append(allUnder, stats)
+			r.scheduleReevaluationLoop(target)
+		} else {
+			r.cancelReevaluation(target)
 		}
 	}
-
-	if len(underReplicated) == 0 {
+	if !r.amILeader() {
 		return
 	}
-
-	log.Debug(r, "evaluateBatch_underReplicated", "count", len(underReplicated))
-
-	for _, target := range underReplicated {
-		r.scheduleReevaluationLoop(target)
+	availabilities := r.distributor.GetAvailability(allUnder)
+	sorted := r.sortCandidates(availabilities)
+	// for under in allUnder
+	// 	get first needed candidates and make it a job assignment
+	assignments := []*tlv.JobAssignment{}
+	for _, under := range allUnder {
+		added := 0
+		winners := []string{}
+		for _, candidate := range sorted {
+			if slices.Contains(under.Candidates, candidate) {
+				winners = append(winners, candidate)
+				added += 1
+				if added == under.Needed {
+					break
+				}
+			}
+		}
+		assignments = append(assignments, &tlv.JobAssignment{
+			Target:    under.Target,
+			Assignees: stringNamesToEncNames(winners),
+		})
 	}
+	r.distributor.PublishAssignments(assignments)
+}
 
-	r.distributor.BatchedDistribution(underReplicated)
+func (r *Repo) sortCandidates(abilities map[string]Availability) []string {
+	candidates := make([]string, 0, len(abilities))
+	for nodeName := range abilities {
+		candidates = append(candidates, nodeName)
+	}
+	// sort by used usedPercentage, total capacity, then name
+	slices.SortFunc(candidates, func(i, j string) int {
+		ipu := abilities[i].PercentUsed
+		jpu := abilities[j].PercentUsed
+		if ipu != jpu {
+			if ipu < jpu {
+				return -1
+			}
+			return 1
+		}
+		ic := abilities[i].TotalCapacity
+		jc := abilities[j].TotalCapacity
+		if ic != jc {
+			if ic > jc {
+				return -1
+			}
+			return 1
+		}
+		if i < j {
+			return -1
+		}
+		if i > j {
+			return 1
+		}
+		log.Warn(r, "tied", i, j)
+		return 0 // shouldn't happen
+	})
+	return candidates
 }
 
 func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
@@ -181,10 +180,9 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 
 	oldStatus, hadOldStatus := r.nodeStatus[publisher]
 	r.nodeStatus[publisher] = NodeStatus{
-		Capacity:    update.StorageCapacity,
-		Used:        update.StorageUsed,
-		LastUpdated: time.Now(),
-		Jobs:        update.Jobs,
+		Capacity: update.StorageCapacity,
+		Used:     update.StorageUsed,
+		Jobs:     update.Jobs,
 	}
 
 	if hadOldStatus {

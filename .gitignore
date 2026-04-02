@@ -18,5 +18,9 @@ experiment_results/
 *.key
 *.csr
 *.pem
+.cache/
 repo/repo
 experiments/results/
+experiments/analysis_output/
+running/plogs/
+running/plogs2/
