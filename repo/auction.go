@@ -183,10 +183,11 @@ func (a *AuctionMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
 }
 
 func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availability {
+	startTime := time.Now()
 	auctionID := atomic.AddUint64(&a.auctionSeq, 1)
 	resultsName := a.repo.nodePrefix.Append(enc.NewGenericComponent(RESULTS_SUFFIX))
 	resultsName = resultsName.Append(enc.NewTimestampComponent(auctionID))
-	log.Info(a.repo, "runAuction_started", "auctionID", auctionID)
+	log.Info(a.repo, "runAuction_started", "auctionID", auctionID, "candidates", len(under))
 
 	peerMetrics := make(map[string]Availability)
 	myPrefix := a.repo.nodePrefix.String()
@@ -282,6 +283,8 @@ func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availa
 	// Wait for goroutines to finish calling ExpressR and for all callbacks to fire
 	wg.Wait()
 	callbackWg.Wait()
+	callbackWaitTime := time.Since(startTime)
+	log.Info(a.repo, "runAuction_callbacks_complete", "auctionID", auctionID, "callback_wait_ms", callbackWaitTime.Milliseconds(), "peers_responded", len(peers))
 
 	// Use a channel to signal timeout, running timer check in goroutine to avoid
 	// race condition where timer fires during Wait() and value is already available
@@ -296,12 +299,15 @@ func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availa
 	for {
 		select {
 		case <-timeoutCh:
-			log.Info(a.repo, "runAuction_timeout", "target", target.String(), "received", receivedCount, "total_peers", len(peers))
+			totalTime := time.Since(startTime)
+			log.Info(a.repo, "runAuction_timeout", "auctionID", auctionID, "target", target.String(), "received", receivedCount, "total_peers", len(peers), "total_ms", totalTime.Milliseconds())
 			return peerMetrics
 		case <-responsesCh:
 			receivedCount++
 			log.Debug(a.repo, "runAuction_bid_received", "peer", "unknown", "count", receivedCount, "total", len(peers))
 			if receivedCount == len(peers) {
+				totalTime := time.Since(startTime)
+				log.Info(a.repo, "runAuction_completed", "auctionID", auctionID, "received", receivedCount, "total_peers", len(peers), "total_ms", totalTime.Milliseconds())
 				return peerMetrics
 			}
 		}

@@ -398,7 +398,7 @@ def main():
         )
         dist_flag = f" --distribution {args.distribution}"
         auction_timeout_flag = (
-            " --auction-timeout 35s" if args.distribution == "auction" else ""
+            " --auction-timeout 1s" if args.distribution == "auction" else ""
         )
         cmd = f"{args.repo_bin} --event-log {event_log} --node-prefix {node_prefix} --signing-identity {signing_identity}{debug_flag}{storage_flags}{dist_flag}{auction_timeout_flag} > {stdout_log} 2>&1 &"
         host.cmd(f"mkdir -p /tmp/{host.name}")
