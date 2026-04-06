@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -182,9 +182,12 @@ func TestRepo_ReplicationLogic(t *testing.T) {
 		Target: target,
 	}
 
-	shouldClaim := repo.DetermineWinners(cmd.Target, repo.nodeStatus)
-	if shouldClaim == nil {
-		t.Error("Empty repo should claim first job")
+	stats := repo.checkUnder(cmd.Target)
+	if stats.Needed <= 0 {
+		t.Error("Empty repo should need replicas")
+	}
+	if len(stats.Candidates) == 0 {
+		t.Error("Empty repo should have candidates")
 	}
 }
 
@@ -207,9 +210,9 @@ func TestRepo_ReplicationAlreadySatisfied(t *testing.T) {
 	}
 	repo.mu.Unlock()
 
-	shouldClaim := repo.DetermineWinners(cmd.Target, repo.nodeStatus)
-	if shouldClaim != nil {
-		t.Error("Repo should not claim when replication factor already satisfied")
+	stats := repo.checkUnder(cmd.Target)
+	if stats.Needed > 0 {
+		t.Error("Repo should not need replicas when replication factor already satisfied")
 	}
 }
 
@@ -244,22 +247,20 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.nodeStatus["peer-node"] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.mu.Unlock()
 
-	winners := repo.DetermineWinners(cmd.Target, repo.nodeStatus)
-	if winners == nil {
-		t.Error("Repo should claim job when replication not satisfied")
+	stats := repo.checkUnder(cmd.Target)
+	if stats.Needed <= 0 {
+		t.Error("Repo should need replicas when replication not satisfied")
 	}
 
 	repo.addCommand(cmd)
@@ -308,32 +309,69 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 			if i != j {
 				repos[i].mu.Lock()
 				repos[i].nodeStatus[nodeNames[j]] = NodeStatus{
-					Jobs:        []enc.Name{},
-					Capacity:    1000000000,
-					Used:        0,
-					LastUpdated: time.Now(),
+					Jobs:     []enc.Name{},
+					Capacity: 1000000000,
+					Used:     0,
 				}
 				repos[i].mu.Unlock()
 			}
 		}
 	}
 
+	// Simulate what evaluateBatch does on the leader:
+	// 1. Get UnderStats for each target
+	// 2. Sort candidates by availability (storage usage)
+	// 3. Select first [Needed] candidates as winners
+
+	stats := repos[0].checkUnder(cmd.Target)
+	needed := stats.Needed
+	candidates := stats.Candidates
+
+	// Sort candidates (same logic as sortCandidates - by percent used, then capacity, then name)
+	slices.SortFunc(candidates, func(i, j string) int {
+		// Find percent used for each
+		iStatus := repos[0].nodeStatus[i]
+		jStatus := repos[0].nodeStatus[j]
+		iUsedPct := float64(iStatus.Used) / float64(iStatus.Capacity)
+		jUsedPct := float64(jStatus.Used) / float64(jStatus.Capacity)
+		if iUsedPct != jUsedPct {
+			if iUsedPct < jUsedPct {
+				return -1
+			}
+			return 1
+		}
+		if iStatus.Capacity != jStatus.Capacity {
+			if iStatus.Capacity > jStatus.Capacity {
+				return -1
+			}
+			return 1
+		}
+		if i < j {
+			return -1
+		}
+		if i > j {
+			return 1
+		}
+		return 0
+	})
+
+	// Select winners
+	winners := candidates[:min(needed, len(candidates))]
+
+	// Simulate claims
 	claimCount := 0
 	claimedBy := make([]string, 0)
-	for i := 0; i < nodeCount; i++ {
-		winners := repos[i].DetermineWinners(cmd.Target, repos[i].nodeStatus)
-		if winners != nil {
-			for _, w := range winners.Assignees {
-				if w.String() == nodeNames[i] {
-					repos[i].mu.Lock()
-					myStatus := repos[i].nodeStatus[repos[i].myNodeName()]
-					myStatus.Jobs = append(myStatus.Jobs, cmd.Target)
-					repos[i].nodeStatus[repos[i].myNodeName()] = myStatus
-					repos[i].mu.Unlock()
-					claimCount++
-					claimedBy = append(claimedBy, nodeNames[i])
-					break
-				}
+	for _, winner := range winners {
+		for i := 0; i < nodeCount; i++ {
+			if repos[i].myNodeName() == winner {
+				repos[i].mu.Lock()
+				myStatus := repos[i].nodeStatus[repos[i].myNodeName()]
+				myStatus.Jobs = append(myStatus.Jobs, cmd.Target)
+				repos[i].nodeStatus[repos[i].myNodeName()] = myStatus
+				repos[i].mu.Unlock()
+				claimCount++
+				claimedBy = append(claimedBy, winner)
+				break
 			}
 		}
 	}
@@ -376,217 +414,33 @@ func TestHydraLeaderSelection_SingleNode(t *testing.T) {
 	}
 }
 
-func TestHydraLeaderRedistribution(t *testing.T) {
-	nodeCount := 5
-	replicationFactor := 3
-	nodeNames := make([]string, nodeCount)
-	repos := make([]*Repo, nodeCount)
-
-	for i := 0; i < nodeCount; i++ {
-		nodeNames[i] = fmt.Sprintf("/ndn/repo/n%d", i)
-		repos[i] = NewRepo("/ndn/drepo", nodeNames[i], "/ndn/repo.teame.dev/repo", replicationFactor, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
-	}
-	defer cleanupRepos(repos)
-
-	target, _ := enc.NameFromStr("/ndn/target/test")
-	cmd := &tlv.Command{
-		Type:   "INSERT",
-		Target: target,
-	}
-
-	for i := 0; i < nodeCount; i++ {
-		repos[i].mu.Lock()
-		repos[i].nodeStatus[repos[i].myNodeName()] = NodeStatus{
-			Jobs:        []enc.Name{},
-			Capacity:    1000000000,
-			Used:        0,
-			LastUpdated: time.Now(),
-		}
-		repos[i].mu.Unlock()
-		repos[i].addCommand(cmd)
-	}
-
-	for i := 0; i < nodeCount; i++ {
-		for j := 0; j < nodeCount; j++ {
-			if i != j {
-				repos[i].mu.Lock()
-				repos[i].nodeStatus[nodeNames[j]] = NodeStatus{
-					Jobs:        []enc.Name{},
-					Capacity:    1000000000,
-					Used:        0,
-					LastUpdated: time.Now(),
-				}
-				repos[i].mu.Unlock()
-			}
-		}
-	}
-
-	repos[0].mu.Lock()
-	repos[0].nodeStatus["/ndn/repo/n3"] = NodeStatus{
-		Jobs:     []enc.Name{target},
-		Capacity: 1000000000,
-		Used:     0,
-	}
-	repos[0].mu.Unlock()
-
-	leader := selectLeader(repos[0].nodeStatus)
-	t.Logf("Leader: %s", leader)
-
-	if leader != "/ndn/repo/n0" {
-		t.Errorf("Expected leader /ndn/repo/n0, got %s", leader)
-	}
-
-	nonLeaderIdx := 1
-	nonLeader := repos[nonLeaderIdx]
-	nonLeader.mu.Lock()
-	nonLeader.nodeStatus["/ndn/repo/n3"] = NodeStatus{
-		Jobs:     []enc.Name{target},
-		Capacity: 1000000000,
-		Used:     0,
-	}
-	nonLeader.mu.Unlock()
-
-	// Non-leader should schedule re-evaluation when it detects under-replicated jobs
-	// Call evaluate directly - it will check amILeader(), find false, and schedule re-evaluation
-	nonLeader.evaluate(target)
-
-	nonLeader.redistMu.Lock()
-	_, hasScheduled := nonLeader.scheduledRedistributions[target.String()]
-	nonLeader.redistMu.Unlock()
-
-	if !hasScheduled {
-		t.Error("Non-leader should have scheduled re-evaluation after detecting node failure")
-	}
-}
-
-func TestHydraCancelWhenReplicated(t *testing.T) {
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
-	defer cleanupRepo(repo)
-
-	target, _ := enc.NameFromStr("/ndn/target/cancel-test")
-	cmd := &tlv.Command{
-		Type:   "INSERT",
-		Target: target,
-	}
-
-	repo.mu.Lock()
-	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
-		Capacity: 1000000000,
-		Used:     0,
-	}
-	repo.nodeStatus["peer-1"] = NodeStatus{
-		Jobs:     []enc.Name{target},
-		Capacity: 1000000000,
-		Used:     0,
-	}
-	repo.nodeStatus["peer-2"] = NodeStatus{
-		Jobs:     []enc.Name{target},
-		Capacity: 1000000000,
-		Used:     0,
-	}
-	repo.mu.Unlock()
-
-	repo.addCommand(cmd)
-	repo.scheduleReevaluationLoop(target)
-
-	repo.redistMu.Lock()
-	_, hasScheduled := repo.scheduledRedistributions[target.String()]
-	repo.redistMu.Unlock()
-
-	if !hasScheduled {
-		t.Error("Should have scheduled re-evaluation initially")
-	}
-
-	repo.cancelReevaluation(target)
-
-	repo.redistMu.Lock()
-	_, stillScheduled := repo.scheduledRedistributions[target.String()]
-	repo.redistMu.Unlock()
-
-	if stillScheduled {
-		t.Error("Re-evaluation should have been cancelled")
-	}
-}
-
-func TestHydraRescheduleOnAssignment(t *testing.T) {
-	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
-	defer cleanupRepo(repo)
-
-	target, _ := enc.NameFromStr("/ndn/target/reschedule-test")
-	cmd := &tlv.Command{
-		Type:   "INSERT",
-		Target: target,
-	}
-
-	repo.mu.Lock()
-	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
-		Capacity: 1000000000,
-		Used:     0,
-	}
-	repo.mu.Unlock()
-
-	repo.addCommand(cmd)
-	repo.scheduleReevaluationLoop(target)
-
-	repo.redistMu.Lock()
-	originalTimer := repo.scheduledRedistributions[target.String()]
-	repo.redistMu.Unlock()
-
-	if originalTimer == nil {
-		t.Fatal("Timer should be scheduled")
-	}
-
-	repo.scheduleReevaluationLoop(target)
-
-	repo.redistMu.Lock()
-	newTimer := repo.scheduledRedistributions[target.String()]
-	repo.redistMu.Unlock()
-
-	if newTimer == nil {
-		t.Fatal("Timer should still be scheduled after second call")
-	}
-
-	if originalTimer != newTimer {
-		t.Error("Timer should NOT be replaced when already scheduled (prevents duplicate timers)")
-	}
-}
-
 func TestAuctionHeartbeatUpdate_NewPeer(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "auction", nil, 500*time.Millisecond)
 	defer cleanupRepo(repo)
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now().Add(-10 * time.Second),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.mu.Unlock()
 
 	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
-	update := svs.SvSyncUpdate{
-		Name: peerName,
-		Boot: 1,
-		High: 1,
-		Low:  1,
-	}
 
-	auctionMech := repo.distributor.(*AuctionMechanism)
-	auctionMech.HandleHeartbeatUpdate(update)
+	// Simulate heartbeat update via resetHeartbeatTimer (the new mechanism)
+	repo.resetHeartbeatTimer(peerName.String())
 
-	repo.mu.Lock()
-	defer repo.mu.Unlock()
+	repo.heartbeatMu.Lock()
+	defer repo.heartbeatMu.Unlock()
 
-	status, exists := repo.nodeStatus[peerName.String()]
+	// Verify a heartbeat timer was created for the peer
+	timer, exists := repo.heartbeats[peerName.String()]
 	if !exists {
-		t.Fatal("Peer should have been added to nodeStatus")
+		t.Fatal("Heartbeat timer should have been created for new peer")
 	}
-
-	if time.Since(status.LastUpdated) > time.Second {
-		t.Error("LastUpdated should have been updated to now")
+	if timer == nil {
+		t.Fatal("Timer should not be nil")
 	}
 }
 
@@ -594,43 +448,37 @@ func TestAuctionHeartbeatUpdate_ExistingPeer(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "auction", nil, 500*time.Millisecond)
 	defer cleanupRepo(repo)
 
-	oldTime := time.Now().Add(-10 * time.Second)
 	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.nodeStatus[peerName.String()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: oldTime,
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.mu.Unlock()
 
-	update := svs.SvSyncUpdate{
-		Name: peerName,
-		Boot: 1,
-		High: 1,
-		Low:  1,
+	// Set up an initial timer
+	repo.resetHeartbeatTimer(peerName.String())
+
+	// Reset the timer (simulating a new heartbeat)
+	repo.resetHeartbeatTimer(peerName.String())
+
+	repo.heartbeatMu.Lock()
+	defer repo.heartbeatMu.Unlock()
+
+	// Verify timer still exists
+	timer, exists := repo.heartbeats[peerName.String()]
+	if !exists {
+		t.Fatal("Heartbeat timer should still exist for peer")
 	}
-
-	auctionMech := repo.distributor.(*AuctionMechanism)
-	auctionMech.HandleHeartbeatUpdate(update)
-
-	repo.mu.Lock()
-	defer repo.mu.Unlock()
-
-	status := repo.nodeStatus[peerName.String()]
-	if time.Since(status.LastUpdated) > time.Second {
-		t.Error("LastUpdated should have been updated to now for existing node")
-	}
-	if status.LastUpdated == oldTime {
-		t.Error("LastUpdated should have changed from old time")
+	if timer == nil {
+		t.Fatal("Timer should not be nil")
 	}
 }
 
@@ -640,10 +488,9 @@ func TestHydraHeartbeatUpdate_NewPeer(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.mu.Unlock()
 
@@ -664,37 +511,48 @@ func TestHydraHeartbeatUpdate_NewPeer(t *testing.T) {
 	repo.mu.Lock()
 	defer repo.mu.Unlock()
 
+	// Verify peer was added to nodeStatus
 	status, exists := repo.nodeStatus[peerName.String()]
 	if !exists {
 		t.Fatal("Peer should have been added to nodeStatus")
 	}
 
-	if time.Since(status.LastUpdated) > time.Second {
-		t.Error("LastUpdated should have been updated to now")
+	// Verify heartbeat timer was created
+	repo.heartbeatMu.Lock()
+	timer, timerExists := repo.heartbeats[peerName.String()]
+	repo.heartbeatMu.Unlock()
+
+	if !timerExists {
+		t.Fatal("Heartbeat timer should have been created for peer")
 	}
+	if timer == nil {
+		t.Fatal("Timer should not be nil")
+	}
+
+	_ = status // Avoid unused variable warning
 }
 
 func TestHydraHeartbeatUpdate_ExistingPeer(t *testing.T) {
 	repo := NewRepo("/ndn/drepo", "/ndn/repo/test", "/ndn/repo.teame.dev/repo", 3, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
 	defer cleanupRepo(repo)
 
-	oldTime := time.Now().Add(-10 * time.Second)
 	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.nodeStatus[peerName.String()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: oldTime,
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.mu.Unlock()
+
+	// Set up initial heartbeat timer
+	repo.resetHeartbeatTimer(peerName.String())
 
 	peerNodeUpdate := &tlv.NodeUpdate{
 		Jobs:            []enc.Name{},
@@ -712,13 +570,22 @@ func TestHydraHeartbeatUpdate_ExistingPeer(t *testing.T) {
 	repo.mu.Lock()
 	defer repo.mu.Unlock()
 
+	// Verify peer still exists in nodeStatus
 	status := repo.nodeStatus[peerName.String()]
-	if time.Since(status.LastUpdated) > time.Second {
-		t.Error("LastUpdated should have been updated to now for existing node")
+
+	// Verify heartbeat timer was reset
+	repo.heartbeatMu.Lock()
+	timer, timerExists := repo.heartbeats[peerName.String()]
+	repo.heartbeatMu.Unlock()
+
+	if !timerExists {
+		t.Fatal("Heartbeat timer should still exist for peer")
 	}
-	if status.LastUpdated == oldTime {
-		t.Error("LastUpdated should have changed from old time")
+	if timer == nil {
+		t.Fatal("Timer should not be nil")
 	}
+
+	_ = status // Avoid unused variable warning
 }
 
 func TestHeartbeatUpdate_ResetsTimer(t *testing.T) {
@@ -727,17 +594,15 @@ func TestHeartbeatUpdate_ResetsTimer(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
 	repo.nodeStatus[peerName.String()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.mu.Unlock()
 
@@ -774,10 +639,9 @@ func TestHeartbeatUpdate_NoTimerForSelf(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[selfName] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.mu.Unlock()
 
@@ -811,16 +675,14 @@ func TestHeartbeatTimeout_TriggersNodeDeath(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.nodeStatus[peerName.String()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.mu.Unlock()
 
@@ -857,22 +719,19 @@ func TestHeartbeatTimeout_OnlyTimedOutPeerRemoved(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.nodeStatus[peer1.String()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.nodeStatus[peer2.String()] = NodeStatus{
-		Jobs:        []enc.Name{},
-		Capacity:    1000000000,
-		Used:        0,
-		LastUpdated: time.Now(),
+		Jobs:     []enc.Name{},
+		Capacity: 1000000000,
+		Used:     0,
 	}
 	repo.mu.Unlock()
 

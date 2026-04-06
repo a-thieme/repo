@@ -10,6 +10,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -54,12 +55,34 @@ ndn = None
 def cleanup():
     global ndn
     info("\nCleaning up...\n")
-    if ndn:
+
+    # Use thread with timeout for ndn.stop() - can hang on large experiments
+    cleanup_done = threading.Event()
+    cleanup_error = [None]
+
+    def run_cleanup():
         try:
-            ndn.stop()
-        except:
-            pass
-    Minindn.cleanUp()
+            if ndn:
+                ndn.stop()
+        except Exception as e:
+            cleanup_error[0] = e
+        finally:
+            cleanup_done.set()
+
+    cleanup_thread = threading.Thread(target=run_cleanup)
+    cleanup_thread.daemon = True
+    cleanup_thread.start()
+
+    # Wait up to 30 seconds for cleanup, then force kill
+    if not cleanup_done.wait(timeout=30):
+        info("\nCleanup timeout expired, killing processes...\n")
+        # Send SIGKILL to entire process group
+        os.kill(os.getpid(), signal.SIGKILL)
+
+    try:
+        Minindn.cleanUp()
+    except:
+        pass
 
 
 def signal_handler(sig, frame):
@@ -374,7 +397,10 @@ def main():
             f"{no_release_flag} --max-join-growth-rate {args.max_join_growth_rate}"
         )
         dist_flag = f" --distribution {args.distribution}"
-        cmd = f"{args.repo_bin} --event-log {event_log} --node-prefix {node_prefix} --signing-identity {signing_identity}{debug_flag}{storage_flags}{dist_flag} > {stdout_log} 2>&1 &"
+        auction_timeout_flag = (
+            " --auction-timeout 35s" if args.distribution == "auction" else ""
+        )
+        cmd = f"{args.repo_bin} --event-log {event_log} --node-prefix {node_prefix} --signing-identity {signing_identity}{debug_flag}{storage_flags}{dist_flag}{auction_timeout_flag} > {stdout_log} 2>&1 &"
         host.cmd(f"mkdir -p /tmp/{host.name}")
         host.cmd(cmd)
         info(f"  Started repo on {host.name} with prefix {node_prefix}\n")

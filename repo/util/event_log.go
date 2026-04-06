@@ -39,6 +39,21 @@ const (
 	EventAuctionResults EventType = "auction_results"
 	EventAuctionBid     EventType = "auction_bid"
 	EventAuctionDelayed EventType = "auction_delayed"
+
+	// New unified logging events
+	EventCommandIssued         EventType = "command_issued"       // Producer sends command
+	EventEvaluationStarted     EventType = "evaluation_started"   // evaluateBatch called
+	EventLeaderDetermined      EventType = "leader_determined"    // Leadership computed
+	EventWinnersSelected       EventType = "winners_selected"     // Winners selected for job
+	EventAssignmentCreated     EventType = "assignment_created"   // JobAssignment created
+	EventAssignmentPublished   EventType = "assignment_published" // Assignment published via SVS
+	EventPendingAssignment     EventType = "pending_assignment"   // Assignment buffered
+	EventSelfPublication       EventType = "self_publication"     // Ignored own SVS msg
+	EventPeerUp                EventType = "peer_up"              // Heartbeat received (peer alive)
+	EventPeerDown              EventType = "peer_down"            // Node declared dead
+	EventReevaluationScheduled EventType = "reevaluation_scheduled"
+	EventReevaluationCancelled EventType = "reevaluation_cancelled"
+	EventLeaderChanged         EventType = "leader_changed"
 )
 
 type Event struct {
@@ -48,6 +63,7 @@ type Event struct {
 	Name               string             `json:"name,omitempty"`
 	Target             string             `json:"target,omitempty"`
 	CommandID          string             `json:"cmdId,omitempty"`
+	CorrelationID      string             `json:"correlationId,omitempty"` // Command target used for cross-node correlation
 	SequenceNum        uint64             `json:"seq,omitempty"`
 	Type               string             `json:"type,omitempty"`
 	From               string             `json:"from,omitempty"`
@@ -75,6 +91,14 @@ type Event struct {
 	DuplicateSeqCount  uint64             `json:"duplicateSeqCount,omitempty"`
 	PublishCount       uint64             `json:"publishCount,omitempty"`
 	RepublishCount     uint64             `json:"republishCount,omitempty"`
+
+	// New fields for enhanced correlation and leader tracking
+	Leader            string `json:"leader,omitempty"`
+	LeaderChanged     bool   `json:"leaderChanged,omitempty"`
+	AuctionID         uint64 `json:"auctionId,omitempty"`
+	Peer              string `json:"peer,omitempty"`
+	WinnerCount       int    `json:"winnerCount,omitempty"`
+	ReevaluationDelay string `json:"reevaluationDelay,omitempty"`
 }
 
 type EventLogger struct {

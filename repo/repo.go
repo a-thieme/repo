@@ -53,17 +53,14 @@ type Repo struct {
 
 	pendingAssignments map[string]*tlv.JobAssignment
 
-	scheduledRedistributions map[string]*time.Timer
-	redistMu                 sync.Mutex
-
 	heartbeats  map[string]*time.Timer
 	heartbeatMu sync.Mutex
 
-	eventLogger  util.Logger
+	eventLogger  util.UnifiedLogger
 	countingFace *util.CountingFace
 }
 
-func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, replicationFactor int, noRelease bool, maxJoinGrowthRate uint64, heartbeatInterval time.Duration, distributionMechanism string, eventLogger util.Logger, auctionTimeout time.Duration) *Repo {
+func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, replicationFactor int, noRelease bool, maxJoinGrowthRate uint64, heartbeatInterval time.Duration, distributionMechanism string, eventLogger util.UnifiedLogger, auctionTimeout time.Duration) *Repo {
 	gp, _ := enc.NameFromStr(groupPrefix)
 	np, _ := enc.NameFromStr(nodePrefix)
 	si, _ := enc.NameFromStr(signingIdentity)
@@ -78,26 +75,25 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 	}
 
 	if eventLogger == nil {
-		eventLogger = &util.NullEventLogger{}
+		eventLogger = &util.NullUnifiedLogger{}
 	}
 
 	r := &Repo{
-		groupPrefix:              gp,
-		notifyPrefix:             nf,
-		nodePrefix:               np,
-		signingIdentity:          si,
-		nodeStatus:               make(map[string]NodeStatus),
-		commands:                 make(map[string]*tlv.Command),
-		jobStorageUsage:          make(map[string]uint64),
-		rf:                       replicationFactor,
-		maxJoinGrowthRate:        maxJoinGrowthRate,
-		heartbeatInterval:        heartbeatInterval,
-		auctionTimeout:           auctionTimeout,
-		distributionMechanism:    distributionMechanism,
-		eventLogger:              eventLogger,
-		pendingAssignments:       make(map[string]*tlv.JobAssignment),
-		scheduledRedistributions: make(map[string]*time.Timer),
-		heartbeats:               make(map[string]*time.Timer),
+		groupPrefix:           gp,
+		notifyPrefix:          nf,
+		nodePrefix:            np,
+		signingIdentity:       si,
+		nodeStatus:            make(map[string]NodeStatus),
+		commands:              make(map[string]*tlv.Command),
+		jobStorageUsage:       make(map[string]uint64),
+		rf:                    replicationFactor,
+		maxJoinGrowthRate:     maxJoinGrowthRate,
+		heartbeatInterval:     heartbeatInterval,
+		auctionTimeout:        auctionTimeout,
+		distributionMechanism: distributionMechanism,
+		eventLogger:           eventLogger,
+		pendingAssignments:    make(map[string]*tlv.JobAssignment),
+		heartbeats:            make(map[string]*time.Timer),
 	}
 
 	r.distributor = NewDistributionMechanism(r, distributionMechanism)
@@ -240,7 +236,7 @@ func (r *Repo) onNewCommandFromProducer(name enc.Name, content enc.Wire, reply f
 		return
 	}
 
-	log.Debug(r, "command_parsed", "type", cmd.Type, "target", cmd.Target.String())
+	log.Info(r, "command_parsed", "type", cmd.Type, "target", cmd.Target.String(), "correlationID", cmd.Target.String())
 
 	response := tlv.StatusResponse{
 		Target: cmd.Target,
@@ -251,7 +247,7 @@ func (r *Repo) onNewCommandFromProducer(name enc.Name, content enc.Wire, reply f
 	}
 
 	r.addCommand(cmd)
-	log.Debug(r, "command_added", "target", cmd.Target.String())
+	log.Info(r, "command_added", "target", cmd.Target.String(), "correlationID", cmd.Target.String())
 	r.eventLogger.LogCommandReceived(cmd.Type, cmd.Target.String())
 
 	nodeUpdate := r.distributor.OnCommand(cmd)
@@ -260,7 +256,7 @@ func (r *Repo) onNewCommandFromProducer(name enc.Name, content enc.Wire, reply f
 	}
 	nodeUpdate.NewCommand = cmd
 	r.publishUpdate(nodeUpdate)
-	r.scheduleReevaluationLoop(cmd.Target)
+	go r.evaluate(cmd.Target)
 }
 
 func (r *Repo) onGroupSync(pub svs.SvsPub) {
@@ -280,26 +276,31 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 	r.updateNodeStatus(publisherName, update)
 	shouldPublishJobs := false
 	if len(update.JobAssignments) > 0 {
-		log.Debug(r, "groupSync_processing_assignments", "count", len(update.JobAssignments))
+		log.Info(r, "groupSync_processing_assignments", "count", len(update.JobAssignments), "publisher", publisherName)
 		shouldPublishJobs = r.ProcessJobAssignments(update.JobAssignments)
 	}
 	r.eventLogger.LogNodeUpdate(publisherName, update.Jobs, update.StorageCapacity, update.StorageUsed)
 	if update.NewCommand != nil {
 		cmd := update.NewCommand
 		targetStr := cmd.Target.String()
-		log.Debug(r, "groupSync_processing_newCommand", "target", targetStr)
+		log.Info(r, "groupSync_processing_newCommand", "target", targetStr, "correlationID", targetStr, "publisher", publisherName)
 		r.addCommand(cmd)
 		r.eventLogger.LogCommandSynced(update.NewCommand.Type, targetStr, publisherName)
+		var assignment *tlv.JobAssignment
+		var ok bool
 		r.mu.Lock()
-		if assignment, ok := r.pendingAssignments[targetStr]; ok {
+		if assignment, ok = r.pendingAssignments[targetStr]; ok {
 			log.Info(r, "checkPendingAssignment_found", "target", targetStr)
 			delete(r.pendingAssignments, targetStr)
+		}
+		r.mu.Unlock()
+
+		if ok {
 			if r.ProcessJobAssignment(assignment) {
 				shouldPublishJobs = true
 			}
 		}
-		r.mu.Unlock()
-		r.evaluate(update.NewCommand.Target)
+		go r.evaluate(update.NewCommand.Target)
 	}
 	if shouldPublishJobs {
 		r.distributor.PublishJobs()
@@ -313,13 +314,6 @@ func (r *Repo) Close() error {
 		delete(r.heartbeats, name)
 	}
 	r.heartbeatMu.Unlock()
-
-	r.redistMu.Lock()
-	for target, t := range r.scheduledRedistributions {
-		t.Stop()
-		delete(r.scheduledRedistributions, target)
-	}
-	r.redistMu.Unlock()
 
 	if r.distributor != nil {
 		r.distributor.Stop()

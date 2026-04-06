@@ -1,8 +1,8 @@
 package main
 
 import (
+	"fmt"
 	"slices"
-	"time"
 
 	"github.com/a-thieme/repo/tlv"
 
@@ -15,14 +15,14 @@ func (r *Repo) ProcessJobAssignment(assignment *tlv.JobAssignment) bool {
 }
 
 func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) bool {
-	log.Debug(r, "ProcessJobAssignments_enter", "count", len(assignments))
+	log.Info(r, "process_job_assignments_start", "count", len(assignments))
 	addedJob := false
 
 	// iterate through assignments,
 	for _, assignment := range assignments {
 		target := assignment.Target
 		targetStr := target.String()
-		log.Debug(r, "ProcessJobAssignment_processing", "target", targetStr, "assignees", assignment.Assignees)
+		log.Info(r, "process_job_assignment", "target", targetStr, "assignees", assignment.Assignees, "correlationID", targetStr)
 
 		// skip assignment that isn't for us
 		if !r.amAssignee(assignment) {
@@ -49,54 +49,43 @@ func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) bool {
 
 		// we are assigned and it still needs to be done
 		if r.countReplication(target) < r.rf {
+			// Log decision made event
+			currentRep := r.countReplication(target)
+			shouldClaim := currentRep < r.rf
+			reason := ""
+			if !shouldClaim {
+				reason = "replication_satisfied"
+			}
+			assignees := make([]string, len(assignment.Assignees))
+			for i, a := range assignment.Assignees {
+				assignees[i] = a.String()
+			}
+			r.eventLogger.LogDecisionMade(
+				targetStr,
+				shouldClaim,
+				reason,
+				fmt.Sprintf("current=%d rf=%d", currentRep, r.rf),
+				currentRep,
+				r.rf,
+				assignees,
+				nil,
+				nil,
+			)
 			if r.doCmd(cmd) {
 				log.Info(r, "processJobAssignments_will_do_job", "target", targetStr, "myNode", r.myNodeName())
 				addedJob = true
 			}
-			r.scheduleReevaluationLoop(target)
 		}
 	}
 	return addedJob
 }
 
-// redistMu thread-safe
-func (r *Repo) scheduleReevaluationLoop(target enc.Name) {
-	targetStr := target.String()
-	// NOTE: this should be longer than it takes for a distribution to happen
-	// 10 seconds gives enough time for SVS propagation and auction completion
-	delay := 10 * time.Second
-
-	r.redistMu.Lock()
-	defer r.redistMu.Unlock()
-
-	// if a redistribution is already scheduled, then let it continue
-	if _, exists := r.scheduledRedistributions[targetStr]; exists {
-		return
-	}
-
-	log.Info(r, "scheduleReevaluationLoop_scheduled", "target", targetStr, "delay", delay.String(), "isLeader", r.amILeader())
-	r.scheduledRedistributions[targetStr] = time.AfterFunc(delay, func() {
-		r.evaluate(target)
-	})
-}
-
 func (r *Repo) evaluate(target enc.Name) {
-	r.evaluateBatch([]enc.Name{target})
-}
-
-// redistMu thread safe
-func (r *Repo) cancelReevaluation(target enc.Name) {
-	targetStr := target.String()
-	r.redistMu.Lock()
-	defer r.redistMu.Unlock()
-	if t, ok := r.scheduledRedistributions[targetStr]; ok {
-		t.Stop()
-		delete(r.scheduledRedistributions, targetStr)
-	}
+	go r.evaluateBatch([]enc.Name{target})
 }
 
 func (r *Repo) evaluateBatch(jobs []enc.Name) {
-	log.Debug(r, "evaluateBatch", "jobCount", len(jobs))
+	log.Info(r, "evaluate_batch_start", "jobCount", len(jobs))
 	if len(jobs) == 0 {
 		return
 	}
@@ -105,20 +94,20 @@ func (r *Repo) evaluateBatch(jobs []enc.Name) {
 		stats := r.checkUnder(target)
 		if stats.Needed > 0 {
 			allUnder = append(allUnder, stats)
-			r.scheduleReevaluationLoop(target)
-		} else {
-			r.cancelReevaluation(target)
 		}
 	}
 	if !r.amILeader() {
+		log.Info(r, "evaluate_batch_not_leader", "jobCount", len(jobs))
 		return
 	}
+	log.Info(r, "evaluate_batch_leader", "jobCount", len(allUnder))
 	availabilities := r.distributor.GetAvailability(allUnder)
 	sorted := r.sortCandidates(availabilities)
 	// for under in allUnder
 	// 	get first needed candidates and make it a job assignment
 	assignments := []*tlv.JobAssignment{}
 	for _, under := range allUnder {
+		// Select winners from candidates
 		added := 0
 		winners := []string{}
 		for _, candidate := range sorted {
@@ -130,11 +119,33 @@ func (r *Repo) evaluateBatch(jobs []enc.Name) {
 				}
 			}
 		}
+
+		// Log winner selection for this target
+		log.Info(r, "winners_selected",
+			"target", under.Target.String(),
+			"needed", under.Needed,
+			"winners", winners,
+			"candidates", under.Candidates,
+			"correlationID", under.Target.String())
+
+		// Log auction winners event
+		winnerScores := make(map[string]float64)
+		for _, winner := range winners {
+			if avail, ok := availabilities[winner]; ok {
+				winnerScores[winner] = avail.PercentUsed
+			}
+		}
+		r.eventLogger.LogAuctionWinners(under.Target.String(), under.Candidates, winnerScores, winners)
+
 		assignments = append(assignments, &tlv.JobAssignment{
 			Target:    under.Target,
 			Assignees: stringNamesToEncNames(winners),
 		})
+
+		// Log job assignment event
+		r.eventLogger.LogJobAssignment(under.Target.String(), winners)
 	}
+	log.Info(r, "assignments_published", "count", len(assignments))
 	r.distributor.PublishAssignments(assignments)
 }
 
@@ -174,7 +185,7 @@ func (r *Repo) sortCandidates(abilities map[string]Availability) []string {
 }
 
 func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
-	log.Debug(r, "updateNodeStatus", "publisher", publisher, "jobs", len(update.Jobs), "capacity", update.StorageCapacity, "used", update.StorageUsed)
+	log.Info(r, "node_status_updated", "publisher", publisher, "jobs", len(update.Jobs), "capacity", update.StorageCapacity, "used", update.StorageUsed)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -185,7 +196,9 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 		Jobs:     update.Jobs,
 	}
 
-	if hadOldStatus {
+	// Only check for job removals if the update contains an explicit Jobs field
+	// A nil Jobs field means "no change to jobs" - not "all jobs removed"
+	if hadOldStatus && update.Jobs != nil {
 		oldJobs := make(map[string]bool)
 		for _, job := range oldStatus.Jobs {
 			oldJobs[job.String()] = true
@@ -203,7 +216,7 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 		}
 
 		if len(removedJobs) > 0 {
-			log.Debug(r, "updateNodeStatus_jobsChanged", "removedJobs", len(removedJobs))
+			log.Info(r, "node_status_jobs_removed", "publisher", publisher, "removedJobs", len(removedJobs))
 			go r.evaluateBatch(removedJobs)
 		}
 	}

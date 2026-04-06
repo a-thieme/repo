@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"hash/fnv"
 	"slices"
 	"time"
@@ -72,7 +73,7 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 	r.heartbeatMu.Lock()
 	defer r.heartbeatMu.Unlock()
 
-	log.Debug(r, "resetHeartbeatTimer", "node", nodeName)
+	log.Info(r, "heartbeat_timer_reset", "node", nodeName, "myNode", r.myNodeName())
 
 	if nodeName == r.myNodeName() {
 		return
@@ -80,13 +81,25 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 
 	r.eventLogger.LogHeartbeatReceived(nodeName)
 
+	// Ensure node exists in nodeStatus with default values if not present
+	// This is needed for auction mode where we don't publish storage stats to main SVS
+	r.mu.Lock()
+	if _, exists := r.nodeStatus[nodeName]; !exists {
+		r.nodeStatus[nodeName] = NodeStatus{
+			Capacity: 0,
+			Used:     0,
+			Jobs:     []enc.Name{},
+		}
+		log.Info(r, "heartbeat_node_added_to_status", "node", nodeName)
+	}
+	r.mu.Unlock()
+
 	timeout := r.heartbeatInterval*3 + 500*time.Millisecond
 	if t, exists := r.heartbeats[nodeName]; exists {
 		t.Stop()
 		delete(r.heartbeats, nodeName)
 	}
 	r.heartbeats[nodeName] = time.AfterFunc(timeout, func() {
-		log.Debug(r, "nodeDied", "node", nodeName)
 		r.mu.Lock()
 		status, exists := r.nodeStatus[nodeName]
 		if !exists {
@@ -94,8 +107,11 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 			return
 		}
 		delete(r.nodeStatus, nodeName)
-		r.eventLogger.LogNodeDetectedDead(nodeName, len(status.Jobs))
+		jobsCount := len(status.Jobs)
 		r.mu.Unlock()
+
+		log.Warn(r, "node_failure_detected", "deadNode", nodeName, "orphanedJobs", jobsCount)
+		r.eventLogger.LogNodeDetectedDead(nodeName, jobsCount)
 
 		r.stopHeartbeatTimer(nodeName)
 		r.evaluateBatch(status.Jobs)
@@ -133,7 +149,7 @@ func (r *Repo) amIDoingJobStr(targetStr string) bool {
 	return doing
 }
 
-func (r *Repo) SetEventLogger(logger util.Logger) {
+func (r *Repo) SetEventLogger(logger util.UnifiedLogger) {
 	r.eventLogger = logger
 }
 
@@ -147,7 +163,7 @@ func (r *Repo) getStorageStats() (capacity uint64, used uint64) {
 func (r *Repo) addCommand(cmd *tlv.Command) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	log.Debug(r, "addCommand", "target", cmd.Target.String(), "type", cmd.Type)
+	log.Info(r, "command_added_internal", "target", cmd.Target.String(), "type", cmd.Type, "correlationID", cmd.Target.String())
 	r.commands[cmd.Target.String()] = cmd
 }
 
@@ -217,21 +233,23 @@ func (r *Repo) checkUnder(target enc.Name) UnderStats {
 func (r *Repo) countReplication(target enc.Name) int {
 	r.mu.Lock()
 	count := 0
-	for _, status := range r.nodeStatus {
+	nodeStatusDebug := make(map[string]int)
+	for nodeName, status := range r.nodeStatus {
+		nodeJobCount := 0
 		for _, job := range status.Jobs {
 			if job.Equal(target) {
-				count++
-				break
+				nodeJobCount++
 			}
+		}
+		nodeStatusDebug[nodeName] = nodeJobCount
+		if nodeJobCount > 0 {
+			count++
 		}
 	}
 	r.mu.Unlock()
 
-	log.Debug(r, "countReplication", "target", target.String(), "count", count, "rf", r.rf)
+	log.Info(r, "countReplication", "target", target.String(), "count", count, "rf", r.rf, "nodeStatus", fmt.Sprintf("%v", nodeStatusDebug), "correlationID", target.String())
 
-	if count >= r.rf {
-		r.cancelReevaluation(target)
-	}
 	return count
 }
 
@@ -255,7 +273,7 @@ func (r *Repo) doCmd(cmd *tlv.Command) bool {
 	target := cmd.Target
 	targetStr := target.String()
 
-	log.Debug(r, "doCmd", "target", targetStr, "type", cmd.Type)
+	log.Info(r, "job_claimed", "target", targetStr, "type", cmd.Type, "correlationID", targetStr)
 
 	r.mu.Lock()
 	status := r.nodeStatus[r.myNodeName()]

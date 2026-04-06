@@ -158,8 +158,8 @@ func main() {
 		return
 	}
 
-	log.Default().SetLevel(log.LevelTrace)
-	fmt.Println("starting")
+	log.Default().SetLevel(log.LevelInfo)
+	log.Info(nil, "producer_starting", "count", *count, "rate", *rate, "type", *cmdType)
 	engine := engine.NewBasicEngine(engine.NewDefaultFace())
 	engine.Start()
 
@@ -223,24 +223,28 @@ func main() {
 			Target: target,
 		}
 
-		log.Debug(nil, "producer_command_created", "type", commandType, "target", target.String())
+		targetStr := target.String()
+		log.Info(nil, "command_issued", "type", commandType, "target", targetStr, "correlationID", targetStr)
 
 		done := make(chan struct{})
 
 		fmt.Printf("Sending command %d/%d (type=%s)...\n", i+1, *count, commandType)
-		log.Debug(nil, "producer_sending_command", "attempt", i+1, "total", *count)
+		log.Info(nil, "command_send_started", "attempt", i+1, "total", *count, "correlationID", targetStr)
 		ExpressCommand(client, notify, target, command.Encode(), *retries,
 			func(w enc.Wire, e error) {
 				defer close(done)
 				if e != nil {
+					log.Error(nil, "command_send_failed", "correlationID", targetStr, "error", e.Error())
 					fmt.Println("Error:", e.Error())
 					return
 				}
 				sr, err := tlv.ParseStatusResponse(enc.NewWireView(w), false)
 				if err != nil {
+					log.Error(nil, "command_response_parse_failed", "correlationID", targetStr, "error", err.Error())
 					fmt.Println("Parse Error:", err.Error())
 					return
 				}
+				log.Info(nil, "command_acked", "target", sr.Target.String(), "status", sr.Status, "correlationID", targetStr)
 				fmt.Println("Target:", sr.Target)
 				fmt.Println("Status:", sr.Status)
 			})
@@ -255,5 +259,6 @@ func main() {
 	}
 
 	engine.Stop()
+	log.Info(nil, "producer_finished", "count", *count)
 	fmt.Println("finished")
 }

@@ -22,7 +22,7 @@ func main() {
 	heartbeatInterval := flag.Duration("heartbeat-interval", 5*time.Second, "Heartbeat interval for node status updates")
 	replicationFactor := flag.Int("replication-factor", 3, "Replication factor for data replication")
 	distribution := flag.String("distribution", "hydra", "Distribution mechanism: hydra, auction")
-	auctionTimeout := flag.Duration("auction-timeout", 6000*time.Millisecond, "Auction timeout for waiting for bid responses")
+	auctionTimeout := flag.Duration("auction-timeout", 35*time.Second, "Auction timeout for waiting for bid responses")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 
@@ -34,7 +34,7 @@ func main() {
 
 	repo := NewRepo("/ndn/drepo", *nodePrefix, *signingIdentity, *replicationFactor, *noRelease, *maxJoinGrowthRate, *heartbeatInterval, *distribution, nil, *auctionTimeout)
 
-	eventLogger, err := util.NewEventLogger(*eventLogPath, repo.nodePrefix.String())
+	eventLogger, err := util.NewStructuredLogger(repo.nodePrefix.String(), *eventLogPath)
 	if err != nil {
 		log.Fatal(nil, "Failed to create event logger", "err", err)
 	}

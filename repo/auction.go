@@ -234,7 +234,8 @@ func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availa
 				Auctioneer:  a.repo.nodePrefix,
 			}
 
-			log.Info(a.repo, "runAuction_sending_bid_interest", "peer", peer, "bidName", bidName.String())
+			sendTime := time.Now()
+			log.Info(a.repo, "runAuction_sending_bid_interest", "peer", peer, "bidName", bidName.String(), "sendTime", sendTime.UnixMilli())
 			a.repo.client.ExpressR(ndn.ExpressRArgs{
 				Name: bidName,
 				Config: &ndn.InterestConfig{
@@ -242,16 +243,17 @@ func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availa
 					MustBeFresh: true,
 				},
 				AppParam: metricReq.Encode(),
-				Retries:  3,
+				Retries:  0,
 				Callback: func(args ndn.ExpressCallbackArgs) {
 					defer callbackWg.Done()
 
+					elapsed := time.Since(sendTime).Milliseconds()
 					if args.Result != ndn.InterestResultData {
-						log.Warn(a.repo, "runAuction_bid_failed", "peer", peer, "result", args.Result)
+						log.Warn(a.repo, "runAuction_bid_failed", "peer", peer, "result", args.Result, "elapsed_ms", elapsed)
 						return
 					}
 
-					log.Info(a.repo, "runAuction_bid_received", "peer", peer, "result", args.Result)
+					log.Info(a.repo, "runAuction_bid_received", "peer", peer, "result", args.Result, "elapsed_ms", elapsed)
 					metricResp, err := tlv.ParseNodeUpdate(enc.NewWireView(args.Data.Content()), false)
 					if err != nil {
 						log.Warn(a.repo, "runAuction_response_parse_failed", "peer", peer, "err", err)
@@ -281,10 +283,19 @@ func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availa
 	wg.Wait()
 	callbackWg.Wait()
 
+	// Use a channel to signal timeout, running timer check in goroutine to avoid
+	// race condition where timer fires during Wait() and value is already available
+	// when we reach the select statement
+	timeoutCh := make(chan struct{})
+	go func() {
+		<-auctionTimer.C
+		close(timeoutCh)
+	}()
+
 	receivedCount := 0
 	for {
 		select {
-		case <-auctionTimer.C:
+		case <-timeoutCh:
 			log.Info(a.repo, "runAuction_timeout", "target", target.String(), "received", receivedCount, "total_peers", len(peers))
 			return peerMetrics
 		case <-responsesCh:
@@ -299,7 +310,8 @@ func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availa
 
 func (a *AuctionMechanism) onBidInterest(args ndn.InterestHandlerArgs) {
 	interest := args.Interest
-	log.Debug(a.repo, "onBidInterest_received", "name", interest.Name().String())
+	recvTime := time.Now()
+	log.Debug(a.repo, "onBidInterest_received", "name", interest.Name().String(), "recvTime", recvTime.UnixMilli())
 
 	appParam := interest.AppParam()
 	if len(appParam) == 0 {
@@ -333,10 +345,15 @@ func (a *AuctionMechanism) onBidInterest(args ndn.InterestHandlerArgs) {
 		return
 	}
 
-	log.Debug(a.repo, "replyingToBid", "name", resName.String())
+	replyStartTime := time.Now()
+	log.Debug(a.repo, "replyingToBid", "name", resName.String(), "replyStartTime", replyStartTime.UnixMilli())
 	if err := args.Reply(data.Wire); err != nil {
 		log.Error(a, "bidReply", "failed", resName.String(), "err", err)
 	}
+	replyEndTime := time.Now()
+	log.Debug(a.repo, "replyingToBid_done", "name", resName.String(), "replyTime", replyEndTime.UnixMilli(), "total_elapsed_ms", replyEndTime.Sub(recvTime).Milliseconds())
+	// Also store in local content store so retransmitted interests can fetch from CS
+	a.repo.client.Store().Put(resName, data.Wire.Join())
 
 	resultsName := metricReq.ResultsName
 	target := metricReq.Target
