@@ -176,7 +176,7 @@ def main():
     parser.add_argument(
         "--no-release",
         action="store_true",
-        help="Disable automatic job release when storage exceeds 75%",
+        help="Disable automatic job release when storage exceeds 75%%",
     )
     parser.add_argument(
         "--max-join-growth-rate",

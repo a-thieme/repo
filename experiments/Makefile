@@ -1,4 +1,4 @@
-.PHONY: build keys image calibrate run single shell results clean clean-all help compare compare-run compare-analyze
+.PHONY: build keys image calibrate run single shell results clean clean-all help compare compare-run compare-analyze test test-quick test-auction test-hydra test-smoke
 
 # === Configuration ===
 # Experiment settings
@@ -88,7 +88,7 @@ cal_iter_%: pre_calibrate
 		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
 		-v /lib/modules:/lib/modules \
 		-v "$$(cd $$iter_dir && pwd)":/results \
-		mini-ndn-integration \
+		--entrypoint /bin/sh mini-ndn-integration \
 		-c "python3 /usr/local/bin/runner.py --node-count $(CALIBRATE_NODES) --timeout 120 --replication-factor $(RF) --routing-wait $$routing_wait --results-dir /results --producer-count 1 --command-count 1 --command-rate 1 --distribution $(DISTRIBUTION)" \
 		> "$$iter_dir/docker.log" 2>&1; \
 	if [ -f "$$iter_dir/metadata.json" ]; then \
@@ -164,7 +164,7 @@ single:
 		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
 		-v /lib/modules:/lib/modules \
 		-v "$$result_dir":/results \
-		mini-ndn-integration \
+		--entrypoint /bin/sh mini-ndn-integration \
 		-c "python3 /usr/local/bin/runner.py \
 			--node-count $(NODES) \
 			--timeout $(TIMEOUT) \
@@ -177,7 +177,10 @@ single:
 			--command-type $(COMMAND_TYPE) \
 			--join-ratio $(JOIN_RATIO) \
 			--distribution $(DISTRIBUTION)$${debug_arg}$${failure_args}" \
-  		> "$$result_dir/docker.log" 2>&1
+   		> "$$result_dir/docker.log" 2>&1; \
+	echo ""; \
+	echo "=== Analyzing Results ==="; \
+	python3 $(HELPERS_PY) collect "$$result_dir" --show
 
 # === Debugging ===
 
@@ -217,6 +220,112 @@ clean-all:
 	@docker system prune -f 2>/dev/null || true
 	@echo "Clean complete."
 
+# === Fix Verification Tests ===
+
+TEST_RESULTS_DIR := $(RESULTS_DIR)/test_fix
+
+test: test-smoke test-auction test-hydra
+	@echo ""
+	@echo "=== All Fix Tests Passed ==="
+
+test-smoke:
+	@echo "=== Running Smoke Test (4 nodes, auction) ==="
+	@mkdir -p $(TEST_RESULTS_DIR)/smoke
+	@docker run --rm --privileged -m 4g --cpus 2 \
+		-v /lib/modules:/lib/modules \
+		-v "$(shell pwd)/$(TEST_RESULTS_DIR)/smoke":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count 4 \
+			--timeout 60 \
+			--replication-factor 3 \
+			--routing-wait 30 \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 10 \
+			--command-rate 4 \
+			--command-type insert \
+			--join-ratio 0.5 \
+			--distribution auction" \
+		> $(TEST_RESULTS_DIR)/smoke/docker.log 2>&1
+	@if grep -q "TEST PASSED" $(TEST_RESULTS_DIR)/smoke/docker.log; then \
+		echo "  ✓ Smoke test passed"; \
+		grep -h "heartbeat_received" $(TEST_RESULTS_DIR)/smoke/events-*.jsonl 2>/dev/null | wc -l | xargs -I {} echo "    Heartbeat events: {}"; \
+		grep -h "node_failure_detected" $(TEST_RESULTS_DIR)/smoke/events-*.jsonl 2>/dev/null | wc -l | xargs -I {} echo "    Node failures: {}"; \
+		echo ""; \
+		echo "=== Analyzing Results ==="; \
+		python3 $(HELPERS_PY) collect $(TEST_RESULTS_DIR)/smoke --show; \
+	else \
+		echo "  ✗ Smoke test failed"; \
+		tail -20 $(TEST_RESULTS_DIR)/smoke/docker.log; \
+		exit 1; \
+	fi
+
+test-quick: test-smoke
+	@echo "=== Quick test passed ==="
+
+test-auction:
+	@echo "=== Running Auction Test (24 nodes, 24 producers) ==="
+	@mkdir -p $(TEST_RESULTS_DIR)/auction_24
+	@docker run --rm --privileged -m 8g --cpus 4 \
+		-v /lib/modules:/lib/modules \
+		-v "$(shell pwd)/$(TEST_RESULTS_DIR)/auction_24":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count 24 \
+			--timeout 120 \
+			--replication-factor 3 \
+			--routing-wait 125 \
+			--results-dir /results \
+			--producer-count 24 \
+			--command-count 20 \
+			--command-rate 4 \
+			--command-type insert \
+			--join-ratio 0.5 \
+			--distribution auction" \
+		> $(TEST_RESULTS_DIR)/auction_24/docker.log 2>&1
+	@if grep -q "TEST PASSED" $(TEST_RESULTS_DIR)/auction_24/docker.log; then \
+		echo "  ✓ Auction test passed"; \
+		echo ""; \
+		echo "=== Analyzing Results ==="; \
+		python3 $(HELPERS_PY) collect $(TEST_RESULTS_DIR)/auction_24 --show; \
+	else \
+		echo "  ✗ Auction test failed"; \
+		tail -20 $(TEST_RESULTS_DIR)/auction_24/docker.log; \
+		exit 1; \
+	fi
+
+test-hydra:
+	@echo "=== Running Hydra Test (24 nodes, 24 producers) ==="
+	@mkdir -p $(TEST_RESULTS_DIR)/hydra_24
+	@docker run --rm --privileged -m 8g --cpus 4 \
+		-v /lib/modules:/lib/modules \
+		-v "$(shell pwd)/$(TEST_RESULTS_DIR)/hydra_24":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count 24 \
+			--timeout 120 \
+			--replication-factor 3 \
+			--routing-wait 125 \
+			--results-dir /results \
+			--producer-count 24 \
+			--command-count 20 \
+			--command-rate 4 \
+			--command-type insert \
+			--join-ratio 0.5 \
+			--distribution hydra" \
+		> $(TEST_RESULTS_DIR)/hydra_24/docker.log 2>&1
+	@if grep -q "TEST PASSED" $(TEST_RESULTS_DIR)/hydra_24/docker.log; then \
+		echo "  ✓ Hydra test passed"; \
+		echo ""; \
+		echo "=== Analyzing Results ==="; \
+		python3 $(HELPERS_PY) collect $(TEST_RESULTS_DIR)/hydra_24 --show; \
+	else \
+		echo "  ✗ Hydra test failed"; \
+		tail -20 $(TEST_RESULTS_DIR)/hydra_24/docker.log; \
+		exit 1; \
+	fi
+
 # === Help ===
 
 help:
@@ -238,6 +347,11 @@ help:
 	@echo "  compare-analyze Analyze comparison results"
 	@echo "  clean           Remove results (keep calibration)"
 	@echo "  clean-all       Remove all results + Docker cleanup"
+	@echo "  test            Run all fix verification tests (smoke + auction + hydra)"
+	@echo "  test-quick      Run quick smoke test only (4 nodes, auction)"
+	@echo "  test-smoke      Run smoke test (4 nodes, auction)"
+	@echo "  test-auction    Run auction test (24 nodes, 24 producers)"
+	@echo "  test-hydra      Run hydra test (24 nodes, 24 producers)"
 	@echo "  help            Show this help"
 	@echo ""
 	@echo "Variables:"
@@ -284,8 +398,9 @@ compare-run:
 	@echo "=== Hydra vs Auction Comparison Run ==="
 	@echo "Producer counts: $(COMPARE_PRODUCER_COUNTS)"
 	@echo ""
-	$(eval HYDRA_TS := $(shell date +%Y%m%d_%H%M%S))
-	$(eval AUCTION_TS := $(shell date +%Y%m%d_%H%M%S))
+	$(eval BASE_TS := $(shell date +%Y%m%d_%H%M%S))
+	$(eval HYDRA_TS := $(BASE_TS)_hydra)
+	$(eval AUCTION_TS := $(BASE_TS)_auction)
 	@mkdir -p $(COMPARE_DIR)
 	@echo "$(HYDRA_TS)" > $(COMPARE_DIR)/.hydra_ts
 	@echo "$(AUCTION_TS)" > $(COMPARE_DIR)/.auction_ts
