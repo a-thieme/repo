@@ -50,22 +50,22 @@ def parse_topology_delays(topo_path: Path) -> tuple:
             in_links = False
             for line in f:
                 line = line.strip()
-                if line == '[links]':
+                if line == "[links]":
                     in_links = True
                     continue
-                if line.startswith('[') and in_links:
+                if line.startswith("[") and in_links:
                     break
-                if in_links and ':' in line and 'delay' in line:
+                if in_links and ":" in line and "delay" in line:
                     parts = line.split()
                     node_part = parts[0]
-                    delay_part = [p for p in parts if 'delay' in p][0]
+                    delay_part = [p for p in parts if "delay" in p][0]
 
-                    nodes = node_part.split(':')
+                    nodes = node_part.split(":")
                     if len(nodes) != 2:
                         continue
 
                     node1, node2 = nodes[0].lower(), nodes[1].lower()
-                    delay_str = delay_part.split('=')[1].rstrip('ms')
+                    delay_str = delay_part.split("=")[1].rstrip("ms")
                     try:
                         delay_ms = float(delay_str)
                         delays[(node1, node2)] = delay_ms
@@ -127,6 +127,9 @@ def parse_events(exp_dir: Path) -> Tuple[List[Dict], Dict]:
                 except json.JSONDecodeError:
                     continue
         return file_events
+
+    if len(event_files) == 0:
+        return events, metadata
 
     with ThreadPoolExecutor(max_workers=min(8, len(event_files))) as executor:
         futures = [executor.submit(parse_file, ef) for ef in event_files]
@@ -217,7 +220,9 @@ def build_command_timelines(events: List[Dict], metadata: Dict) -> Dict[str, Any
     return timelines
 
 
-def compute_phase_durations(timelines: Dict, metadata: Dict, median_delay_ms: float = None) -> Dict[str, Any]:
+def compute_phase_durations(
+    timelines: Dict, metadata: Dict, median_delay_ms: float = None
+) -> Dict[str, Any]:
     """Calculate duration for each phase per command.
 
     Args:
@@ -333,8 +338,12 @@ def compute_phase_durations(timelines: Dict, metadata: Dict, median_delay_ms: fl
             summary[f"{phase}_median"] = statistics.median(values)
             # Percentiles
             n = len(sorted_values)
-            summary[f"{phase}_p95"] = sorted_values[int(n * 0.95)] if n >= 20 else sorted_values[-1]
-            summary[f"{phase}_p99"] = sorted_values[int(n * 0.99)] if n >= 100 else sorted_values[-1]
+            summary[f"{phase}_p95"] = (
+                sorted_values[int(n * 0.95)] if n >= 20 else sorted_values[-1]
+            )
+            summary[f"{phase}_p99"] = (
+                sorted_values[int(n * 0.99)] if n >= 100 else sorted_values[-1]
+            )
             if len(values) > 1:
                 summary[f"{phase}_stdev"] = statistics.stdev(values)
 
@@ -366,16 +375,28 @@ def categorize_sync_interests(
 
     # Pre-parse timestamps and sort event lists by timestamp for binary search
     node_updates_sorted = sorted(
-        [(parse_ts(u.get("ts")), u) for u in node_updates if parse_ts(u.get("ts")) is not None],
-        key=lambda x: x[0]
+        [
+            (parse_ts(u.get("ts")), u)
+            for u in node_updates
+            if parse_ts(u.get("ts")) is not None
+        ],
+        key=lambda x: x[0],
     )
     job_released_sorted = sorted(
-        [(parse_ts(j.get("ts")), j) for j in job_released if parse_ts(j.get("ts")) is not None],
-        key=lambda x: x[0]
+        [
+            (parse_ts(j.get("ts")), j)
+            for j in job_released
+            if parse_ts(j.get("ts")) is not None
+        ],
+        key=lambda x: x[0],
     )
     assignment_sorted = sorted(
-        [(parse_ts(a.get("ts")), a) for a in assignment_handled if parse_ts(a.get("ts")) is not None],
-        key=lambda x: x[0]
+        [
+            (parse_ts(a.get("ts")), a)
+            for a in assignment_handled
+            if parse_ts(a.get("ts")) is not None
+        ],
+        key=lambda x: x[0],
     )
 
     # Extract just timestamps for binary search
@@ -391,7 +412,9 @@ def categorize_sync_interests(
         sync_ts_ms = sync_ts.timestamp() * 1000
         window_start_ms = sync_ts_ms - window_ms
         # Create offset-aware datetime for comparison
-        window_start_dt = datetime.fromtimestamp(window_start_ms / 1000, tz=sync_ts.tzinfo)
+        window_start_dt = datetime.fromtimestamp(
+            window_start_ms / 1000, tz=sync_ts.tzinfo
+        )
         # Find left bound using binary search
         left = bisect.bisect_left(ts_list, window_start_dt)
         # Iterate only through events in window
@@ -595,20 +618,36 @@ def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str
 
     # Pre-parse and sort event lists for binary search
     command_received_sorted = sorted(
-        [(parse_ts(c.get("ts", "")), c) for c in command_received if parse_ts(c.get("ts", "")) is not None],
-        key=lambda x: x[0]
+        [
+            (parse_ts(c.get("ts", "")), c)
+            for c in command_received
+            if parse_ts(c.get("ts", "")) is not None
+        ],
+        key=lambda x: x[0],
     )
     command_synced_sorted = sorted(
-        [(parse_ts(c.get("ts", "")), c) for c in command_synced if parse_ts(c.get("ts", "")) is not None],
-        key=lambda x: x[0]
+        [
+            (parse_ts(c.get("ts", "")), c)
+            for c in command_synced
+            if parse_ts(c.get("ts", "")) is not None
+        ],
+        key=lambda x: x[0],
     )
     job_claimed_sorted = sorted(
-        [(parse_ts(j.get("ts", "")), j) for j in job_claimed if parse_ts(j.get("ts", "")) is not None],
-        key=lambda x: x[0]
+        [
+            (parse_ts(j.get("ts", "")), j)
+            for j in job_claimed
+            if parse_ts(j.get("ts", "")) is not None
+        ],
+        key=lambda x: x[0],
     )
     assignment_sorted = sorted(
-        [(parse_ts(a.get("ts", "")), a) for a in assignment_handled if parse_ts(a.get("ts", "")) is not None],
-        key=lambda x: x[0]
+        [
+            (parse_ts(a.get("ts", "")), a)
+            for a in assignment_handled
+            if parse_ts(a.get("ts", "")) is not None
+        ],
+        key=lambda x: x[0],
     )
 
     # Extract just timestamps for binary search
@@ -622,7 +661,9 @@ def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str
         update_ts_ms = update_ts.timestamp() * 1000
         window_start_ms = update_ts_ms - window_ms
         # Create offset-aware datetime for comparison
-        window_start_dt = datetime.fromtimestamp(window_start_ms / 1000, tz=update_ts.tzinfo)
+        window_start_dt = datetime.fromtimestamp(
+            window_start_ms / 1000, tz=update_ts.tzinfo
+        )
         left = bisect.bisect_left(ts_list, window_start_dt)
         for i in range(left, len(events_list)):
             event_ts = ts_list[i]
@@ -649,25 +690,33 @@ def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str
             window_ms = 1000  # 1 second window
 
             # Use binary search for each event type
-            for cr in find_events_in_window(cr_ts_list, command_received_sorted, ts, window_ms):
+            for cr in find_events_in_window(
+                cr_ts_list, command_received_sorted, ts, window_ms
+            ):
                 trigger = "new_command"
                 found_trigger = True
                 break
 
             if not found_trigger:
-                for cs in find_events_in_window(cs_ts_list, command_synced_sorted, ts, window_ms):
+                for cs in find_events_in_window(
+                    cs_ts_list, command_synced_sorted, ts, window_ms
+                ):
                     trigger = "new_command"
                     found_trigger = True
                     break
 
             if not found_trigger:
-                for jc in find_events_in_window(jc_ts_list, job_claimed_sorted, ts, window_ms):
+                for jc in find_events_in_window(
+                    jc_ts_list, job_claimed_sorted, ts, window_ms
+                ):
                     trigger = "job_claim"
                     found_trigger = True
                     break
 
             if not found_trigger:
-                for ah in find_events_in_window(ah_ts_list, assignment_sorted, ts, window_ms):
+                for ah in find_events_in_window(
+                    ah_ts_list, assignment_sorted, ts, window_ms
+                ):
                     trigger = "assignment"
                     found_trigger = True
                     break
@@ -684,6 +733,15 @@ def analyze_experiment(exp_dir: Path) -> Dict[str, Any]:
     """Analyze a single experiment directory."""
     print(f"  Parsing events from {exp_dir.name}...")
     events, metadata = parse_events(exp_dir)
+
+    # Detect distribution from parent directory name (e.g., "run_20260409_163003_hydra")
+    parent_name = exp_dir.parent.name.lower()
+    if "hydra" in parent_name:
+        distribution = "hydra"
+    elif "auction" in parent_name:
+        distribution = "auction"
+    else:
+        distribution = "unknown"
 
     # Parse topology for RTT normalization
     topo_path = exp_dir / "topology.conf"
@@ -708,6 +766,7 @@ def analyze_experiment(exp_dir: Path) -> Dict[str, Any]:
 
     return {
         "name": exp_dir.name,
+        "distribution": distribution,
         "metadata": {
             "node_count": metadata.get("node_count", 0),
             "producer_count": metadata.get("producer_count", 0),
@@ -882,135 +941,258 @@ def generate_csv_output(data: Dict, output_dir: Path):
 
 
 def generate_markdown_report(data: Dict, output_path: Path):
-    """Write human-readable report."""
+    """Write human-readable report with clear hydra/auction separation."""
+
+    # Group experiments by distribution
+    hydra_exps = [e for e in data["experiments"] if e.get("distribution") == "hydra"]
+    auction_exps = [
+        e for e in data["experiments"] if e.get("distribution") == "auction"
+    ]
+    unknown_exps = [
+        e
+        for e in data["experiments"]
+        if e.get("distribution") not in ("hydra", "auction")
+    ]
+
+    # Sort by producer count for consistent ordering
+    def sort_key(e):
+        return e["metadata"].get("producer_count", 0)
+
+    hydra_exps.sort(key=sort_key)
+    auction_exps.sort(key=sort_key)
+    unknown_exps.sort(key=sort_key)
+
     with open(output_path, "w") as f:
         f.write("# NDN Repository Experiment Analysis\n\n")
         f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
+        # Overview section
+        f.write("## Overview\n\n")
+        f.write(f"- **Total Experiments:** {len(data['experiments'])}\n")
+        f.write(f"- **Hydra Experiments:** {len(hydra_exps)}\n")
+        f.write(f"- **Auction Experiments:** {len(auction_exps)}\n")
+        if unknown_exps:
+            f.write(f"- **Unknown Distribution:** {len(unknown_exps)}\n")
+        f.write("\n")
+
+        # Hydra Section
+        if hydra_exps:
+            f.write("# HYDRA Results\n\n")
+            f.write("## Sync Interest Breakdown\n\n")
+            f.write(
+                "| Producers | Total Sync | Heartbeat % | Assignment % | Other % |\n"
+            )
+            f.write(
+                "|-----------|------------|-------------|--------------|--------|\n"
+            )
+            for exp in hydra_exps:
+                sb = exp["sync_breakdown"]
+                prod = exp["metadata"]["producer_count"]
+                f.write(f"| {prod} | {sb['total_sync_interests']:,} ")
+                f.write(f"| {sb['heartbeat']['percentage']:.1f}% ")
+                f.write(f"| {sb['assignment']['percentage']:.1f}% ")
+                f.write(f"| {sb['other']['percentage']:.1f}% |\n")
+
+            f.write("\n## Replication Time (RTT)\n\n")
+            f.write("| Producers | Rep Med (RTT) | Rep P95 (RTT) | Rep P99 (RTT) |\n")
+            f.write("|-----------|---------------|---------------|---------------|\n")
+            for exp in hydra_exps:
+                s = exp["phase_summary"]
+                prod = exp["metadata"]["producer_count"]
+                f.write(f"| {prod} ")
+                f.write(f"| {s.get('replication_rtt_median', 0):.2f} ")
+                f.write(f"| {s.get('replication_rtt_p95', 0):.2f} ")
+                f.write(f"| {s.get('replication_rtt_p99', 0):.2f} |\n")
+
+            f.write("\n## Sync Interests per Command\n\n")
+            f.write("| Producers | Sync/Cmd | Heartbeat/cmd | Assignment/cmd |\n")
+            f.write("|-----------|----------|---------------|----------------|\n")
+            for exp in hydra_exps:
+                sb = exp["sync_breakdown"]
+                prod = exp["metadata"]["producer_count"]
+                f.write(f"| {prod} ")
+                f.write(
+                    f"| {sb['total_sync_interests'] / max(1, exp['metadata']['total_commands']):.1f} "
+                )
+                f.write(f"| {sb['heartbeat']['per_command']:.2f} ")
+                f.write(f"| {sb['assignment']['per_command']:.2f} |\n")
+
+        # Auction Section
+        if auction_exps:
+            f.write("\n---\n\n# AUCTION Results\n\n")
+            f.write("## Sync Interest Breakdown\n\n")
+            f.write(
+                "| Producers | Total Sync | Heartbeat % | Assignment % | Other % |\n"
+            )
+            f.write(
+                "|-----------|------------|-------------|--------------|--------|\n"
+            )
+            for exp in auction_exps:
+                sb = exp["sync_breakdown"]
+                prod = exp["metadata"]["producer_count"]
+                f.write(f"| {prod} | {sb['total_sync_interests']:,} ")
+                f.write(f"| {sb['heartbeat']['percentage']:.1f}% ")
+                f.write(f"| {sb['assignment']['percentage']:.1f}% ")
+                f.write(f"| {sb['other']['percentage']:.1f}% |\n")
+
+            f.write("\n## Replication Time (RTT)\n\n")
+            f.write("| Producers | Rep Med (RTT) | Rep P95 (RTT) | Rep P99 (RTT) |\n")
+            f.write("|-----------|---------------|---------------|---------------|\n")
+            for exp in auction_exps:
+                s = exp["phase_summary"]
+                prod = exp["metadata"]["producer_count"]
+                f.write(f"| {prod} ")
+                f.write(f"| {s.get('replication_rtt_median', 0):.2f} ")
+                f.write(f"| {s.get('replication_rtt_p95', 0):.2f} ")
+                f.write(f"| {s.get('replication_rtt_p99', 0):.2f} |\n")
+
+            f.write("\n## Sync Interests per Command\n\n")
+            f.write("| Producers | Sync/Cmd | Heartbeat/cmd | Assignment/cmd |\n")
+            f.write("|-----------|----------|---------------|----------------|\n")
+            for exp in auction_exps:
+                sb = exp["sync_breakdown"]
+                prod = exp["metadata"]["producer_count"]
+                f.write(f"| {prod} ")
+                f.write(
+                    f"| {sb['total_sync_interests'] / max(1, exp['metadata']['total_commands']):.1f} "
+                )
+                f.write(f"| {sb['heartbeat']['per_command']:.2f} ")
+                f.write(f"| {sb['assignment']['per_command']:.2f} |\n")
+
+        # Side-by-side Comparison Section
+        if hydra_exps and auction_exps:
+            f.write("\n---\n\n# HYDRA vs AUCTION Comparison\n\n")
+            f.write("## Sync Interests Comparison\n\n")
+            f.write(
+                "| Producers | Hydra Sync | Auction Sync | Hydra Assign % | Auction Assign % |\n"
+            )
+            f.write(
+                "|-----------|------------|--------------|----------------|------------------|\n"
+            )
+
+            hydra_by_prod = {e["metadata"]["producer_count"]: e for e in hydra_exps}
+            auction_by_prod = {e["metadata"]["producer_count"]: e for e in auction_exps}
+
+            all_producers = sorted(
+                set(hydra_by_prod.keys()) | set(auction_by_prod.keys())
+            )
+            for prod in all_producers:
+                h_exp = hydra_by_prod.get(prod)
+                a_exp = auction_by_prod.get(prod)
+                h_sb = h_exp["sync_breakdown"] if h_exp else None
+                a_sb = a_exp["sync_breakdown"] if a_exp else None
+
+                h_sync = h_sb["total_sync_interests"] if h_sb else "-"
+                a_sync = a_sb["total_sync_interests"] if a_sb else "-"
+                h_assign = f"{h_sb['assignment']['percentage']:.1f}%" if h_sb else "-"
+                a_assign = f"{a_sb['assignment']['percentage']:.1f}%" if a_sb else "-"
+
+                f.write(f"| {prod} | {h_sync} | {a_sync} | {h_assign} | {a_assign} |\n")
+
+            f.write("\n## Replication Time Comparison (Median RTT)\n\n")
+            f.write(
+                "| Producers | Hydra Rep Med (RTT) | Auction Rep Med (RTT) | Difference |\n"
+            )
+            f.write(
+                "|-----------|---------------------|----------------------|------------|\n"
+            )
+            for prod in all_producers:
+                h_exp = hydra_by_prod.get(prod)
+                a_exp = auction_by_prod.get(prod)
+                h_s = h_exp["phase_summary"] if h_exp else None
+                a_s = a_exp["phase_summary"] if a_exp else None
+
+                h_med = h_s.get("replication_rtt_median", 0) if h_s else None
+                a_med = a_s.get("replication_rtt_median", 0) if a_s else None
+
+                if h_med is not None and a_med is not None:
+                    diff = a_med - h_med
+                    diff_str = f"{diff:+.2f}"
+                else:
+                    diff_str = "-"
+
+                h_str = f"{h_med:.2f}" if h_med is not None else "-"
+                a_str = f"{a_med:.2f}" if a_med is not None else "-"
+
+                f.write(f"| {prod} | {h_str} | {a_str} | {diff_str} |\n")
+
+        # Legacy sections for backward compatibility
+        f.write("\n---\n\n# Detailed Analysis\n\n")
+
         f.write("## Experiments Analyzed\n\n")
         for exp in data["experiments"]:
             m = exp["metadata"]
-            f.write(f"- **{exp['name']}**: {m['producer_count']} producers, ")
+            dist = exp.get("distribution", "unknown")
+            f.write(
+                f"- **{exp['name']}** [{dist.upper()}]: {m['producer_count']} producers, "
+            )
             f.write(
                 f"{m['command_count']} commands/producer, {m['node_count']} nodes, "
             )
             f.write(f"RF={m['replication_factor']}\n")
 
-        f.write("\n## Sync Interest Breakdown\n\n")
+        f.write("\n## Sync Interest Breakdown (All Experiments)\n\n")
         f.write(
-            "| Experiment | Total Sync | Heartbeat | New Cmd | Assignment | Job Release | Other |\n"
+            "| Experiment | Distribution | Total Sync | Heartbeat | New Cmd | Assignment | Job Release | Other |\n"
         )
         f.write(
-            "|------------|------------|-----------|----------|------------|-------------|-------|\n"
+            "|------------|--------------|------------|-----------|----------|------------|-------------|-------|\n"
         )
         for exp in data["experiments"]:
             sb = exp["sync_breakdown"]
-            f.write(f"| {exp['name']} | {sb['total_sync_interests']:,} ")
+            dist = exp.get("distribution", "unknown")
+            f.write(f"| {exp['name']} | {dist} | {sb['total_sync_interests']:,} ")
             f.write(f"| {sb['heartbeat']['percentage']:.1f}% ")
             f.write(f"| {sb['new_command']['percentage']:.1f}% ")
             f.write(f"| {sb['assignment']['percentage']:.1f}% ")
             f.write(f"| {sb['job_release']['percentage']:.1f}% ")
             f.write(f"| {sb['other']['percentage']:.1f}% |\n")
 
-        f.write("\n### Absolute Counts (per command)\n\n")
-        f.write(
-            "| Experiment | Heartbeat | Heart/cmd | New Cmd | New/cmd | Assignment | Assign/cmd | Job Release | JobRel/cmd | Other | Other/cmd |\n"
-        )
-        f.write(
-            "|------------|-----------|-----------|---------|---------|------------|------------|-------------|------------|-------|-----------|\n"
-        )
-        for exp in data["experiments"]:
-            sb = exp["sync_breakdown"]
-            f.write(f"| {exp['name']} ")
-            f.write(f"| {sb['heartbeat']['count']:,} | {sb['heartbeat']['per_command']:.2f} ")
-            f.write(f"| {sb['new_command']['count']:,} | {sb['new_command']['per_command']:.2f} ")
-            f.write(f"| {sb['assignment']['count']:,} | {sb['assignment']['per_command']:.2f} ")
-            f.write(f"| {sb['job_release']['count']:,} | {sb['job_release']['per_command']:.2f} ")
-            f.write(f"| {sb['other']['count']:,} | {sb['other']['per_command']:.2f} |\n")
-
         f.write("\n## Phase Duration Analysis\n\n")
         f.write(
-            "| Experiment | Ingestion (ms) | Ingestion (RTT) | Propagation (ms) | Propagation (RTT) | Assignment Chain (ms) | Assignment Chain (RTT) | Replication (ms) | Replication (RTT) |\n"
+            "| Experiment | Distribution | Ingestion (ms) | Ingestion (RTT) | Assignment Chain (ms) | Assignment Chain (RTT) | Replication (ms) | Replication (RTT) |\n"
         )
         f.write(
-            "|------------|----------------|-----------------|------------------|-------------------|----------------------|----------------------|------------------|-------------------|\n"
+            "|------------|--------------|----------------|-----------------|----------------------|----------------------|------------------|-------------------|\n"
         )
         for exp in data["experiments"]:
             s = exp["phase_summary"]
-            f.write(f"| {exp['name']} ")
+            dist = exp.get("distribution", "unknown")
+            f.write(f"| {exp['name']} | {dist} ")
             f.write(f"| {s.get('ingestion_ms_avg', 0):.1f} ")
             f.write(f"| {s.get('ingestion_rtt_avg', 0):.2f} ")
-            f.write(f"| {s.get('propagation_ms_avg', 0):.1f} ")
-            f.write(f"| {s.get('propagation_rtt_avg', 0):.2f} ")
             f.write(f"| {s.get('assignment_chain_ms_avg', 0):.1f} ")
             f.write(f"| {s.get('assignment_chain_rtt_avg', 0):.2f} ")
             f.write(f"| {s.get('replication_ms_avg', 0):.1f} ")
             f.write(f"| {s.get('replication_rtt_avg', 0):.2f} |\n")
 
-        # Add RTT summary table
-        f.write("\n### Phase Duration RTT Summary (Median, P95, P99)\n\n")
-        f.write(
-            "| Experiment | Med Ingestion | P95 Ingestion | P99 Ingestion | Med Propagation | P95 Propagation | P99 Propagation | Med Replication | P95 Replication | P99 Replication |\n"
-        )
-        f.write(
-            "|------------|---------------|---------------|---------------|-----------------|-----------------|-----------------|-----------------|-----------------|-----------------|\n"
-        )
-        for exp in data["experiments"]:
-            s = exp["phase_summary"]
-            f.write(f"| {exp['name']} ")
-            f.write(f"| {s.get('ingestion_rtt_median', 0):.2f} | {s.get('ingestion_rtt_p95', 0):.2f} | {s.get('ingestion_rtt_p99', 0):.2f} ")
-            f.write(f"| {s.get('propagation_rtt_median', 0):.2f} | {s.get('propagation_rtt_p95', 0):.2f} | {s.get('propagation_rtt_p99', 0):.2f} ")
-            f.write(f"| {s.get('replication_rtt_median', 0):.2f} | {s.get('replication_rtt_p95', 0):.2f} | {s.get('replication_rtt_p99', 0):.2f} |\n")
-
-        # Add topology info
-        f.write("\n### Topology Information\n\n")
-        f.write(
-            "| Experiment | Topology Median Delay (ms) |\n"
-        )
-        f.write(
-            "|------------|--------------------------|\n"
-        )
-        for exp in data["experiments"]:
-            median_delay = exp.get("topology_median_delay_ms", "N/A")
-            f.write(f"| {exp['name']} | {median_delay} |\n")
-
         f.write("\n## Experiment Duration\n\n")
         f.write(
-            "| Experiment | Producers | Total Commands | Duration (s) | Commands/s |\n"
+            "| Experiment | Distribution | Producers | Total Commands | Duration (s) |\n"
         )
         f.write(
-            "|------------|----------|---------------|--------------|------------|\n"
+            "|------------|--------------|----------|---------------|--------------|\n"
         )
         for exp in data["experiments"]:
             m = exp["metadata"]
+            dist = exp.get("distribution", "unknown")
             duration = m.get("total_duration_seconds", 0)
             total_cmds = m.get("total_commands", 0)
-            cmds_per_sec = total_cmds / duration if duration > 0 else 0
             f.write(
-                f"| {exp['name']} | {m['producer_count']} | {total_cmds} | {duration:.2f} | {cmds_per_sec:.3f} |\n"
+                f"| {exp['name']} | {dist} | {m['producer_count']} | {total_cmds} | {duration:.2f} |\n"
             )
 
-        f.write("\n## Assignment Processing Analysis\n\n")
-        f.write(
-            "| Experiment | Assignment Events | Unique Assignments | Processing Ratio | Node Updates w/ Jobs |\n"
-        )
-        f.write(
-            "|------------|-------------------|--------------------|--------------------|---------------------|\n"
-        )
-        for exp in data["experiments"]:
-            c = exp["conflicts"]
-            f.write(f"| {exp['name']} ")
-            f.write(f"| {c['total_assignment_handled']:,} ")
-            f.write(f"| {c.get('unique_assignments', 0):,} ")
-            f.write(f"| {c.get('processing_ratio', 0):.1f}x ")
-            f.write(f"| {c.get('total_node_updates_with_jobs', 0):,} |\n")
-
         f.write("\n## Assignment Conflict Analysis\n\n")
-        f.write("| Experiment | Unique Targets | Reassignments | Not In Assignees |\n")
-        f.write("|------------|----------------|---------------|------------------|\n")
+        f.write(
+            "| Experiment | Distribution | Unique Targets | Reassignments | Not In Assignees |\n"
+        )
+        f.write(
+            "|------------|--------------|----------------|---------------|------------------|\n"
+        )
         for exp in data["experiments"]:
             c = exp["conflicts"]
-            f.write(f"| {exp['name']} ")
+            dist = exp.get("distribution", "unknown")
+            f.write(f"| {exp['name']} | {dist} ")
             f.write(f"| {c.get('unique_targets', 0):,} ")
             f.write(f"| {c.get('total_reassignments', 0):,} ")
             f.write(f"| {c['by_reason'].get('not_in_assignees', 0):,} |\n")

@@ -1,4 +1,4 @@
-.PHONY: build keys image calibrate run single shell results clean clean-all help compare compare-run compare-analyze test test-quick test-auction test-hydra test-smoke
+.PHONY: build keys image calibrate run single shell results clean clean-all help compare compare-run compare-analyze experiment-full test test-quick test-auction test-hydra test-smoke
 
 # === Configuration ===
 # Experiment settings
@@ -343,7 +343,7 @@ help:
 	@echo "  shell           Interactive Docker shell for debugging"
 	@echo "  results         Show summary of last run"
 	@echo "  compare         Full comparison: build + run both distributions + analyze"
-	@echo "  compare-run     Run both hydra and auction experiments in parallel"
+	@echo "  compare-run     Run both hydra and auction experiments in parallel (-j4)"
 	@echo "  compare-analyze Analyze comparison results"
 	@echo "  clean           Remove results (keep calibration)"
 	@echo "  clean-all       Remove all results + Docker cleanup"
@@ -352,6 +352,7 @@ help:
 	@echo "  test-smoke      Run smoke test (4 nodes, auction)"
 	@echo "  test-auction    Run auction test (24 nodes, 24 producers)"
 	@echo "  test-hydra      Run hydra test (24 nodes, 24 producers)"
+	@echo "  experiment-full Run full 24-node suite: hydra + auction with 1/2/4/8/16/24 producers (includes analysis)"
 	@echo "  help            Show this help"
 	@echo ""
 	@echo "Variables:"
@@ -405,9 +406,9 @@ compare-run:
 	@echo "$(HYDRA_TS)" > $(COMPARE_DIR)/.hydra_ts
 	@echo "$(AUCTION_TS)" > $(COMPARE_DIR)/.auction_ts
 	@echo "Starting Hydra experiments (timestamp: $(HYDRA_TS))..."
-	@$(MAKE) run DISTRIBUTION=hydra PRODUCER_COUNTS="$(COMPARE_PRODUCER_COUNTS)" TIMESTAMP=$(HYDRA_TS) &
+	@$(MAKE) run DISTRIBUTION=hydra PRODUCER_COUNTS="$(COMPARE_PRODUCER_COUNTS)" TIMESTAMP=$(HYDRA_TS) -j4 &
 	@echo "Starting Auction experiments (timestamp: $(AUCTION_TS))..."
-	@$(MAKE) run DISTRIBUTION=auction PRODUCER_COUNTS="$(COMPARE_PRODUCER_COUNTS)" TIMESTAMP=$(AUCTION_TS) &
+	@$(MAKE) run DISTRIBUTION=auction PRODUCER_COUNTS="$(COMPARE_PRODUCER_COUNTS)" TIMESTAMP=$(AUCTION_TS) -j4 &
 	@wait
 	@echo ""
 	@echo "=== Both distribution runs complete ==="
@@ -454,3 +455,49 @@ for p in target: \
   print()"
 	@echo ""
 	@echo "Analysis complete. Results saved to: $(COMPARE_DIR)"
+
+# === Full 24-Node Experiment Suite ===
+
+experiment-full: build
+	@echo "=== Full 24-Node Experiment Suite ==="
+	@echo "Producers: 1 2 4 8 16 24"
+	@echo "Distributions: hydra, auction"
+	@echo "Parallel jobs: 8 (4 per distribution)"
+	@echo ""
+	@BASE_TS=$$(date +%Y%m%d_%H%M%S) && \
+	HYDRA_TS=$${BASE_TS}_hydra && \
+	AUCTION_TS=$${BASE_TS}_auction && \
+	COMPARE_DIR="$(RESULTS_DIR)/compare_$${BASE_TS}" && \
+	ANALYSIS_DIR="$(RESULTS_DIR)/analysis_$${BASE_TS}" && \
+	echo "Hydra timestamp: $$HYDRA_TS" && \
+	echo "Auction timestamp: $$AUCTION_TS" && \
+	echo "" && \
+	echo "Starting Hydra experiments..." && \
+	$(MAKE) run DISTRIBUTION=hydra NODE_COUNTS=24 PRODUCER_COUNTS="1 2 4 8 16 24" TIMESTAMP=$$HYDRA_TS -j4 & \
+	echo "Starting Auction experiments..." && \
+	$(MAKE) run DISTRIBUTION=auction NODE_COUNTS=24 PRODUCER_COUNTS="1 2 4 8 16 24" TIMESTAMP=$$AUCTION_TS -j4 & \
+	wait && \
+	echo "" && \
+	echo "=== Running Trace Analysis ===" && \
+	mkdir -p "$$ANALYSIS_DIR" && \
+	python3 $(MAKEFILE_DIR)/analyze_traces.py \
+		--experiments \
+			$(RESULTS_DIR)/run_$$HYDRA_TS/nodes_24_producers_1 \
+			$(RESULTS_DIR)/run_$$HYDRA_TS/nodes_24_producers_2 \
+			$(RESULTS_DIR)/run_$$HYDRA_TS/nodes_24_producers_4 \
+			$(RESULTS_DIR)/run_$$HYDRA_TS/nodes_24_producers_8 \
+			$(RESULTS_DIR)/run_$$HYDRA_TS/nodes_24_producers_16 \
+			$(RESULTS_DIR)/run_$$HYDRA_TS/nodes_24_producers_24 \
+			$(RESULTS_DIR)/run_$$AUCTION_TS/nodes_24_producers_1 \
+			$(RESULTS_DIR)/run_$$AUCTION_TS/nodes_24_producers_2 \
+			$(RESULTS_DIR)/run_$$AUCTION_TS/nodes_24_producers_4 \
+			$(RESULTS_DIR)/run_$$AUCTION_TS/nodes_24_producers_8 \
+			$(RESULTS_DIR)/run_$$AUCTION_TS/nodes_24_producers_16 \
+			$(RESULTS_DIR)/run_$$AUCTION_TS/nodes_24_producers_24 \
+		--output-dir "$$ANALYSIS_DIR" \
+		--format json csv markdown && \
+	echo "" && \
+	echo "=== Experiment Suite Complete ===" && \
+	echo "Hydra results: $(RESULTS_DIR)/run_$$HYDRA_TS" && \
+	echo "Auction results: $(RESULTS_DIR)/run_$$AUCTION_TS" && \
+	echo "Analysis: $$ANALYSIS_DIR"
