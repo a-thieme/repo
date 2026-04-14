@@ -170,7 +170,7 @@ func TestRepo_ReplicationLogic(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
@@ -203,10 +203,10 @@ func TestRepo_ReplicationAlreadySatisfied(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus["other-node-1"] = NodeStatus{
-		Jobs: []enc.Name{target},
+		Jobs: []JobInfo{{Target: target, Storage: 0}},
 	}
 	repo.nodeStatus["other-node-2"] = NodeStatus{
-		Jobs: []enc.Name{target},
+		Jobs: []JobInfo{{Target: target, Storage: 0}},
 	}
 	repo.mu.Unlock()
 
@@ -224,7 +224,7 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 	}
 
 	update := &tlv.NodeUpdate{
-		Jobs:            []enc.Name{},
+		Jobs:            []*tlv.JobInfo{},
 		StorageCapacity: 1000000000,
 		StorageUsed:     0,
 		NewCommand:      cmd,
@@ -247,12 +247,12 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	repo.nodeStatus["peer-node"] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
@@ -266,7 +266,7 @@ func TestRepo_SyncNewCommandProcessing(t *testing.T) {
 	repo.addCommand(cmd)
 	repo.mu.Lock()
 	myStatus := repo.nodeStatus[repo.myNodeName()]
-	myStatus.Jobs = append(myStatus.Jobs, cmd.Target)
+	myStatus.Jobs = append(myStatus.Jobs, JobInfo{Target: cmd.Target, Storage: 0})
 	repo.nodeStatus[repo.myNodeName()] = myStatus
 	repo.mu.Unlock()
 
@@ -287,7 +287,7 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 		repo := NewRepo("/ndn/drepo", nodeNames[i], "/ndn/repo.teame.dev/repo", replicationFactor, false, 10*1024*1024, 0, "hydra", nil, 500*time.Millisecond)
 		repo.mu.Lock()
 		repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-			Jobs:     []enc.Name{},
+			Jobs:     []JobInfo{},
 			Capacity: 1000000000,
 			Used:     0,
 		}
@@ -309,7 +309,7 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 			if i != j {
 				repos[i].mu.Lock()
 				repos[i].nodeStatus[nodeNames[j]] = NodeStatus{
-					Jobs:     []enc.Name{},
+					Jobs:     []JobInfo{},
 					Capacity: 1000000000,
 					Used:     0,
 				}
@@ -366,7 +366,7 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 			if repos[i].myNodeName() == winner {
 				repos[i].mu.Lock()
 				myStatus := repos[i].nodeStatus[repos[i].myNodeName()]
-				myStatus.Jobs = append(myStatus.Jobs, cmd.Target)
+				myStatus.Jobs = append(myStatus.Jobs, JobInfo{Target: cmd.Target, Storage: 0})
 				repos[i].nodeStatus[repos[i].myNodeName()] = myStatus
 				repos[i].mu.Unlock()
 				claimCount++
@@ -385,9 +385,9 @@ func TestRepo_MultiNodeSyncSimulation(t *testing.T) {
 
 func TestHydraLeaderSelection(t *testing.T) {
 	nodeStatus := map[string]NodeStatus{
-		"/ndn/repo/n2": {Jobs: []enc.Name{}},
-		"/ndn/repo/n0": {Jobs: []enc.Name{}},
-		"/ndn/repo/n1": {Jobs: []enc.Name{}},
+		"/ndn/repo/n2": {Jobs: []JobInfo{}},
+		"/ndn/repo/n0": {Jobs: []JobInfo{}},
+		"/ndn/repo/n1": {Jobs: []JobInfo{}},
 	}
 
 	leader := selectLeader(nodeStatus)
@@ -405,7 +405,7 @@ func TestHydraLeaderSelection_Empty(t *testing.T) {
 
 func TestHydraLeaderSelection_SingleNode(t *testing.T) {
 	nodeStatus := map[string]NodeStatus{
-		"/ndn/repo/solo": {Jobs: []enc.Name{}},
+		"/ndn/repo/solo": {Jobs: []JobInfo{}},
 	}
 
 	leader := selectLeader(nodeStatus)
@@ -420,7 +420,7 @@ func TestAuctionHeartbeatUpdate_NewPeer(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
@@ -452,12 +452,12 @@ func TestAuctionHeartbeatUpdate_ExistingPeer(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	repo.nodeStatus[peerName.String()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
@@ -488,7 +488,7 @@ func TestHydraHeartbeatUpdate_NewPeer(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
@@ -496,7 +496,7 @@ func TestHydraHeartbeatUpdate_NewPeer(t *testing.T) {
 
 	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
 	peerNodeUpdate := &tlv.NodeUpdate{
-		Jobs:            []enc.Name{},
+		Jobs:            []*tlv.JobInfo{},
 		StorageCapacity: 1000000000,
 		StorageUsed:     0,
 	}
@@ -540,12 +540,12 @@ func TestHydraHeartbeatUpdate_ExistingPeer(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	repo.nodeStatus[peerName.String()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
@@ -555,7 +555,7 @@ func TestHydraHeartbeatUpdate_ExistingPeer(t *testing.T) {
 	repo.resetHeartbeatTimer(peerName.String())
 
 	peerNodeUpdate := &tlv.NodeUpdate{
-		Jobs:            []enc.Name{},
+		Jobs:            []*tlv.JobInfo{},
 		StorageCapacity: 1000000000,
 		StorageUsed:     0,
 	}
@@ -594,20 +594,20 @@ func TestHeartbeatUpdate_ResetsTimer(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	peerName, _ := enc.NameFromStr("/ndn/repo/peer")
 	repo.nodeStatus[peerName.String()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	repo.mu.Unlock()
 
 	peerNodeUpdate := &tlv.NodeUpdate{
-		Jobs:            []enc.Name{},
+		Jobs:            []*tlv.JobInfo{},
 		StorageCapacity: 1000000000,
 		StorageUsed:     0,
 	}
@@ -639,14 +639,14 @@ func TestHeartbeatUpdate_NoTimerForSelf(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[selfName] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	repo.mu.Unlock()
 
 	selfNodeUpdate := &tlv.NodeUpdate{
-		Jobs:            []enc.Name{},
+		Jobs:            []*tlv.JobInfo{},
 		StorageCapacity: 1000000000,
 		StorageUsed:     0,
 	}
@@ -675,19 +675,19 @@ func TestHeartbeatTimeout_TriggersNodeDeath(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	repo.nodeStatus[peerName.String()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	repo.mu.Unlock()
 
 	peerNodeUpdate := &tlv.NodeUpdate{
-		Jobs:            []enc.Name{},
+		Jobs:            []*tlv.JobInfo{},
 		StorageCapacity: 1000000000,
 		StorageUsed:     0,
 	}
@@ -719,24 +719,24 @@ func TestHeartbeatTimeout_OnlyTimedOutPeerRemoved(t *testing.T) {
 
 	repo.mu.Lock()
 	repo.nodeStatus[repo.myNodeName()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	repo.nodeStatus[peer1.String()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	repo.nodeStatus[peer2.String()] = NodeStatus{
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 		Capacity: 1000000000,
 		Used:     0,
 	}
 	repo.mu.Unlock()
 
 	peer1NodeUpdate := &tlv.NodeUpdate{
-		Jobs:            []enc.Name{},
+		Jobs:            []*tlv.JobInfo{},
 		StorageCapacity: 1000000000,
 		StorageUsed:     0,
 	}

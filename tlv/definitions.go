@@ -37,9 +37,16 @@ type JobAssignment struct {
 	Assignees []enc.Name `tlv:"0x296"`
 }
 
+type JobInfo struct {
+	//+field:name
+	Target enc.Name `tlv:"0x253"`
+	//+field:natural
+	StorageSpace uint64 `tlv:"0x294"`
+}
+
 type NodeUpdate struct {
-	//+field:sequence:enc.Name:name
-	Jobs []enc.Name `tlv:"0x290"`
+	//+field:sequence:*JobInfo:struct:JobInfo
+	Jobs []*JobInfo `tlv:"0x290"`
 	//+field:struct:Command
 	NewCommand *Command `tlv:"0x291"`
 	//+field:natural

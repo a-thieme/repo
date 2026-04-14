@@ -25,10 +25,16 @@ const (
 	MaxInsertCost          = DefaultStorageCapacity / 100 // 1% = 5MB
 )
 
+// JobInfo pairs a job target with its allocated storage space
+type JobInfo struct {
+	Target enc.Name
+	Storage uint64
+}
+
 type NodeStatus struct {
 	Capacity uint64
 	Used     uint64
-	Jobs     []enc.Name
+	Jobs     []JobInfo
 }
 
 func hashFromString(s string) uint64 {
@@ -88,7 +94,7 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 		r.nodeStatus[nodeName] = NodeStatus{
 			Capacity: 0,
 			Used:     0,
-			Jobs:     []enc.Name{},
+			Jobs:     []JobInfo{},
 		}
 		log.Info(r, "heartbeat_node_added_to_status", "node", nodeName)
 	}
@@ -144,7 +150,11 @@ func (r *Repo) amIDoingJobStr(targetStr string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	status := r.nodeStatus[r.myNodeName()]
-	doing := slices.Contains(encNamesToStrings(status.Jobs), targetStr)
+	jobNames := make([]enc.Name, len(status.Jobs))
+	for i, job := range status.Jobs {
+		jobNames[i] = job.Target
+	}
+	doing := slices.Contains(encNamesToStrings(jobNames), targetStr)
 	log.Debug(r, "amIDoingJobStr_check", "target", targetStr, "doing", doing)
 	return doing
 }
@@ -181,11 +191,11 @@ func (r *Repo) getCommand(target enc.Name) *tlv.Command {
 	return r.getCommandInternal(target)
 }
 
-func (r *Repo) getMyJobs() []enc.Name {
+func (r *Repo) getMyJobs() []JobInfo {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	status := r.nodeStatus[r.myNodeName()]
-	dst := make([]enc.Name, len(status.Jobs))
+	dst := make([]JobInfo, len(status.Jobs))
 	copy(dst, status.Jobs)
 	return dst
 }
@@ -215,7 +225,7 @@ func (r *Repo) checkUnder(target enc.Name) UnderStats {
 	for name, status := range nodeStatus {
 		isDoing := false
 		for _, job := range status.Jobs {
-			if job.Equal(target) {
+			if job.Target.Equal(target) {
 				isDoing = true
 				break
 			}
@@ -237,7 +247,7 @@ func (r *Repo) countReplication(target enc.Name) int {
 	for nodeName, status := range r.nodeStatus {
 		nodeJobCount := 0
 		for _, job := range status.Jobs {
-			if job.Equal(target) {
+			if job.Target.Equal(target) {
 				nodeJobCount++
 			}
 		}
@@ -277,7 +287,6 @@ func (r *Repo) doCmd(cmd *tlv.Command) bool {
 
 	r.mu.Lock()
 	status := r.nodeStatus[r.myNodeName()]
-	status.Jobs = append(status.Jobs, target)
 
 	if cmd.Type == "INSERT" {
 		cost := (hashFromString(targetStr) % MaxInsertCost)
@@ -288,6 +297,11 @@ func (r *Repo) doCmd(cmd *tlv.Command) bool {
 			r.jobStorageUsage = make(map[string]uint64)
 		}
 		r.jobStorageUsage[jobKey] += cost
+
+		status.Jobs = append(status.Jobs, JobInfo{Target: target, Storage: cost})
+	} else {
+		// JOIN jobs - storage grows over time, start with 0
+		status.Jobs = append(status.Jobs, JobInfo{Target: target, Storage: 0})
 	}
 	r.nodeStatus[r.myNodeName()] = status
 	r.mu.Unlock()
@@ -314,7 +328,7 @@ func countReplicationInternal(target enc.Name, nodeStatus map[string]NodeStatus)
 	count := 0
 	for _, status := range nodeStatus {
 		for _, job := range status.Jobs {
-			if job.Equal(target) {
+			if job.Target.Equal(target) {
 				count++
 				break
 			}

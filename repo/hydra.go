@@ -76,7 +76,11 @@ func (h *HydraMechanism) GetAvailability(under []UnderStats) map[string]Availabi
 func (h *HydraMechanism) PublishAssignments(assignments []*tlv.JobAssignment) {
 	update := &tlv.NodeUpdate{JobAssignments: assignments}
 	if h.repo.ProcessJobAssignments(assignments) {
-		update.Jobs = h.repo.getMyJobs()
+		jobs := h.repo.getMyJobs()
+		update.Jobs = make([]*tlv.JobInfo, len(jobs))
+		for i, job := range jobs {
+			update.Jobs[i] = &tlv.JobInfo{Target: job.Target, StorageSpace: job.Storage}
+		}
 	}
 	h.PublishUpdate(update)
 }
@@ -102,7 +106,12 @@ func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
 // }
 
 func (h *HydraMechanism) PublishJobs() {
-	h.PublishUpdate(&tlv.NodeUpdate{Jobs: h.repo.getMyJobs()})
+	jobs := h.repo.getMyJobs()
+	tlvJobs := make([]*tlv.JobInfo, len(jobs))
+	for i, job := range jobs {
+		tlvJobs[i] = &tlv.JobInfo{Target: job.Target, StorageSpace: job.Storage}
+	}
+	h.PublishUpdate(&tlv.NodeUpdate{Jobs: tlvJobs})
 }
 
 // publish update with stats attached

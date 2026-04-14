@@ -45,7 +45,12 @@ func (a *AuctionMechanism) PublishUpdate(update *tlv.NodeUpdate) {
 }
 
 func (h *AuctionMechanism) PublishJobs() {
-	h.PublishUpdate(&tlv.NodeUpdate{Jobs: h.repo.getMyJobs()})
+	jobs := h.repo.getMyJobs()
+	tlvJobs := make([]*tlv.JobInfo, len(jobs))
+	for i, job := range jobs {
+		tlvJobs[i] = &tlv.JobInfo{Target: job.Target, StorageSpace: job.Storage}
+	}
+	h.PublishUpdate(&tlv.NodeUpdate{Jobs: tlvJobs})
 }
 
 func (a *AuctionMechanism) Start(client ndn.Client, groupPrefix enc.Name) error {

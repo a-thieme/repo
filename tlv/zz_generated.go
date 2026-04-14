@@ -15,9 +15,11 @@ type CommandEncoder struct {
 	Target_length uint
 }
 
-type CommandParsingContext struct{}
+type CommandParsingContext struct {
+}
 
 func (encoder *CommandEncoder) Init(value *Command) {
+
 	if value.Target != nil {
 		encoder.Target_length = 0
 		for _, c := range value.Target {
@@ -37,12 +39,15 @@ func (encoder *CommandEncoder) Init(value *Command) {
 	l += 3
 	l += uint(1 + enc.Nat(value.SnapshotThreshold).EncodingLength())
 	encoder.Length = l
+
 }
 
 func (context *CommandParsingContext) Init() {
+
 }
 
 func (encoder *CommandEncoder) EncodeInto(value *Command, buf []byte) {
+
 	pos := uint(0)
 
 	buf[pos] = 253
@@ -69,6 +74,7 @@ func (encoder *CommandEncoder) EncodeInto(value *Command, buf []byte) {
 }
 
 func (encoder *CommandEncoder) Encode(value *Command) enc.Wire {
+
 	wire := make(enc.Wire, 1)
 	wire[0] = make([]byte, encoder.Length)
 	buf := wire[0]
@@ -78,6 +84,7 @@ func (encoder *CommandEncoder) Encode(value *Command) enc.Wire {
 }
 
 func (context *CommandParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*Command, error) {
+
 	var handled_Type bool = false
 	var handled_Target bool = false
 	var handled_SnapshotThreshold bool = false
@@ -202,9 +209,11 @@ type InternalCommandEncoder struct {
 	Target_length uint
 }
 
-type InternalCommandParsingContext struct{}
+type InternalCommandParsingContext struct {
+}
 
 func (encoder *InternalCommandEncoder) Init(value *InternalCommand) {
+
 	if value.Target != nil {
 		encoder.Target_length = 0
 		for _, c := range value.Target {
@@ -226,12 +235,15 @@ func (encoder *InternalCommandEncoder) Init(value *InternalCommand) {
 	l += 3
 	l += uint(1 + enc.Nat(value.StorageSpace).EncodingLength())
 	encoder.Length = l
+
 }
 
 func (context *InternalCommandParsingContext) Init() {
+
 }
 
 func (encoder *InternalCommandEncoder) EncodeInto(value *InternalCommand, buf []byte) {
+
 	pos := uint(0)
 
 	buf[pos] = 253
@@ -264,6 +276,7 @@ func (encoder *InternalCommandEncoder) EncodeInto(value *InternalCommand, buf []
 }
 
 func (encoder *InternalCommandEncoder) Encode(value *InternalCommand) enc.Wire {
+
 	wire := make(enc.Wire, 1)
 	wire[0] = make([]byte, encoder.Length)
 	buf := wire[0]
@@ -273,6 +286,7 @@ func (encoder *InternalCommandEncoder) Encode(value *InternalCommand) enc.Wire {
 }
 
 func (context *InternalCommandParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*InternalCommand, error) {
+
 	var handled_Type bool = false
 	var handled_Target bool = false
 	var handled_SnapshotThreshold bool = false
@@ -420,7 +434,8 @@ type StatusResponseEncoder struct {
 	Target_length uint
 }
 
-type StatusResponseParsingContext struct{}
+type StatusResponseParsingContext struct {
+}
 
 func (encoder *StatusResponseEncoder) Init(value *StatusResponse) {
 	if value.Target != nil {
@@ -440,12 +455,15 @@ func (encoder *StatusResponseEncoder) Init(value *StatusResponse) {
 	l += uint(enc.TLNum(len(value.Status)).EncodingLength())
 	l += uint(len(value.Status))
 	encoder.Length = l
+
 }
 
 func (context *StatusResponseParsingContext) Init() {
+
 }
 
 func (encoder *StatusResponseEncoder) EncodeInto(value *StatusResponse, buf []byte) {
+
 	pos := uint(0)
 
 	if value.Target != nil {
@@ -466,6 +484,7 @@ func (encoder *StatusResponseEncoder) EncodeInto(value *StatusResponse, buf []by
 }
 
 func (encoder *StatusResponseEncoder) Encode(value *StatusResponse) enc.Wire {
+
 	wire := make(enc.Wire, 1)
 	wire[0] = make([]byte, encoder.Length)
 	buf := wire[0]
@@ -475,6 +494,7 @@ func (encoder *StatusResponseEncoder) Encode(value *StatusResponse) enc.Wire {
 }
 
 func (context *StatusResponseParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*StatusResponse, error) {
+
 	var handled_Target bool = false
 	var handled_Status bool = false
 
@@ -579,7 +599,8 @@ type JobAssignmentEncoder struct {
 	}
 }
 
-type JobAssignmentParsingContext struct{}
+type JobAssignmentParsingContext struct {
+}
 
 func (encoder *JobAssignmentEncoder) Init(value *JobAssignment) {
 	if value.Target != nil {
@@ -643,12 +664,15 @@ func (encoder *JobAssignmentEncoder) Init(value *JobAssignment) {
 		}
 	}
 	encoder.Length = l
+
 }
 
 func (context *JobAssignmentParsingContext) Init() {
+
 }
 
 func (encoder *JobAssignmentEncoder) EncodeInto(value *JobAssignment, buf []byte) {
+
 	pos := uint(0)
 
 	if value.Target != nil {
@@ -688,6 +712,7 @@ func (encoder *JobAssignmentEncoder) EncodeInto(value *JobAssignment, buf []byte
 }
 
 func (encoder *JobAssignmentEncoder) Encode(value *JobAssignment) enc.Wire {
+
 	wire := make(enc.Wire, 1)
 	wire[0] = make([]byte, encoder.Length)
 	buf := wire[0]
@@ -697,6 +722,7 @@ func (encoder *JobAssignmentEncoder) Encode(value *JobAssignment) enc.Wire {
 }
 
 func (context *JobAssignmentParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*JobAssignment, error) {
+
 	var handled_Target bool = false
 	var handled_Assignees bool = false
 
@@ -801,11 +827,179 @@ func ParseJobAssignment(reader enc.WireView, ignoreCritical bool) (*JobAssignmen
 	return context.Parse(reader, ignoreCritical)
 }
 
+type JobInfoEncoder struct {
+	Length uint
+
+	Target_length uint
+}
+
+type JobInfoParsingContext struct {
+}
+
+func (encoder *JobInfoEncoder) Init(value *JobInfo) {
+	if value.Target != nil {
+		encoder.Target_length = 0
+		for _, c := range value.Target {
+			encoder.Target_length += uint(c.EncodingLength())
+		}
+	}
+
+	l := uint(0)
+	if value.Target != nil {
+		l += 3
+		l += uint(enc.TLNum(encoder.Target_length).EncodingLength())
+		l += encoder.Target_length
+	}
+	l += 3
+	l += uint(1 + enc.Nat(value.StorageSpace).EncodingLength())
+	encoder.Length = l
+
+}
+
+func (context *JobInfoParsingContext) Init() {
+
+}
+
+func (encoder *JobInfoEncoder) EncodeInto(value *JobInfo, buf []byte) {
+
+	pos := uint(0)
+
+	if value.Target != nil {
+		buf[pos] = 253
+		binary.BigEndian.PutUint16(buf[pos+1:], uint16(595))
+		pos += 3
+		pos += uint(enc.TLNum(encoder.Target_length).EncodeInto(buf[pos:]))
+		for _, c := range value.Target {
+			pos += uint(c.EncodeInto(buf[pos:]))
+		}
+	}
+	buf[pos] = 253
+	binary.BigEndian.PutUint16(buf[pos+1:], uint16(660))
+	pos += 3
+
+	buf[pos] = byte(enc.Nat(value.StorageSpace).EncodeInto(buf[pos+1:]))
+	pos += uint(1 + buf[pos])
+}
+
+func (encoder *JobInfoEncoder) Encode(value *JobInfo) enc.Wire {
+
+	wire := make(enc.Wire, 1)
+	wire[0] = make([]byte, encoder.Length)
+	buf := wire[0]
+	encoder.EncodeInto(value, buf)
+
+	return wire
+}
+
+func (context *JobInfoParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*JobInfo, error) {
+
+	var handled_Target bool = false
+	var handled_StorageSpace bool = false
+
+	progress := -1
+	_ = progress
+
+	value := &JobInfo{}
+	var err error
+	var startPos int
+	for {
+		startPos = reader.Pos()
+		if startPos >= reader.Length() {
+			break
+		}
+		typ := enc.TLNum(0)
+		l := enc.TLNum(0)
+		typ, err = reader.ReadTLNum()
+		if err != nil {
+			return nil, enc.ErrFailToParse{TypeNum: 0, Err: err}
+		}
+		l, err = reader.ReadTLNum()
+		if err != nil {
+			return nil, enc.ErrFailToParse{TypeNum: 0, Err: err}
+		}
+
+		err = nil
+		if handled := false; true {
+			switch typ {
+			case 595:
+				if true {
+					handled = true
+					handled_Target = true
+					delegate := reader.Delegate(int(l))
+					value.Target, err = delegate.ReadName()
+				}
+			case 660:
+				if true {
+					handled = true
+					handled_StorageSpace = true
+					value.StorageSpace = uint64(0)
+					{
+						for i := 0; i < int(l); i++ {
+							x := byte(0)
+							x, err = reader.ReadByte()
+							if err != nil {
+								if err == io.EOF {
+									err = io.ErrUnexpectedEOF
+								}
+								break
+							}
+							value.StorageSpace = uint64(value.StorageSpace<<8) | uint64(x)
+						}
+					}
+				}
+			default:
+				if !ignoreCritical && ((typ <= 31) || ((typ & 1) == 1)) {
+					return nil, enc.ErrUnrecognizedField{TypeNum: typ}
+				}
+				handled = true
+				err = reader.Skip(int(l))
+			}
+			if err == nil && !handled {
+			}
+			if err != nil {
+				return nil, enc.ErrFailToParse{TypeNum: typ, Err: err}
+			}
+		}
+	}
+
+	startPos = reader.Pos()
+	err = nil
+
+	if !handled_Target && err == nil {
+		value.Target = nil
+	}
+	if !handled_StorageSpace && err == nil {
+		err = enc.ErrSkipRequired{Name: "StorageSpace", TypeNum: 660}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return value, nil
+}
+
+func (value *JobInfo) Encode() enc.Wire {
+	encoder := JobInfoEncoder{}
+	encoder.Init(value)
+	return encoder.Encode(value)
+}
+
+func (value *JobInfo) Bytes() []byte {
+	return value.Encode().Join()
+}
+
+func ParseJobInfo(reader enc.WireView, ignoreCritical bool) (*JobInfo, error) {
+	context := JobInfoParsingContext{}
+	context.Init()
+	return context.Parse(reader, ignoreCritical)
+}
+
 type NodeUpdateEncoder struct {
 	Length uint
 
 	Jobs_subencoder []struct {
-		Jobs_length uint
+		Jobs_encoder JobInfoEncoder
 	}
 	NewCommand_encoder CommandEncoder
 
@@ -815,6 +1009,7 @@ type NodeUpdateEncoder struct {
 }
 
 type NodeUpdateParsingContext struct {
+	Jobs_context       JobInfoParsingContext
 	NewCommand_context CommandParsingContext
 
 	JobAssignments_context JobAssignmentParsingContext
@@ -824,12 +1019,12 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 	{
 		Jobs_l := len(value.Jobs)
 		encoder.Jobs_subencoder = make([]struct {
-			Jobs_length uint
+			Jobs_encoder JobInfoEncoder
 		}, Jobs_l)
 		for i := 0; i < Jobs_l; i++ {
 			pseudoEncoder := &encoder.Jobs_subencoder[i]
 			pseudoValue := struct {
-				Jobs enc.Name
+				Jobs *JobInfo
 			}{
 				Jobs: value.Jobs[i],
 			}
@@ -837,10 +1032,7 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 				encoder := pseudoEncoder
 				value := &pseudoValue
 				if value.Jobs != nil {
-					encoder.Jobs_length = 0
-					for _, c := range value.Jobs {
-						encoder.Jobs_length += uint(c.EncodingLength())
-					}
+					encoder.Jobs_encoder.Init(value.Jobs)
 				}
 				_ = encoder
 				_ = value
@@ -880,7 +1072,7 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 		for seq_i, seq_v := range value.Jobs {
 			pseudoEncoder := &encoder.Jobs_subencoder[seq_i]
 			pseudoValue := struct {
-				Jobs enc.Name
+				Jobs *JobInfo
 			}{
 				Jobs: seq_v,
 			}
@@ -889,8 +1081,8 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 				value := &pseudoValue
 				if value.Jobs != nil {
 					l += 3
-					l += uint(enc.TLNum(encoder.Jobs_length).EncodingLength())
-					l += encoder.Jobs_length
+					l += uint(enc.TLNum(encoder.Jobs_encoder.Length).EncodingLength())
+					l += encoder.Jobs_encoder.Length
 				}
 				_ = encoder
 				_ = value
@@ -928,22 +1120,25 @@ func (encoder *NodeUpdateEncoder) Init(value *NodeUpdate) {
 		}
 	}
 	encoder.Length = l
+
 }
 
 func (context *NodeUpdateParsingContext) Init() {
+	context.Jobs_context.Init()
 	context.NewCommand_context.Init()
 
 	context.JobAssignments_context.Init()
 }
 
 func (encoder *NodeUpdateEncoder) EncodeInto(value *NodeUpdate, buf []byte) {
+
 	pos := uint(0)
 
 	if value.Jobs != nil {
 		for seq_i, seq_v := range value.Jobs {
 			pseudoEncoder := &encoder.Jobs_subencoder[seq_i]
 			pseudoValue := struct {
-				Jobs enc.Name
+				Jobs *JobInfo
 			}{
 				Jobs: seq_v,
 			}
@@ -954,9 +1149,10 @@ func (encoder *NodeUpdateEncoder) EncodeInto(value *NodeUpdate, buf []byte) {
 					buf[pos] = 253
 					binary.BigEndian.PutUint16(buf[pos+1:], uint16(656))
 					pos += 3
-					pos += uint(enc.TLNum(encoder.Jobs_length).EncodeInto(buf[pos:]))
-					for _, c := range value.Jobs {
-						pos += uint(c.EncodeInto(buf[pos:]))
+					pos += uint(enc.TLNum(encoder.Jobs_encoder.Length).EncodeInto(buf[pos:]))
+					if encoder.Jobs_encoder.Length > 0 {
+						encoder.Jobs_encoder.EncodeInto(value.Jobs, buf[pos:])
+						pos += encoder.Jobs_encoder.Length
 					}
 				}
 				_ = encoder
@@ -1015,6 +1211,7 @@ func (encoder *NodeUpdateEncoder) EncodeInto(value *NodeUpdate, buf []byte) {
 }
 
 func (encoder *NodeUpdateEncoder) Encode(value *NodeUpdate) enc.Wire {
+
 	wire := make(enc.Wire, 1)
 	wire[0] = make([]byte, encoder.Length)
 	buf := wire[0]
@@ -1024,6 +1221,7 @@ func (encoder *NodeUpdateEncoder) Encode(value *NodeUpdate) enc.Wire {
 }
 
 func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*NodeUpdate, error) {
+
 	var handled_Jobs bool = false
 	var handled_NewCommand bool = false
 	var handled_StorageCapacity bool = false
@@ -1060,16 +1258,15 @@ func (context *NodeUpdateParsingContext) Parse(reader enc.WireView, ignoreCritic
 					handled = true
 					handled_Jobs = true
 					if value.Jobs == nil {
-						value.Jobs = make([]enc.Name, 0)
+						value.Jobs = make([]*JobInfo, 0)
 					}
 					{
 						pseudoValue := struct {
-							Jobs enc.Name
+							Jobs *JobInfo
 						}{}
 						{
 							value := &pseudoValue
-							delegate := reader.Delegate(int(l))
-							value.Jobs, err = delegate.ReadName()
+							value.Jobs, err = context.Jobs_context.Parse(reader.Delegate(int(l)), ignoreCritical)
 							_ = value
 						}
 						value.Jobs = append(value.Jobs, pseudoValue.Jobs)
@@ -1257,6 +1454,7 @@ func (encoder *JobAssignmentBatchEncoder) Init(value *JobAssignmentBatch) {
 		}
 	}
 	encoder.Length = l
+
 }
 
 func (context *JobAssignmentBatchParsingContext) Init() {
@@ -1264,6 +1462,7 @@ func (context *JobAssignmentBatchParsingContext) Init() {
 }
 
 func (encoder *JobAssignmentBatchEncoder) EncodeInto(value *JobAssignmentBatch, buf []byte) {
+
 	pos := uint(0)
 
 	if value.JobAssignments != nil {
@@ -1295,6 +1494,7 @@ func (encoder *JobAssignmentBatchEncoder) EncodeInto(value *JobAssignmentBatch, 
 }
 
 func (encoder *JobAssignmentBatchEncoder) Encode(value *JobAssignmentBatch) enc.Wire {
+
 	wire := make(enc.Wire, 1)
 	wire[0] = make([]byte, encoder.Length)
 	buf := wire[0]
@@ -1304,6 +1504,7 @@ func (encoder *JobAssignmentBatchEncoder) Encode(value *JobAssignmentBatch) enc.
 }
 
 func (context *JobAssignmentBatchParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*JobAssignmentBatch, error) {
+
 	var handled_JobAssignments bool = false
 
 	progress := -1
@@ -1404,7 +1605,8 @@ type MetricRequestEncoder struct {
 	Auctioneer_length  uint
 }
 
-type MetricRequestParsingContext struct{}
+type MetricRequestParsingContext struct {
+}
 
 func (encoder *MetricRequestEncoder) Init(value *MetricRequest) {
 	if value.Target != nil {
@@ -1443,12 +1645,15 @@ func (encoder *MetricRequestEncoder) Init(value *MetricRequest) {
 		l += encoder.Auctioneer_length
 	}
 	encoder.Length = l
+
 }
 
 func (context *MetricRequestParsingContext) Init() {
+
 }
 
 func (encoder *MetricRequestEncoder) EncodeInto(value *MetricRequest, buf []byte) {
+
 	pos := uint(0)
 
 	if value.Target != nil {
@@ -1481,6 +1686,7 @@ func (encoder *MetricRequestEncoder) EncodeInto(value *MetricRequest, buf []byte
 }
 
 func (encoder *MetricRequestEncoder) Encode(value *MetricRequest) enc.Wire {
+
 	wire := make(enc.Wire, 1)
 	wire[0] = make([]byte, encoder.Length)
 	buf := wire[0]
@@ -1490,6 +1696,7 @@ func (encoder *MetricRequestEncoder) Encode(value *MetricRequest) enc.Wire {
 }
 
 func (context *MetricRequestParsingContext) Parse(reader enc.WireView, ignoreCritical bool) (*MetricRequest, error) {
+
 	var handled_Target bool = false
 	var handled_ResultsName bool = false
 	var handled_Auctioneer bool = false

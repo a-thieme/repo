@@ -111,7 +111,7 @@ func (r *Repo) Start() (err error) {
 	r.nodeStatus[r.myNodeName()] = NodeStatus{
 		Capacity: storageCapacity,
 		Used:     storageUsed,
-		Jobs:     []enc.Name{},
+		Jobs:     []JobInfo{},
 	}
 	r.mu.Unlock()
 
@@ -209,16 +209,17 @@ func (r *Repo) runStorageSimulation() {
 	for range ticker.C {
 		r.mu.Lock()
 		status := r.nodeStatus[r.myNodeName()]
-		for _, target := range status.Jobs {
-			cmd := r.getCommandInternal(target)
+		for i, job := range status.Jobs {
+			cmd := r.getCommandInternal(job.Target)
 			if cmd != nil && cmd.Type == "JOIN" {
-				jobKey := target.String()
+				jobKey := job.Target.String()
 				if r.jobStorageUsage == nil {
 					r.jobStorageUsage = make(map[string]uint64)
 				}
 				growth := (hashFromString(cmd.Target.String()) % r.maxJoinGrowthRate)
 				r.jobStorageUsage[jobKey] += growth
 				status.Used += growth
+				status.Jobs[i].Storage += growth
 				r.nodeStatus[r.myNodeName()] = status
 				r.eventLogger.LogStorageChanged(status.Used, growth)
 			}
@@ -279,7 +280,11 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 		log.Info(r, "groupSync_processing_assignments", "count", len(update.JobAssignments), "publisher", publisherName)
 		shouldPublishJobs = r.ProcessJobAssignments(update.JobAssignments)
 	}
-	r.eventLogger.LogNodeUpdate(publisherName, update.Jobs, update.StorageCapacity, update.StorageUsed)
+	jobNames := make([]enc.Name, len(update.Jobs))
+	for i, job := range update.Jobs {
+		jobNames[i] = job.Target
+	}
+	r.eventLogger.LogNodeUpdate(publisherName, jobNames, update.StorageCapacity, update.StorageUsed)
 	if update.NewCommand != nil {
 		cmd := update.NewCommand
 		targetStr := cmd.Target.String()
