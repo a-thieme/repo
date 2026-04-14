@@ -9,15 +9,15 @@ import (
 type CountingFace struct {
 	inner       ndn.Face
 	eventLogger Logger
-	syncPrefix  string
+	syncPrefixes []string
 	stats       PacketStats
 }
 
-func NewCountingFace(inner ndn.Face, eventLogger Logger, syncPrefix string) *CountingFace {
+func NewCountingFace(inner ndn.Face, eventLogger Logger, syncPrefixes []string) *CountingFace {
 	return &CountingFace{
 		inner:       inner,
 		eventLogger: eventLogger,
-		syncPrefix:  syncPrefix,
+		syncPrefixes: syncPrefixes,
 	}
 }
 
@@ -104,7 +104,7 @@ func (f *CountingFace) Send(pkt enc.Wire) error {
 
 	switch pktType {
 	case TlvInterest:
-		if name != "" && f.syncPrefix != "" && hasPrefix(name, f.syncPrefix) {
+		if name != "" && len(f.syncPrefixes) > 0 && hasAnyPrefix(name, f.syncPrefixes) {
 			count := atomic.AddUint64(&f.stats.SyncInterestsSent, 1)
 			if f.eventLogger != nil {
 				f.eventLogger.LogSyncInterestSent(count)
@@ -243,4 +243,13 @@ func parseTLV(buf []byte, pos int) (tlvType uint64, tlvLen uint64, newPos int) {
 
 func hasPrefix(name, prefix string) bool {
 	return len(name) >= len(prefix) && name[:len(prefix)] == prefix
+}
+
+func hasAnyPrefix(name string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if hasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }

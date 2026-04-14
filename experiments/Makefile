@@ -1,4 +1,4 @@
-.PHONY: build keys image calibrate run single shell results clean clean-all help compare compare-run compare-analyze experiment-full test test-quick test-auction test-hydra test-smoke
+.PHONY: build keys image calibrate run single shell results clean clean-all help compare compare-run compare-analyze experiment-full test test-quick test-auction test-hydra test-smoke eval-baseline eval-baseline-compare eval-concurrent eval-concurrent-compare
 
 # === Configuration ===
 # Experiment settings
@@ -31,6 +31,9 @@ FAILURE_COUNT    ?= 0
 FAILURE_NODES    ?=
 FAILURE_WAIT     ?= 0
 FAILURE_RECOVERY_TIMEOUT ?= 30
+
+# Link loss settings
+LINK_LOSS        ?= 0
 
 # Paths
 MAKEFILE_DIR     := $(dir $(lastword $(MAKEFILE_LIST)))
@@ -176,11 +179,14 @@ single:
 			--command-rate $$per_producer_rate \
 			--command-type $(COMMAND_TYPE) \
 			--join-ratio $(JOIN_RATIO) \
+			--link-loss-rate $(LINK_LOSS) \
+			--partition-links '$(PARTITION_LINKS)' \
+			--partition-after $(PARTITION_AFTER) \
 			--distribution $(DISTRIBUTION)$${debug_arg}$${failure_args}" \
    		> "$$result_dir/docker.log" 2>&1; \
 	echo ""; \
 	echo "=== Analyzing Results ==="; \
-	python3 $(HELPERS_PY) collect "$$result_dir" --show
+	python3 $(HELPERS_PY) collect "$$(dirname $$result_dir)" --show
 
 # === Debugging ===
 
@@ -501,3 +507,102 @@ experiment-full: build
 	echo "Hydra results: $(RESULTS_DIR)/run_$$HYDRA_TS" && \
 	echo "Auction results: $(RESULTS_DIR)/run_$$AUCTION_TS" && \
 	echo "Analysis: $$ANALYSIS_DIR"
+
+# === Phase 1: Baseline Verification ===
+
+BASELINE_TIMESTAMP := $(shell date +%Y%m%d_%H%M%S)
+
+eval-baseline:
+	@echo "=== Baseline Experiment ==="
+	@echo "Distribution: $(DISTRIBUTION)"
+	@echo "Nodes: 24, Producers: 1, Commands: 8"
+	@mkdir -p $(RESULTS_DIR)/baseline_$(DISTRIBUTION)_$(BASELINE_TIMESTAMP)
+	@PARTITION_LINKS="" $(MAKE) single \
+		DISTRIBUTION=$(DISTRIBUTION) \
+		NODES=24 \
+		PRODUCERS=1 \
+		COMMAND_COUNT=8 \
+		TIMESTAMP=$(BASELINE_TIMESTAMP) \
+		RESULTS_DIR=$(RESULTS_DIR)/baseline_$(DISTRIBUTION)_$(BASELINE_TIMESTAMP)
+
+eval-baseline-compare:
+	@echo "=== Running Baseline for Both Distributions ==="
+	@$(MAKE) eval-baseline DISTRIBUTION=hydra BASELINE_TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
+	@$(MAKE) eval-baseline DISTRIBUTION=auction BASELINE_TIMESTAMP=$$(date +%Y%m%d_%H%M%S)
+	@echo "=== Baseline Comparison Complete ==="
+	@echo "Review results in $(RESULTS_DIR)/baseline_*"
+
+# === Phase 2: Concurrent Commands ===
+
+CONCURRENT_TIMESTAMP := $(shell date +%Y%m%d_%H%M%S)
+
+eval-concurrent:
+	@echo "=== Concurrent Commands Experiment ==="
+	@echo "Distribution: $(DISTRIBUTION)"
+	@echo "Producers: $(PRODUCER_COUNTS)"
+	@$(MAKE) run DISTRIBUTION=$(DISTRIBUTION) \
+		NODE_COUNTS=24 \
+		"PRODUCER_COUNTS=$(PRODUCER_COUNTS)" \
+		COMMAND_COUNT=1 \
+		RF=3 \
+		-j4
+
+eval-concurrent-compare:
+	@echo "=== Running Concurrent Experiments for Both Distributions ==="
+	@$(MAKE) eval-concurrent DISTRIBUTION=hydra PRODUCER_COUNTS="1 2 4 8 16 24"
+	@$(MAKE) eval-concurrent DISTRIBUTION=auction PRODUCER_COUNTS="1 2 4 8 16 24"
+	@echo "=== Concurrent Comparison Complete ==="
+
+# === Phase 3: Link Loss Experiments ===
+
+LOSS_RATES ?= 0 0.1 0.5 1 2 5 10 20
+
+eval-link-loss:
+	@echo "=== Link Loss Experiment ==="
+	@echo "Distribution: $(DISTRIBUTION)"
+	@echo "Loss rates: $(LOSS_RATES)"
+	@for rate in $(LOSS_RATES); do \
+		echo "Running with $$rate% loss..."; \
+		TS=$$(date +%Y%m%d_%H%M%S); \
+		mkdir -p $(RESULTS_DIR)/linkloss_$(DISTRIBUTION)_pct_$$rate_$$TS; \
+		$(MAKE) single DISTRIBUTION=$(DISTRIBUTION) \
+			LINK_LOSS=$$rate \
+			NODES=24 PRODUCERS=1 COMMAND_COUNT=8 \
+			TIMESTAMP=$$TS \
+			RESULTS_DIR=$(RESULTS_DIR)/linkloss_$(DISTRIBUTION)_pct_$$rate_$$TS \
+			REPLICATION_TIMEOUT=60; \
+	done
+
+eval-link-loss-compare:
+	@echo "=== Running Link Loss Experiments for Both Distributions ==="
+	@$(MAKE) eval-link-loss DISTRIBUTION=hydra LOSS_RATES="0 0.1 0.5 1 2 5 10 20"
+	@$(MAKE) eval-link-loss DISTRIBUTION=auction LOSS_RATES="0 0.1 0.5 1 2 5 10 20"
+	@echo "=== Link Loss Comparison Complete ==="
+
+# === Phase 4: Network Partition ===
+
+PARTITION_LINKS ?= UCLA:WASEDA,OSAKA:DELFT,ANYANG:ARIZONA,MML1:IIITH,SINGAPORE:FRANKFURT
+PARTITION_AFTER ?= 5
+
+eval-partition:
+	@echo "=== Network Partition Experiment ==="
+	@echo "Distribution: $(DISTRIBUTION)"
+	@echo "Partition links: $(PARTITION_LINKS)"
+	@echo "Partition after: $(PARTITION_AFTER)s"
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/partition_$(DISTRIBUTION)_$$TS; \
+	$(MAKE) single \
+		DISTRIBUTION=$(DISTRIBUTION) \
+		NODES=24 \
+		PRODUCERS=1 \
+		COMMAND_COUNT=8 \
+		TIMESTAMP=$$TS \
+		RESULTS_DIR=$(RESULTS_DIR)/partition_$(DISTRIBUTION)_$$TS \
+		PARTITION_LINKS="$(PARTITION_LINKS)" \
+		PARTITION_AFTER=$(PARTITION_AFTER)
+
+eval-partition-compare:
+	@echo "=== Running Partition Experiments for Both Distributions ==="
+	@$(MAKE) eval-partition DISTRIBUTION=hydra
+	@$(MAKE) eval-partition DISTRIBUTION=auction
+	@echo "=== Partition Comparison Complete ==="

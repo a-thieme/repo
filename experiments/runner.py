@@ -50,11 +50,147 @@ ALL_NODES = [
 ]
 
 ndn = None
+loss_nodes = []
+partition_links_list = []
+
+
+def apply_netem_loss(node_name, loss_rate):
+    """Apply tc netem loss to a node's all interfaces.
+
+    Uses netem to simulate packet loss on all interfaces.
+    Example: tc qdisc add dev eth0 root netem loss 0.5%
+    """
+    if loss_rate <= 0:
+        return
+    for host in ndn.net.hosts:
+        if host.name != node_name:
+            continue
+        info(f"  Applying {loss_rate}% netem loss to {node_name}...\n")
+        for intf in host.intfList():
+            if intf.name == "lo":
+                continue
+            # Add netem loss to interface
+            host.cmd(f"tc qdisc add dev {intf.name} root netem loss {loss_rate}% 2>/dev/null") or host.cmd(f"tc qdisc change dev {intf.name} root netem loss {loss_rate}% 2>/dev/null")
+
+
+def remove_netem_loss(node_name):
+    """Remove netem loss configuration from a node."""
+    for host in ndn.net.hosts:
+        if host.name != node_name:
+            continue
+        info(f"  Removing netem loss from {node_name}...\n")
+        for intf in host.intfList():
+            if intf.name == "lo":
+                continue
+            host.cmd(f"tc qdisc del dev {intf.name} root 2>/dev/null")
+
+
+def apply_link_loss(loss_rate, node_names):
+    """Apply netem loss to specified nodes (or all if empty)."""
+    if loss_rate <= 0:
+        return
+    targets = node_names if node_names else [h.name for h in ndn.net.hosts]
+    for node_name in targets:
+        apply_netem_loss(node_name, loss_rate)
+
+
+def remove_link_loss(node_names):
+    """Remove netem loss from specified nodes."""
+    targets = node_names if node_names else loss_nodes
+    for node_name in targets:
+        remove_netem_loss(node_name)
+
+
+def apply_link_failure(node1, node2):
+    """Simulate link failure between two nodes by adding drop rules.
+
+    Uses netem to drop all packets between two nodes.
+    This is applied on both nodes to create a bidirectional failure.
+    """
+    for host in ndn.net.hosts:
+        if host.name == node1:
+            for intf in host.intfList():
+                if intf.name == "lo":
+                    continue
+                # Find the peer IP and add drop rule
+                peer_host = None
+                for h in ndn.net.hosts:
+                    if h.name == node2:
+                        peer_host = h
+                        break
+                if peer_host is None:
+                    continue
+                # Get peer IP through the interface
+                peer_ip = None
+                for ip, _ in intf.options.get("ipv4", []):
+                    peer_ip = ip
+                    break
+                if peer_ip:
+                    # Drop packets to/from peer IP
+                    host.cmd(f"tc qdisc add dev {intf.name} root netem drop 100% 2>/dev/null") or \
+                        host.cmd(f"tc qdisc change dev {intf.name} root netem drop 100% 2>/dev/null")
+        elif host.name == node2:
+            for intf in host.intfList():
+                if intf.name == "lo":
+                    continue
+                # Find the peer IP
+                peer_host = None
+                for h in ndn.net.hosts:
+                    if h.name == node1:
+                        peer_host = h
+                        break
+                if peer_host is None:
+                    continue
+                peer_ip = None
+                for ip, _ in intf.options.get("ipv4", []):
+                    peer_ip = ip
+                    break
+                if peer_ip:
+                    host.cmd(f"tc qdisc add dev {intf.name} root netem drop 100% 2>/dev/null") or \
+                        host.cmd(f"tc qdisc change dev {intf.name} root netem drop 100% 2>/dev/null")
+
+
+def remove_link_failure(node1, node2):
+    """Restore link between two nodes by removing drop rules."""
+    for host in ndn.net.hosts:
+        if host.name in (node1, node2):
+            for intf in host.intfList():
+                if intf.name == "lo":
+                    continue
+                # Remove netem entirely (simplified approach)
+                host.cmd(f"tc qdisc del dev {intf.name} root 2>/dev/null")
+
+
+def create_partition(link_list):
+    """Apply failures to list of node pairs to create partition.
+
+    Args:
+        link_list: List of tuples [(node1, node2), ...] to sever
+    """
+    for node1, node2 in link_list:
+        apply_link_failure(node1, node2)
+
+
+def remove_partition(link_list):
+    """Restore links for a list of node pairs."""
+    for node1, node2 in link_list:
+        remove_link_failure(node1, node2)
 
 
 def cleanup():
     global ndn
     info("\nCleaning up...\n")
+
+    # Remove link loss before stopping ndn
+    if loss_nodes:
+        info("Removing link loss configurations...\n")
+        remove_link_loss(loss_nodes)
+
+    # Remove partition links
+    global partition_links_list
+    if partition_links_list:
+        info("Removing partition links...\n")
+        remove_partition(partition_links_list)
 
     # Use thread with timeout for ndn.stop() - can hang on large experiments
     cleanup_done = threading.Event()
@@ -210,6 +346,30 @@ def main():
     )
     parser.add_argument(
         "--distribution", default="hydra", help="Distribution mechanism: hydra, auction"
+    )
+    parser.add_argument(
+        "--link-loss-rate",
+        type=float,
+        default=0,
+        help="Link loss rate percentage (0-100) applied to all nodes",
+    )
+    parser.add_argument(
+        "--link-loss-nodes",
+        type=str,
+        default="",
+        help="Comma-separated node names to apply loss to (default: all nodes)",
+    )
+    parser.add_argument(
+        "--partition-links",
+        type=str,
+        default="",
+        help="Comma-separated node1:node2 pairs to sever (e.g., 'UCLA:WASEDA,OSAKA:DELFT')",
+    )
+    parser.add_argument(
+        "--partition-after",
+        type=float,
+        default=0,
+        help="Seconds to wait after commands complete before creating partition (default: 0)",
     )
     args = parser.parse_args()
 
@@ -456,6 +616,13 @@ def main():
             f"Auto-adjusted replication timeout to {args.replication_timeout}s ({auction_multiplier}x multiplier) for {expected_commands} commands\n"
         )
 
+    # Apply link loss if specified
+    loss_nodes_list = [n.strip() for n in args.link_loss_nodes.split(",") if n.strip()] if args.link_loss_nodes else []
+    if args.link_loss_rate > 0:
+        info(f"Applying {args.link_loss_rate}% link loss to {len(loss_nodes_list) if loss_nodes_list else 'all'} nodes...\n")
+        apply_link_loss(args.link_loss_rate, loss_nodes_list)
+        loss_nodes.extend(loss_nodes_list if loss_nodes_list else [h.name for h in ndn.net.hosts])
+
     info(f"Running {len(producer_nodes)} producer(s)...\n")
     for producer_node in producer_nodes:
         info(f"  Starting producer on {producer_node.name}...\n")
@@ -518,6 +685,32 @@ def main():
     commands = build_replication_timeline(results_dir)
 
     replication_time = time.time() - start_time
+
+    # Apply partition if specified
+    # Partition happens AFTER replication completes, then nodes detect failures and re-replicate
+    partition_links = []
+    partition_created = False
+    if args.partition_links:
+        link_pairs = args.partition_links.split(",")
+        partition_links = []
+        for pair in link_pairs:
+            parts = pair.strip().split(":")
+            if len(parts) == 2:
+                partition_links.append((parts[0].strip(), parts[1].strip()))
+        if partition_links and replicated:
+            info(f"=== NETWORK PARTITION ===\n")
+            info(f"Partition links: {partition_links}\n")
+            if args.partition_after > 0:
+                info(f"Waiting {args.partition_after}s before partition...\n")
+                time.sleep(args.partition_after)
+            info("Creating partition...\n")
+            global partition_links_list
+            partition_links_list = partition_links
+            create_partition(partition_links)
+            partition_created = True
+            info("Partition created. Monitoring behavior...\n")
+            # Give nodes time to detect partition and react
+            time.sleep(10)
 
     failure_metadata = {"failure_enabled": False}
 

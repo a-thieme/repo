@@ -138,6 +138,18 @@ type Logger interface {
 	LogHeartbeatReceived(node string)
 }
 
+// UnifiedLogger extends Logger with additional methods used by the repo
+type UnifiedLogger interface {
+	Logger
+	LogEvaluationStarted(target string)
+	LogLeaderDetermined(target string, leader string)
+	LogWinnersSelected(target string, winners []string)
+	LogAssignmentCreated(target string, assignees []string)
+	LogPendingAssignment(target string)
+	LogPeerUp(node string)
+	LogPeerDown(node string)
+}
+
 type NullEventLogger struct{}
 
 func (l *NullEventLogger) Close() error                                                         { return nil }
@@ -172,6 +184,47 @@ func (l *NullEventLogger) LogAuctionBid(target string, peer string, capacity uin
 func (l *NullEventLogger) LogAuctionDelayed(target string, reason string)     {}
 func (l *NullEventLogger) LogNodeDetectedDead(deadNode string, jobsCount int) {}
 func (l *NullEventLogger) LogHeartbeatReceived(node string)                   {}
+
+// NullUnifiedLogger is a no-op implementation of UnifiedLogger
+type NullUnifiedLogger struct{}
+
+func (l *NullUnifiedLogger) Close() error                                                         { return nil }
+func (l *NullUnifiedLogger) Flush() error                                                         { return nil }
+func (l *NullUnifiedLogger) Log(event Event)                                                      {}
+func (l *NullUnifiedLogger) LogSyncInterestSent(total uint64)                                     {}
+func (l *NullUnifiedLogger) LogDataSent(name string, total uint64)                                {}
+func (l *NullUnifiedLogger) LogInterestReceived(name string, total uint64)                        {}
+func (l *NullUnifiedLogger) LogDataReceived(name string, total uint64)                            {}
+func (l *NullUnifiedLogger) LogCommandReceived(cmdType string, target string)                     {}
+func (l *NullUnifiedLogger) LogCommandSynced(cmdType string, target string, fromNode string)      {}
+func (l *NullUnifiedLogger) LogCommandPublished(target string)                                    {}
+func (l *NullUnifiedLogger) LogDecisionStarted(target string, currentReplication int, needed int) {}
+func (l *NullUnifiedLogger) LogDecisionMade(target string, shouldClaim bool, reason string, decisionDetails string, currentReplication int, needed int, candidates []string, candidateScores map[string]int, selectedCandidates []string) {
+}
+func (l *NullUnifiedLogger) LogJobClaimed(target string)                                           {}
+func (l *NullUnifiedLogger) LogNodeUpdate(from string, jobs []enc.Name, capacity, used uint64)   {}
+func (l *NullUnifiedLogger) LogStorageChanged(used, delta uint64)                                 {}
+func (l *NullUnifiedLogger) LogJobAssignment(target string, assignees []string)                   {}
+func (l *NullUnifiedLogger) LogAssignmentHandled(target string, action string, reason string)     {}
+func (l *NullUnifiedLogger) LogSeqStats(newSeq uint64, duplicateSeq uint64)                       {}
+func (l *NullUnifiedLogger) LogAssignStats(publishCount uint64, republishCount uint64)            {}
+func (l *NullUnifiedLogger) LogAuctionStarted(target string, currentReplication int, needed int, nonce uint64) {
+}
+func (l *NullUnifiedLogger) LogAuctionWinners(target string, candidates []string, winnerScores map[string]float64, winners []string) {
+}
+func (l *NullUnifiedLogger) LogAuctionResults(target string, resultsName string, winners []string) {}
+func (l *NullUnifiedLogger) LogAuctionBid(target string, peer string, capacity uint64, used uint64) {
+}
+func (l *NullUnifiedLogger) LogAuctionDelayed(target string, reason string) {}
+func (l *NullUnifiedLogger) LogNodeDetectedDead(deadNode string, jobsCount int) {}
+func (l *NullUnifiedLogger) LogHeartbeatReceived(node string)                   {}
+func (l *NullUnifiedLogger) LogEvaluationStarted(target string)                 {}
+func (l *NullUnifiedLogger) LogLeaderDetermined(target string, leader string)  {}
+func (l *NullUnifiedLogger) LogWinnersSelected(target string, winners []string) {}
+func (l *NullUnifiedLogger) LogAssignmentCreated(target string, assignees []string) {}
+func (l *NullUnifiedLogger) LogPendingAssignment(target string)                 {}
+func (l *NullUnifiedLogger) LogPeerUp(node string)                            {}
+func (l *NullUnifiedLogger) LogPeerDown(node string)                          {}
 
 func NewEventLogger(path string, nodeID string) (*EventLogger, error) {
 	f, err := os.Create(path)
@@ -471,6 +524,59 @@ func (l *EventLogger) LogNodeDetectedDead(deadNode string, jobsCount int) {
 		Replication: jobsCount,
 	})
 	l.Flush()
+}
+
+// UnifiedLogger methods for EventLogger
+func (l *EventLogger) LogEvaluationStarted(target string) {
+	l.Log(Event{
+		EventType: EventEvaluationStarted,
+		Target:    target,
+	})
+}
+
+func (l *EventLogger) LogLeaderDetermined(target string, leader string) {
+	l.Log(Event{
+		EventType: EventLeaderDetermined,
+		Target:    target,
+		Leader:    leader,
+	})
+}
+
+func (l *EventLogger) LogWinnersSelected(target string, winners []string) {
+	l.Log(Event{
+		EventType:          EventWinnersSelected,
+		Target:             target,
+		SelectedCandidates: winners,
+	})
+}
+
+func (l *EventLogger) LogAssignmentCreated(target string, assignees []string) {
+	l.Log(Event{
+		EventType: EventAssignmentCreated,
+		Target:    target,
+		Assignees: assignees,
+	})
+}
+
+func (l *EventLogger) LogPendingAssignment(target string) {
+	l.Log(Event{
+		EventType: EventPendingAssignment,
+		Target:    target,
+	})
+}
+
+func (l *EventLogger) LogPeerUp(node string) {
+	l.Log(Event{
+		EventType: EventPeerUp,
+		From:      node,
+	})
+}
+
+func (l *EventLogger) LogPeerDown(node string) {
+	l.Log(Event{
+		EventType: EventPeerDown,
+		From:      node,
+	})
 }
 
 type PacketStats struct {

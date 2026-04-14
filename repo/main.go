@@ -34,7 +34,7 @@ func main() {
 
 	repo := NewRepo("/ndn/drepo", *nodePrefix, *signingIdentity, *replicationFactor, *noRelease, *maxJoinGrowthRate, *heartbeatInterval, *distribution, nil, *auctionTimeout)
 
-	eventLogger, err := util.NewStructuredLogger(repo.nodePrefix.String(), *eventLogPath)
+	eventLogger, err := util.NewEventLogger(*eventLogPath, repo.nodePrefix.String())
 	if err != nil {
 		log.Fatal(nil, "Failed to create event logger", "err", err)
 	}

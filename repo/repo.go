@@ -119,7 +119,7 @@ func (r *Repo) Start() (err error) {
 
 	if r.eventLogger != nil {
 		syncPrefix := r.groupPrefix.Append(enc.NewGenericComponent("group-messages")).Append(enc.NewKeywordComponent("svs")).String()
-		r.countingFace = util.NewCountingFace(face, r.eventLogger, syncPrefix)
+		r.countingFace = util.NewCountingFace(face, r.eventLogger, []string{syncPrefix})
 		face = r.countingFace
 	}
 
