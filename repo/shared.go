@@ -80,11 +80,11 @@ func (r *Repo) ProcessJobAssignments(assignments []*tlv.JobAssignment) bool {
 	return addedJob
 }
 
-func (r *Repo) evaluate(target enc.Name) {
-	go r.evaluateBatch([]enc.Name{target})
+func (r *Repo) evaluate(target enc.Name, force bool) {
+	r.evaluateBatch([]enc.Name{target}, force)
 }
 
-func (r *Repo) evaluateBatch(jobs []enc.Name) {
+func (r *Repo) evaluateBatch(jobs []enc.Name, force bool) {
 	log.Info(r, "evaluate_batch_start", "jobCount", len(jobs))
 	if len(jobs) == 0 {
 		return
@@ -96,7 +96,7 @@ func (r *Repo) evaluateBatch(jobs []enc.Name) {
 			allUnder = append(allUnder, stats)
 		}
 	}
-	if !r.amILeader() {
+	if !force && !r.amILeader() {
 		log.Info(r, "evaluate_batch_not_leader", "jobCount", len(jobs))
 		return
 	}
@@ -217,7 +217,7 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 
 		if len(removedJobs) > 0 {
 			log.Info(r, "node_status_jobs_removed", "publisher", publisher, "removedJobs", len(removedJobs))
-			go r.evaluateBatch(removedJobs)
+			r.evaluateBatch(removedJobs, false)
 		}
 	}
 }

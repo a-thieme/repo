@@ -114,7 +114,7 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 		r.eventLogger.LogNodeDetectedDead(nodeName, jobsCount)
 
 		r.stopHeartbeatTimer(nodeName)
-		r.evaluateBatch(status.Jobs)
+		r.evaluateBatch(status.Jobs, false)
 	})
 }
 

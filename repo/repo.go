@@ -256,7 +256,7 @@ func (r *Repo) onNewCommandFromProducer(name enc.Name, content enc.Wire, reply f
 	}
 	nodeUpdate.NewCommand = cmd
 	r.publishUpdate(nodeUpdate)
-	go r.evaluate(cmd.Target)
+	go r.evaluate(cmd.Target, true)
 }
 
 func (r *Repo) onGroupSync(pub svs.SvsPub) {
@@ -300,7 +300,7 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 				shouldPublishJobs = true
 			}
 		}
-		go r.evaluate(update.NewCommand.Target)
+		go r.evaluate(update.NewCommand.Target, false)
 	}
 	if shouldPublishJobs {
 		r.distributor.PublishJobs()
