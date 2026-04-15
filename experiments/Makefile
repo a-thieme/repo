@@ -182,6 +182,7 @@ single:
 			--link-loss-rate $(LINK_LOSS) \
 			--partition-links '$(PARTITION_LINKS)' \
 			--partition-after $(PARTITION_AFTER) \
+			--partition-timeout $(PARTITION_TIMEOUT) \
 			--distribution $(DISTRIBUTION)$${debug_arg}$${failure_args}" \
    		> "$$result_dir/docker.log" 2>&1; \
 	echo ""; \
@@ -583,12 +584,14 @@ eval-link-loss-compare:
 
 PARTITION_LINKS ?= UCLA:WASEDA,OSAKA:DELFT,ANYANG:ARIZONA,MML1:IIITH,SINGAPORE:FRANKFURT
 PARTITION_AFTER ?= 5
+PARTITION_TIMEOUT ?= 60
 
 eval-partition:
 	@echo "=== Network Partition Experiment ==="
 	@echo "Distribution: $(DISTRIBUTION)"
 	@echo "Partition links: $(PARTITION_LINKS)"
 	@echo "Partition after: $(PARTITION_AFTER)s"
+	@echo "Partition timeout: $(PARTITION_TIMEOUT)s"
 	@TS=$$(date +%Y%m%d_%H%M%S); \
 	mkdir -p $(RESULTS_DIR)/partition_$(DISTRIBUTION)_$$TS; \
 	$(MAKE) single \
@@ -596,10 +599,12 @@ eval-partition:
 		NODES=24 \
 		PRODUCERS=1 \
 		COMMAND_COUNT=8 \
+		REPLICATION_TIMEOUT=30 \
 		TIMESTAMP=$$TS \
 		RESULTS_DIR=$(RESULTS_DIR)/partition_$(DISTRIBUTION)_$$TS \
 		PARTITION_LINKS="$(PARTITION_LINKS)" \
-		PARTITION_AFTER=$(PARTITION_AFTER)
+		PARTITION_AFTER=$(PARTITION_AFTER) \
+		PARTITION_TIMEOUT=$(PARTITION_TIMEOUT)
 
 eval-partition-compare:
 	@echo "=== Running Partition Experiments for Both Distributions ==="

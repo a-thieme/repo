@@ -7,16 +7,16 @@ import (
 )
 
 type CountingFace struct {
-	inner       ndn.Face
-	eventLogger Logger
+	inner        ndn.Face
+	eventLogger  Logger
 	syncPrefixes []string
-	stats       PacketStats
+	stats        PacketStats
 }
 
 func NewCountingFace(inner ndn.Face, eventLogger Logger, syncPrefixes []string) *CountingFace {
 	return &CountingFace{
-		inner:       inner,
-		eventLogger: eventLogger,
+		inner:        inner,
+		eventLogger:  eventLogger,
 		syncPrefixes: syncPrefixes,
 	}
 }

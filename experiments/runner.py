@@ -371,6 +371,12 @@ def main():
         default=0,
         help="Seconds to wait after commands complete before creating partition (default: 0)",
     )
+    parser.add_argument(
+        "--partition-timeout",
+        type=float,
+        default=60,
+        help="Seconds to wait after partition before collecting results (default: 60)",
+    )
     args = parser.parse_args()
 
     sys.argv = [sys.argv[0]]
@@ -710,7 +716,8 @@ def main():
             partition_created = True
             info("Partition created. Monitoring behavior...\n")
             # Give nodes time to detect partition and react
-            time.sleep(10)
+            info(f"Waiting {args.partition_timeout}s for heartbeat detection and re-replication...\n")
+            time.sleep(args.partition_timeout)
 
     failure_metadata = {"failure_enabled": False}
 

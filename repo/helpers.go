@@ -27,7 +27,7 @@ const (
 
 // JobInfo pairs a job target with its allocated storage space
 type JobInfo struct {
-	Target enc.Name
+	Target  enc.Name
 	Storage uint64
 }
 
@@ -164,6 +164,39 @@ func (r *Repo) cancelFallback(target enc.Name) {
 	if t, exists := r.fallbackTimers[key]; exists {
 		t.Stop()
 		delete(r.fallbackTimers, key)
+	}
+	r.heartbeatMu.Unlock()
+}
+
+// scheduleEvalIfNotExists schedules an initial evaluation with a delay long enough
+// for distribution to complete. This prevents over-replication when multiple nodes
+// evaluate simultaneously during initial distribution.
+func (r *Repo) scheduleEvalIfNotExists(target enc.Name) {
+	key := target.String()
+	r.heartbeatMu.Lock()
+	defer r.heartbeatMu.Unlock()
+	if _, exists := r.evalTimers[key]; exists {
+		log.Debug(r, "scheduleEvalIfNotExists_skip", "target", key, "reason", "already_scheduled")
+		return
+	}
+	// Delay to allow initial distribution to complete before evaluating
+	delay := 5 * time.Second
+	r.evalTimers[key] = time.AfterFunc(delay, func() {
+		r.heartbeatMu.Lock()
+		delete(r.evalTimers, key)
+		r.heartbeatMu.Unlock()
+		log.Info(r, "eval_timer_fired", "target", key, "leader", r.myNodeName())
+		r.evaluateBatch([]JobInfo{{Target: target, Storage: 0}}, false)
+	})
+}
+
+// cancelEval cancels any scheduled evaluation for the given target
+func (r *Repo) cancelEval(target enc.Name) {
+	key := target.String()
+	r.heartbeatMu.Lock()
+	if t, exists := r.evalTimers[key]; exists {
+		t.Stop()
+		delete(r.evalTimers, key)
 	}
 	r.heartbeatMu.Unlock()
 }

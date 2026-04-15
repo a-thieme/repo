@@ -62,6 +62,11 @@ type Repo struct {
 	// leader fails or distribution is delayed.
 	fallbackTimers map[string]*time.Timer
 
+	// evalTimers handles initial evaluation scheduling for new commands and job additions.
+	// When a new command arrives or a job is added, we schedule evaluation with a delay
+	// to allow distribution to complete. If evaluation is already scheduled, we skip.
+	evalTimers map[string]*time.Timer
+
 	eventLogger  util.UnifiedLogger
 	countingFace *util.CountingFace
 }
@@ -101,6 +106,7 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 		pendingAssignments:    make(map[string]*tlv.JobAssignment),
 		heartbeats:            make(map[string]*time.Timer),
 		fallbackTimers:        make(map[string]*time.Timer),
+		evalTimers:            make(map[string]*time.Timer),
 	}
 
 	r.distributor = NewDistributionMechanism(r, distributionMechanism)
@@ -313,6 +319,8 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 			}
 		}
 		go r.evaluate(update.NewCommand.Target, false)
+		// Schedule evaluation with delay to allow distribution to complete
+		r.scheduleEvalIfNotExists(update.NewCommand.Target)
 	}
 	if shouldPublishJobs {
 		r.distributor.PublishJobs()

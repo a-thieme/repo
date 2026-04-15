@@ -201,13 +201,13 @@ func (l *NullUnifiedLogger) LogCommandPublished(target string)                  
 func (l *NullUnifiedLogger) LogDecisionStarted(target string, currentReplication int, needed int) {}
 func (l *NullUnifiedLogger) LogDecisionMade(target string, shouldClaim bool, reason string, decisionDetails string, currentReplication int, needed int, candidates []string, candidateScores map[string]int, selectedCandidates []string) {
 }
-func (l *NullUnifiedLogger) LogJobClaimed(target string)                                           {}
-func (l *NullUnifiedLogger) LogNodeUpdate(from string, jobs []enc.Name, capacity, used uint64)   {}
-func (l *NullUnifiedLogger) LogStorageChanged(used, delta uint64)                                 {}
-func (l *NullUnifiedLogger) LogJobAssignment(target string, assignees []string)                   {}
-func (l *NullUnifiedLogger) LogAssignmentHandled(target string, action string, reason string)     {}
-func (l *NullUnifiedLogger) LogSeqStats(newSeq uint64, duplicateSeq uint64)                       {}
-func (l *NullUnifiedLogger) LogAssignStats(publishCount uint64, republishCount uint64)            {}
+func (l *NullUnifiedLogger) LogJobClaimed(target string)                                       {}
+func (l *NullUnifiedLogger) LogNodeUpdate(from string, jobs []enc.Name, capacity, used uint64) {}
+func (l *NullUnifiedLogger) LogStorageChanged(used, delta uint64)                              {}
+func (l *NullUnifiedLogger) LogJobAssignment(target string, assignees []string)                {}
+func (l *NullUnifiedLogger) LogAssignmentHandled(target string, action string, reason string)  {}
+func (l *NullUnifiedLogger) LogSeqStats(newSeq uint64, duplicateSeq uint64)                    {}
+func (l *NullUnifiedLogger) LogAssignStats(publishCount uint64, republishCount uint64)         {}
 func (l *NullUnifiedLogger) LogAuctionStarted(target string, currentReplication int, needed int, nonce uint64) {
 }
 func (l *NullUnifiedLogger) LogAuctionWinners(target string, candidates []string, winnerScores map[string]float64, winners []string) {
@@ -215,16 +215,16 @@ func (l *NullUnifiedLogger) LogAuctionWinners(target string, candidates []string
 func (l *NullUnifiedLogger) LogAuctionResults(target string, resultsName string, winners []string) {}
 func (l *NullUnifiedLogger) LogAuctionBid(target string, peer string, capacity uint64, used uint64) {
 }
-func (l *NullUnifiedLogger) LogAuctionDelayed(target string, reason string) {}
-func (l *NullUnifiedLogger) LogNodeDetectedDead(deadNode string, jobsCount int) {}
-func (l *NullUnifiedLogger) LogHeartbeatReceived(node string)                   {}
-func (l *NullUnifiedLogger) LogEvaluationStarted(target string)                 {}
-func (l *NullUnifiedLogger) LogLeaderDetermined(target string, leader string)  {}
-func (l *NullUnifiedLogger) LogWinnersSelected(target string, winners []string) {}
+func (l *NullUnifiedLogger) LogAuctionDelayed(target string, reason string)         {}
+func (l *NullUnifiedLogger) LogNodeDetectedDead(deadNode string, jobsCount int)     {}
+func (l *NullUnifiedLogger) LogHeartbeatReceived(node string)                       {}
+func (l *NullUnifiedLogger) LogEvaluationStarted(target string)                     {}
+func (l *NullUnifiedLogger) LogLeaderDetermined(target string, leader string)       {}
+func (l *NullUnifiedLogger) LogWinnersSelected(target string, winners []string)     {}
 func (l *NullUnifiedLogger) LogAssignmentCreated(target string, assignees []string) {}
-func (l *NullUnifiedLogger) LogPendingAssignment(target string)                 {}
-func (l *NullUnifiedLogger) LogPeerUp(node string)                            {}
-func (l *NullUnifiedLogger) LogPeerDown(node string)                          {}
+func (l *NullUnifiedLogger) LogPendingAssignment(target string)                     {}
+func (l *NullUnifiedLogger) LogPeerUp(node string)                                  {}
+func (l *NullUnifiedLogger) LogPeerDown(node string)                                {}
 
 func NewEventLogger(path string, nodeID string) (*EventLogger, error) {
 	f, err := os.Create(path)

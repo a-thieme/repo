@@ -328,6 +328,15 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 			log.Info(r, "node_status_jobs_removed", "publisher", publisher, "removedJobs", len(removedJobInfos))
 			r.evaluateBatch(removedJobInfos, false)
 		}
+
+		// Detect job additions - jobs in new that weren't in old.
+		// These are evidence of distribution in progress; schedule evaluation
+		// only if not already scheduled.
+		for _, job := range update.Jobs {
+			if !oldJobs[job.Target.String()] {
+				r.scheduleEvalIfNotExists(job.Target)
+			}
+		}
 	}
 
 	r.mu.Unlock()
