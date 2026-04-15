@@ -119,19 +119,53 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 		log.Warn(r, "node_failure_detected", "deadNode", nodeName, "orphanedJobs", jobsCount)
 		r.eventLogger.LogNodeDetectedDead(nodeName, jobsCount)
 
-		r.stopHeartbeatTimer(nodeName)
-		r.evaluateBatch(status.Jobs, false)
+		// Only check the dead node's jobs - the perpetual fallback mechanism
+		// handles re-checking these until RF is satisfied
+		if jobsCount > 0 {
+			r.evaluateBatch(status.Jobs, false)
+		}
 	})
 }
 
-func (r *Repo) stopHeartbeatTimer(nodeName string) {
-	r.heartbeatMu.Lock()
-	defer r.heartbeatMu.Unlock()
+// scheduleFallback schedules a perpetual fallback for a target.
+// When the fallback fires, it re-evaluates the target. If still under-replicated,
+// it reschedules another fallback. This ensures targets eventually reach RF
+// even if the leader fails or distribution is delayed.
+func (r *Repo) scheduleFallback(target enc.Name) {
+	key := target.String()
 
-	if t, exists := r.heartbeats[nodeName]; exists {
+	r.heartbeatMu.Lock()
+	// Cancel existing fallback for this target
+	if t, exists := r.fallbackTimers[key]; exists {
 		t.Stop()
-		delete(r.heartbeats, nodeName)
+		delete(r.fallbackTimers, key)
 	}
+
+	// Schedule new fallback with delay long enough for distribution to complete
+	delay := r.heartbeatInterval*3 + 500*time.Millisecond*2
+	r.fallbackTimers[key] = time.AfterFunc(delay, func() {
+		r.heartbeatMu.Lock()
+		delete(r.fallbackTimers, key)
+		r.heartbeatMu.Unlock()
+
+		log.Info(r, "fallback_fired", "target", key, "leader", r.myNodeName())
+
+		// Always evaluate the target - even if no jobs exist in nodeStatus yet,
+		// the target might need replication that hasn't been published
+		r.evaluateBatch([]JobInfo{{Target: target, Storage: 0}}, false)
+	})
+	r.heartbeatMu.Unlock()
+}
+
+// cancelFallback cancels any scheduled fallback for the given target
+func (r *Repo) cancelFallback(target enc.Name) {
+	key := target.String()
+	r.heartbeatMu.Lock()
+	if t, exists := r.fallbackTimers[key]; exists {
+		t.Stop()
+		delete(r.fallbackTimers, key)
+	}
+	r.heartbeatMu.Unlock()
 }
 
 func (r *Repo) amILeader() bool {
@@ -198,6 +232,18 @@ func (r *Repo) getMyJobs() []JobInfo {
 	dst := make([]JobInfo, len(status.Jobs))
 	copy(dst, status.Jobs)
 	return dst
+}
+
+// jobInfosToTLV converts internal JobInfo slice to TLV JobInfo slice
+func jobInfosToTLV(jobs []JobInfo) []*tlv.JobInfo {
+	if len(jobs) == 0 {
+		return nil
+	}
+	result := make([]*tlv.JobInfo, len(jobs))
+	for i, job := range jobs {
+		result[i] = &tlv.JobInfo{Target: job.Target, StorageSpace: job.Storage}
+	}
+	return result
 }
 
 func (r *Repo) amAssignee(assignment *tlv.JobAssignment) bool {

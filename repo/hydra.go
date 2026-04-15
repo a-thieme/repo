@@ -76,11 +76,7 @@ func (h *HydraMechanism) GetAvailability(under []UnderStats) map[string]Availabi
 func (h *HydraMechanism) PublishAssignments(assignments []*tlv.JobAssignment) {
 	update := &tlv.NodeUpdate{JobAssignments: assignments}
 	if h.repo.ProcessJobAssignments(assignments) {
-		jobs := h.repo.getMyJobs()
-		update.Jobs = make([]*tlv.JobInfo, len(jobs))
-		for i, job := range jobs {
-			update.Jobs[i] = &tlv.JobInfo{Target: job.Target, StorageSpace: job.Storage}
-		}
+		update.Jobs = h.repo.getMyJobInfos()
 	}
 	h.PublishUpdate(update)
 }
@@ -106,20 +102,19 @@ func (h *HydraMechanism) OnCommand(cmd *tlv.Command) *tlv.NodeUpdate {
 // }
 
 func (h *HydraMechanism) PublishJobs() {
-	jobs := h.repo.getMyJobs()
-	tlvJobs := make([]*tlv.JobInfo, len(jobs))
-	for i, job := range jobs {
-		tlvJobs[i] = &tlv.JobInfo{Target: job.Target, StorageSpace: job.Storage}
-	}
-	h.PublishUpdate(&tlv.NodeUpdate{Jobs: tlvJobs})
+	// PublishUpdate already includes jobs when update is nil
+	h.PublishUpdate(nil)
 }
 
-// publish update with stats attached
+// publish update with stats and jobs attached
 func (h *HydraMechanism) PublishUpdate(update *tlv.NodeUpdate) {
 	if update == nil {
 		update = &tlv.NodeUpdate{}
 	}
 	update.StorageCapacity, update.StorageUsed = h.repo.getStorageStats()
+	if update.Jobs == nil {
+		update.Jobs = h.repo.getMyJobInfos()
+	}
 	h.repo.publishUpdate(update)
 }
 

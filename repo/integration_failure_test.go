@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
@@ -234,7 +235,7 @@ func startFailureRepos(t *testing.T, cfg failureTestConfig, repoBinary string, t
 		)
 
 		cmd.Stdout = nil
-		cmd.Stderr = nil
+		cmd.Stderr = os.Stderr
 
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("Failed to start repo %s: %v", nodeID, err)

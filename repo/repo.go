@@ -56,6 +56,12 @@ type Repo struct {
 	heartbeats  map[string]*time.Timer
 	heartbeatMu sync.Mutex
 
+	// fallbackTimers handles perpetual evaluation: when a target is under-replicated,
+	// schedule a fallback. When the fallback fires, re-evaluate. If still under-replicated,
+	// reschedule the fallback. This ensures targets eventually reach RF even if the
+	// leader fails or distribution is delayed.
+	fallbackTimers map[string]*time.Timer
+
 	eventLogger  util.UnifiedLogger
 	countingFace *util.CountingFace
 }
@@ -94,6 +100,7 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 		eventLogger:           eventLogger,
 		pendingAssignments:    make(map[string]*tlv.JobAssignment),
 		heartbeats:            make(map[string]*time.Timer),
+		fallbackTimers:        make(map[string]*time.Timer),
 	}
 
 	r.distributor = NewDistributionMechanism(r, distributionMechanism)

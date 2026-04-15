@@ -45,12 +45,7 @@ func (a *AuctionMechanism) PublishUpdate(update *tlv.NodeUpdate) {
 }
 
 func (h *AuctionMechanism) PublishJobs() {
-	jobs := h.repo.getMyJobs()
-	tlvJobs := make([]*tlv.JobInfo, len(jobs))
-	for i, job := range jobs {
-		tlvJobs[i] = &tlv.JobInfo{Target: job.Target, StorageSpace: job.Storage}
-	}
-	h.PublishUpdate(&tlv.NodeUpdate{Jobs: tlvJobs})
+	h.PublishUpdate(&tlv.NodeUpdate{Jobs: h.repo.getMyJobInfos()})
 }
 
 func (a *AuctionMechanism) Start(client ndn.Client, groupPrefix enc.Name) error {
@@ -341,6 +336,7 @@ func (a *AuctionMechanism) onBidInterest(args ndn.InterestHandlerArgs) {
 	response := &tlv.NodeUpdate{
 		StorageCapacity: capacity,
 		StorageUsed:     used,
+		Jobs:            a.repo.getMyJobInfos(),
 	}
 
 	signer := a.repo.client.SuggestSigner(interest.Name())
@@ -368,7 +364,7 @@ func (a *AuctionMechanism) onBidInterest(args ndn.InterestHandlerArgs) {
 
 	resultsName := metricReq.ResultsName
 	target := metricReq.Target
-	a.repo.eventLogger.LogAuctionBid(target.String(), metricReq.Auctioneer.String(), capacity, used)
+	a.repo.eventLogger.LogAuctionBid(target.String(), metricReq.Auctioneer.String(), response.StorageCapacity, response.StorageUsed)
 
 	log.Debug(a.repo, "subscribeToResults", "resultsName", resultsName.String(), "target", target.String())
 	a.repo.client.ExpressR(ndn.ExpressRArgs{

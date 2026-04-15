@@ -113,9 +113,20 @@ func (r *Repo) evaluateBatch(jobs []JobInfo, force bool) {
 			allUnder = append(allUnder, stats)
 		}
 	}
+
+	// Schedule fallback for ALL under-replicated targets - this ensures
+	// perpetual evaluation until RF is satisfied, regardless of which
+	// node schedules it first
+	for _, under := range allUnder {
+		r.scheduleFallback(under.Target)
+	}
+
 	if !force && !r.amILeader() {
-		log.Info(r, "evaluate_batch_not_leader", "jobCount", len(jobs))
-		return
+		if len(allUnder) == 0 {
+			log.Info(r, "evaluate_batch_not_leader", "jobCount", len(jobs))
+			return
+		}
+		log.Info(r, "evaluate_batch_not_leader_under_replicated", "jobCount", len(jobs), "underReplicated", len(allUnder))
 	}
 	log.Info(r, "evaluate_batch_leader", "jobCount", len(allUnder))
 	availabilities := r.distributor.GetAvailability(allUnder)
@@ -271,8 +282,14 @@ func (r *Repo) sortCandidates(abilities map[string]Availability) []string {
 
 func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 	log.Info(r, "node_status_updated", "publisher", publisher, "jobs", len(update.Jobs), "capacity", update.StorageCapacity, "used", update.StorageUsed)
+
+	// Collect targets to cancel fallbacks for (done outside r.mu to avoid deadlock)
+	targets := make([]enc.Name, len(update.Jobs))
+	for i, job := range update.Jobs {
+		targets[i] = job.Target
+	}
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	oldStatus, hadOldStatus := r.nodeStatus[publisher]
 
@@ -312,4 +329,19 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 			r.evaluateBatch(removedJobInfos, false)
 		}
 	}
+
+	r.mu.Unlock()
+
+	// Cancel fallbacks for jobs in this update - but only if RF is satisfied
+	// If RF is not satisfied, the fallback will fire again and re-publish.
+	for _, t := range targets {
+		if r.countReplication(t) >= r.rf {
+			r.cancelFallback(t)
+		}
+	}
+}
+
+// getMyJobInfos returns the current node's jobs in TLV format for wire encoding.
+func (r *Repo) getMyJobInfos() []*tlv.JobInfo {
+	return jobInfosToTLV(r.getMyJobs())
 }
