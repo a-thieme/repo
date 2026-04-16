@@ -56,6 +56,10 @@ type Repo struct {
 	heartbeats  map[string]*time.Timer
 	heartbeatMu sync.Mutex
 
+	// heartbeatDone channels are closed to invalidate old timer callbacks
+	// when a new heartbeat arrives for the same node
+	heartbeatDone map[string]chan struct{}
+
 	// fallbackTimers handles perpetual evaluation: when a target is under-replicated,
 	// schedule a fallback. When the fallback fires, re-evaluate. If still under-replicated,
 	// reschedule the fallback. This ensures targets eventually reach RF even if the
@@ -105,6 +109,7 @@ func NewRepo(groupPrefix string, nodePrefix string, signingIdentity string, repl
 		eventLogger:           eventLogger,
 		pendingAssignments:    make(map[string]*tlv.JobAssignment),
 		heartbeats:            make(map[string]*time.Timer),
+		heartbeatDone:         make(map[string]chan struct{}),
 		fallbackTimers:        make(map[string]*time.Timer),
 		evalTimers:            make(map[string]*time.Timer),
 	}
@@ -318,8 +323,10 @@ func (r *Repo) onGroupSync(pub svs.SvsPub) {
 				shouldPublishJobs = true
 			}
 		}
-		go r.evaluate(update.NewCommand.Target, false)
-		// Schedule evaluation with delay to allow distribution to complete
+		// All nodes schedule a fallback when receiving a new command via SVS.
+		// The leader's original distribution is already happening, so we wait
+		// for the fallback to fire before evaluating. This prevents races where
+		// evaluation happens before the distribution has propagated.
 		r.scheduleEvalIfNotExists(update.NewCommand.Target)
 	}
 	if shouldPublishJobs {

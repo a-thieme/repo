@@ -101,11 +101,35 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 	r.mu.Unlock()
 
 	timeout := r.heartbeatInterval*3 + 500*time.Millisecond
+
+	// Close the old done channel to invalidate any in-flight callback
+	if done, exists := r.heartbeatDone[nodeName]; exists {
+		close(done)
+		delete(r.heartbeatDone, nodeName)
+	}
+
+	// Stop and remove old timer if exists
 	if t, exists := r.heartbeats[nodeName]; exists {
 		t.Stop()
 		delete(r.heartbeats, nodeName)
 	}
+
+	// Create new done channel for this timer
+	done := make(chan struct{})
+	r.heartbeatDone[nodeName] = done
+
 	r.heartbeats[nodeName] = time.AfterFunc(timeout, func() {
+		// Check if this timer was invalidated by a newer heartbeat
+		select {
+		case <-done:
+			// Timer was invalidated, skip
+			return
+		default:
+			// Continue with callback
+		}
+
+		// Copy the jobs we need to evaluate before releasing the lock
+		var jobsToEvaluate []JobInfo
 		r.mu.Lock()
 		status, exists := r.nodeStatus[nodeName]
 		if !exists {
@@ -114,15 +138,21 @@ func (r *Repo) resetHeartbeatTimer(nodeName string) {
 		}
 		delete(r.nodeStatus, nodeName)
 		jobsCount := len(status.Jobs)
+		if jobsCount > 0 {
+			jobsToEvaluate = make([]JobInfo, jobsCount)
+			copy(jobsToEvaluate, status.Jobs)
+		}
 		r.mu.Unlock()
 
 		log.Warn(r, "node_failure_detected", "deadNode", nodeName, "orphanedJobs", jobsCount)
 		r.eventLogger.LogNodeDetectedDead(nodeName, jobsCount)
 
 		// Only check the dead node's jobs - the perpetual fallback mechanism
-		// handles re-checking these until RF is satisfied
-		if jobsCount > 0 {
-			r.evaluateBatch(status.Jobs, false)
+		// handles re-checking these until RF is satisfied.
+		// NOTE: evaluateBatch is called WITHOUT holding r.mu to avoid deadlock
+		// since evaluateBatch itself acquires r.mu internally.
+		if len(jobsToEvaluate) > 0 {
+			r.evaluateBatch(jobsToEvaluate, false)
 		}
 	})
 }
@@ -150,9 +180,15 @@ func (r *Repo) scheduleFallback(target enc.Name) {
 
 		log.Info(r, "fallback_fired", "target", key, "leader", r.myNodeName())
 
-		// Always evaluate the target - even if no jobs exist in nodeStatus yet,
-		// the target might need replication that hasn't been published
+		// Evaluate the target - if not the leader, this returns early but we still
+		// reschedule the fallback for next time in case we became leader
 		r.evaluateBatch([]JobInfo{{Target: target, Storage: 0}}, false)
+
+		// Perpetually reschedule fallback if target is still under-replicated
+		// This applies to ALL nodes (leader or not) to handle leader changes
+		if r.countReplication(target) < r.rf {
+			r.scheduleFallback(target)
+		}
 	})
 	r.heartbeatMu.Unlock()
 }

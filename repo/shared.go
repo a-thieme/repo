@@ -289,6 +289,10 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 		targets[i] = job.Target
 	}
 
+	// Collect job removal info and added job targets while holding the lock
+	var removedJobInfos []JobInfo
+	var addedJobTargets []enc.Name
+
 	r.mu.Lock()
 
 	oldStatus, hadOldStatus := r.nodeStatus[publisher]
@@ -317,29 +321,33 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 			newJobs[job.Target.String()] = true
 		}
 
-		var removedJobInfos []JobInfo
 		for _, job := range oldStatus.Jobs {
 			if !newJobs[job.Target.String()] {
 				removedJobInfos = append(removedJobInfos, job)
 			}
 		}
 
-		if len(removedJobInfos) > 0 {
-			log.Info(r, "node_status_jobs_removed", "publisher", publisher, "removedJobs", len(removedJobInfos))
-			r.evaluateBatch(removedJobInfos, false)
-		}
-
 		// Detect job additions - jobs in new that weren't in old.
-		// These are evidence of distribution in progress; schedule evaluation
-		// only if not already scheduled.
 		for _, job := range update.Jobs {
 			if !oldJobs[job.Target.String()] {
-				r.scheduleEvalIfNotExists(job.Target)
+				addedJobTargets = append(addedJobTargets, job.Target)
 			}
 		}
 	}
 
 	r.mu.Unlock()
+
+	// NOTE: evaluateBatch and scheduleEvalIfNotExists are called WITHOUT holding r.mu
+	// to avoid blocking heartbeat processing and to avoid deadlock with scheduleFallback's
+	// timer callback which also needs r.mu.
+	if len(removedJobInfos) > 0 {
+		log.Info(r, "node_status_jobs_removed", "publisher", publisher, "removedJobs", len(removedJobInfos))
+		r.evaluateBatch(removedJobInfos, false)
+	}
+
+	for _, target := range addedJobTargets {
+		r.scheduleEvalIfNotExists(target)
+	}
 
 	// Cancel fallbacks for jobs in this update - but only if RF is satisfied
 	// If RF is not satisfied, the fallback will fire again and re-publish.

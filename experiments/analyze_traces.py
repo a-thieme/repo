@@ -734,11 +734,12 @@ def analyze_experiment(exp_dir: Path) -> Dict[str, Any]:
     print(f"  Parsing events from {exp_dir.name}...")
     events, metadata = parse_events(exp_dir)
 
-    # Detect distribution from parent directory name (e.g., "run_20260409_163003_hydra")
-    parent_name = exp_dir.parent.name.lower()
-    if "hydra" in parent_name:
+    # Detect distribution from experiment directory name (e.g., "partition-hydra-1x8_20260416_071404")
+    # The Makefile passes experiment paths like "results/partition-hydra-1x8_TIMESTAMP"
+    exp_name = exp_dir.name.lower()
+    if "hydra" in exp_name:
         distribution = "hydra"
-    elif "auction" in parent_name:
+    elif "auction" in exp_name:
         distribution = "auction"
     else:
         distribution = "unknown"

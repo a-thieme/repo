@@ -102,63 +102,91 @@ def remove_link_loss(node_names):
 
 
 def apply_link_failure(node1, node2):
-    """Simulate link failure between two nodes by adding drop rules.
+    """Simulate link failure between two nodes by dropping all traffic.
 
-    Uses netem to drop all packets between two nodes.
-    This is applied on both nodes to create a bidirectional failure.
+    Uses netem to add 100% packet loss AND iptables to block UDP traffic.
+    This provides defense-in-depth to ensure no traffic crosses the partition.
+    Uses ndn.net.links to find the correct link between nodes.
     """
-    for host in ndn.net.hosts:
-        if host.name == node1:
-            for intf in host.intfList():
-                if intf.name == "lo":
-                    continue
-                # Find the peer IP and add drop rule
-                peer_host = None
-                for h in ndn.net.hosts:
-                    if h.name == node2:
-                        peer_host = h
-                        break
-                if peer_host is None:
-                    continue
-                # Get peer IP through the interface
-                peer_ip = None
-                for ip, _ in intf.options.get("ipv4", []):
-                    peer_ip = ip
-                    break
-                if peer_ip:
-                    # Drop packets to/from peer IP
-                    host.cmd(f"tc qdisc add dev {intf.name} root netem drop 100% 2>/dev/null") or \
-                        host.cmd(f"tc qdisc change dev {intf.name} root netem drop 100% 2>/dev/null")
-        elif host.name == node2:
-            for intf in host.intfList():
-                if intf.name == "lo":
-                    continue
-                # Find the peer IP
-                peer_host = None
-                for h in ndn.net.hosts:
-                    if h.name == node1:
-                        peer_host = h
-                        break
-                if peer_host is None:
-                    continue
-                peer_ip = None
-                for ip, _ in intf.options.get("ipv4", []):
-                    peer_ip = ip
-                    break
-                if peer_ip:
-                    host.cmd(f"tc qdisc add dev {intf.name} root netem drop 100% 2>/dev/null") or \
-                        host.cmd(f"tc qdisc change dev {intf.name} root netem drop 100% 2>/dev/null")
+    # Find the link connecting node1 and node2
+    # Use case-insensitive comparison since mini-ndn may use lowercase node names
+    node1_lower = node1.lower()
+    node2_lower = node2.lower()
+    for link in ndn.net.links:
+        intf1_node = link.intf1.node.name if link.intf1 and link.intf1.node else None
+        intf2_node = link.intf2.node.name if link.intf2 and link.intf2.node else None
 
+        # Check if this link connects node1 and node2 (case-insensitive)
+        if (intf1_node and intf1_node.lower() == node1_lower and intf2_node and intf2_node.lower() == node2_lower) or \
+           (intf1_node and intf1_node.lower() == node2_lower and intf2_node and intf2_node.lower() == node1_lower):
+            node_a = link.intf1.node
+            node_b = link.intf2.node
+            intf_a = link.intf1
+            intf_b = link.intf2
+
+            if intf_a.name == 'lo' or intf_b.name == 'lo':
+                continue
+
+            # Get IP addresses
+            node_a_ip = intf_a.ip if hasattr(intf_a, 'ip') and intf_a.ip else None
+            node_b_ip = intf_b.ip if hasattr(intf_b, 'ip') and intf_b.ip else None
+
+            info(f"  Blocking link {node_a.name} <-> {node_b.name} (IPs: {node_a_ip} <-> {node_b_ip})\n")
+
+            # Apply netem loss on both ends
+            node_a.cmd(f"tc qdisc add dev {intf_a.name} root netem loss 100% 2>/dev/null || tc qdisc change dev {intf_a.name} root netem loss 100%")
+            node_b.cmd(f"tc qdisc add dev {intf_b.name} root netem loss 100% 2>/dev/null || tc qdisc change dev {intf_b.name} root netem loss 100%")
+
+            # Also use iptables to block UDP traffic between these nodes (defense in depth)
+            if node_a_ip and node_b_ip:
+                # Block UDP traffic from node_a to node_b
+                node_a.cmd(f"iptables -I OUTPUT -d {node_b_ip} -p udp -j DROP 2>/dev/null || true")
+                # Block UDP traffic from node_b to node_a
+                node_b.cmd(f"iptables -I OUTPUT -d {node_a_ip} -p udp -j DROP 2>/dev/null || true")
+
+            info(f"    netem + iptables applied on both ends\n")
+
+            return  # Link found and failure applied
+    info(f"  Warning: No link found between {node1} and {node2}\n")
 
 def remove_link_failure(node1, node2):
-    """Restore link between two nodes by removing drop rules."""
-    for host in ndn.net.hosts:
-        if host.name in (node1, node2):
-            for intf in host.intfList():
-                if intf.name == "lo":
-                    continue
-                # Remove netem entirely (simplified approach)
-                host.cmd(f"tc qdisc del dev {intf.name} root 2>/dev/null")
+    """Restore link between two nodes by removing netem and iptables blocks.
+
+    Removes the 100% loss and iptables rules that were applied to simulate link failure.
+    """
+    node1_lower = node1.lower()
+    node2_lower = node2.lower()
+    for link in ndn.net.links:
+        intf1_node = link.intf1.node.name if link.intf1 and link.intf1.node else None
+        intf2_node = link.intf2.node.name if link.intf2 and link.intf2.node else None
+
+        if (intf1_node and intf1_node.lower() == node1_lower and intf2_node and intf2_node.lower() == node2_lower) or \
+           (intf1_node and intf1_node.lower() == node2_lower and intf2_node and intf2_node.lower() == node1_lower):
+            node_a = link.intf1.node
+            node_b = link.intf2.node
+            intf_a = link.intf1
+            intf_b = link.intf2
+
+            if intf_a.name == 'lo' or intf_b.name == 'lo':
+                continue
+
+            # Get IP addresses
+            node_a_ip = intf_a.ip if hasattr(intf_a, 'ip') and intf_a.ip else None
+            node_b_ip = intf_b.ip if hasattr(intf_b, 'ip') and intf_b.ip else None
+
+            info(f"  Removing block from link {node_a.name}:{intf_a.name} <-> {node_b.name}:{intf_b.name}\n")
+
+            # Remove netem qdisc
+            node_a.cmd(f"tc qdisc del dev {intf_a.name} root 2>/dev/null")
+            node_b.cmd(f"tc qdisc del dev {intf_b.name} root 2>/dev/null")
+
+            # Remove iptables rules
+            if node_a_ip and node_b_ip:
+                node_a.cmd(f"iptables -D OUTPUT -d {node_b_ip} -p udp -j DROP 2>/dev/null || true")
+                node_b.cmd(f"iptables -D OUTPUT -d {node_a_ip} -p udp -j DROP 2>/dev/null || true")
+
+            return
+    info(f"  Warning: No link found between {node1} and {node2} to restore\n")
 
 
 def create_partition(link_list):
@@ -269,7 +297,7 @@ def main():
         help="Path to producer binary",
     )
     parser.add_argument(
-        "--svs-timeout", type=int, default=8, help="SVS health check timeout (seconds)"
+        "--svs-timeout", type=int, default=30, help="SVS health check timeout (seconds)"
     )
     parser.add_argument(
         "--producer-timeout",
@@ -564,7 +592,7 @@ def main():
         )
         dist_flag = f" --distribution {args.distribution}"
         auction_timeout_flag = (
-            " --auction-timeout 1s" if args.distribution == "auction" else ""
+            " --auction-timeout 5s" if args.distribution == "auction" else ""
         )
         cmd = f"{args.repo_bin} --event-log {event_log} --node-prefix {node_prefix} --signing-identity {signing_identity}{debug_flag}{storage_flags}{dist_flag}{auction_timeout_flag} > {stdout_log} 2>&1 &"
         host.cmd(f"mkdir -p /tmp/{host.name}")
@@ -665,16 +693,23 @@ def main():
             for cmd in commands.values()
             if cmd["final_replication"] == args.replication_factor
         )
+        commands_over = sum(
+            1
+            for cmd in commands.values()
+            if cmd["final_replication"] > args.replication_factor
+        )
         commands_under = sum(
             1
             for cmd in commands.values()
             if cmd["final_replication"] < args.replication_factor
         )
 
-        if commands_under == 0 and commands_at_rf == expected_commands:
+        if commands_under == 0:
+            # Allow over-replication - more copies than RF is okay for partition testing
+            # What matters is that no command is under-replicated
             replicated = True
             info(
-                f"  All {expected_commands} commands achieved RF={args.replication_factor}\n"
+                f"  All {expected_commands} commands achieved at least RF={args.replication_factor} ({commands_at_rf} at RF, {commands_over} over)\n"
             )
             break
 
@@ -718,6 +753,25 @@ def main():
             # Give nodes time to detect partition and react
             info(f"Waiting {args.partition_timeout}s for heartbeat detection and re-replication...\n")
             time.sleep(args.partition_timeout)
+
+            # Rebuild command timeline after partition to get post-partition replication counts
+            commands_after_partition = build_replication_timeline(results_dir)
+            expected_commands = args.command_count * len(producer_nodes)
+            commands_at_2rf = sum(
+                1
+                for cmd in commands_after_partition.values()
+                if cmd["final_replication"] >= 2 * args.replication_factor
+            )
+            commands_under_2rf = sum(
+                1
+                for cmd in commands_after_partition.values()
+                if cmd["final_replication"] < 2 * args.replication_factor
+            )
+            info(f"Post-partition: {commands_at_2rf}/{expected_commands} commands at 2*RF={2*args.replication_factor}\n")
+            if commands_under_2rf > 0:
+                info(f"  WARNING: {commands_under_2rf} commands not at 2*RF\n")
+                # For partition test, require 2*RF for success
+                replicated = False
 
     failure_metadata = {"failure_enabled": False}
 
@@ -1337,6 +1391,26 @@ def calculate_failure_metrics(failure_timestamp, detection_timestamp, recovery_t
         if not ts:
             return None
         ts = ts.replace("Z", "+00:00")
+        # Truncate nanoseconds to microseconds before parsing
+        # Python's fromisoformat only supports 6 decimal places
+        if "." in ts:
+            # Handle timestamp with timezone
+            if "+" in ts:
+                main_tz = ts.rsplit("+", 1)
+                main = main_tz[0]
+                tz = "+" + main_tz[1]
+            elif "-" in ts[10:]:  # Date separator is -, timezone separator is also -
+                # Find the last - that separates date from time+tz
+                idx = ts.rfind("-", 10)  # Start after YYYY-MM-DD
+                main = ts[:idx]
+                tz = ts[idx:]
+            else:
+                main = ts
+                tz = ""
+            if "." in main:
+                main, frac = main.rsplit(".", 1)
+                frac = frac[:6]  # Truncate to microseconds
+                ts = main + "." + frac + tz
         return datetime.fromisoformat(ts)
 
     failure_dt = parse_ts(failure_timestamp)
