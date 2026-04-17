@@ -90,6 +90,45 @@ steady-hydra-4x1: build
 steady-hydra-24x1: build
 	$(call run_experiment,steady-hydra-24x1,24,1,hydra)
 
+# 24x24: 24 producers, 1 command each, synchronized start
+steady-hydra-24x24: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/steady-hydra-24x24_$$TS; \
+	echo "Running steady-hydra-24x24 experiment..."; \
+	echo "Timestamp: $$TS"; \
+	echo "Results: $(RESULTS_DIR)/steady-hydra-24x24_$$TS"; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/steady-hydra-24x24_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout $(REPLICATION_TIMEOUT) \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 24 \
+			--command-count 1 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution hydra \
+			--sync-start \
+			--sync-wait 5" \
+		> "$(RESULTS_DIR)/steady-hydra-24x24_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/steady-hydra-24x24_$$TS/docker.log"; then \
+		echo "  ✓ steady-hydra-24x24 passed"; \
+	else \
+		echo "  ✗ steady-hydra-24x24 failed"; \
+		tail -20 "$(RESULTS_DIR)/steady-hydra-24x24_$$TS/docker.log"; \
+	fi; \
+	echo ""; \
+	echo "=== Analyzing Results ==="; \
+	python3 $(ANALYZE_PY) \
+		--experiments "$(RESULTS_DIR)/steady-hydra-24x24_$$TS" \
+		--output-dir "$(RESULTS_DIR)/steady-hydra-24x24_$$TS" \
+		--format json csv markdown 2>/dev/null || true; \
+	echo "Results saved to: $(RESULTS_DIR)/steady-hydra-24x24_$$TS"
+
 steady-auction-1x1: build
 	$(call run_experiment,steady-auction-1x1,1,1,auction)
 
@@ -101,6 +140,45 @@ steady-auction-4x1: build
 
 steady-auction-24x1: build
 	$(call run_experiment,steady-auction-24x1,24,1,auction)
+
+# 24x24: 24 producers, 1 command each, synchronized start
+steady-auction-24x24: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/steady-auction-24x24_$$TS; \
+	echo "Running steady-auction-24x24 experiment..."; \
+	echo "Timestamp: $$TS"; \
+	echo "Results: $(RESULTS_DIR)/steady-auction-24x24_$$TS"; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/steady-auction-24x24_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout $(REPLICATION_TIMEOUT) \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 24 \
+			--command-count 1 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution auction \
+			--sync-start \
+			--sync-wait 5" \
+		> "$(RESULTS_DIR)/steady-auction-24x24_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/steady-auction-24x24_$$TS/docker.log"; then \
+		echo "  ✓ steady-auction-24x24 passed"; \
+	else \
+		echo "  ✗ steady-auction-24x24 failed"; \
+		tail -20 "$(RESULTS_DIR)/steady-auction-24x24_$$TS/docker.log"; \
+	fi; \
+	echo ""; \
+	echo "=== Analyzing Results ==="; \
+	python3 $(ANALYZE_PY) \
+		--experiments "$(RESULTS_DIR)/steady-auction-24x24_$$TS" \
+		--output-dir "$(RESULTS_DIR)/steady-auction-24x24_$$TS" \
+		--format json csv markdown 2>/dev/null || true; \
+	echo "Results saved to: $(RESULTS_DIR)/steady-auction-24x24_$$TS"
 
 # === Failure Experiments ===
 # Test one node failure: wait for replication, kill one node, verify recovery
@@ -260,6 +338,288 @@ partition-auction-1x8: build
 		--format json csv markdown 2>/dev/null || true; \
 	echo "Results saved to: $(RESULTS_DIR)/partition-auction-1x8_$$TS"
 
+# === Link Loss Experiments ===
+# Test behavior under increasing network degradation
+
+loss-hydra-1x8-1: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/loss-hydra-1x8-1_$$TS; \
+	echo "Running loss-hydra-1x8-1 (1% loss) experiment..."; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/loss-hydra-1x8-1_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout $(REPLICATION_TIMEOUT) \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 8 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution hydra \
+			--link-loss-rate 1" \
+		> "$(RESULTS_DIR)/loss-hydra-1x8-1_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/loss-hydra-1x8-1_$$TS/docker.log"; then \
+		echo "  ✓ loss-hydra-1x8-1 passed"; \
+	else \
+		echo "  ✗ loss-hydra-1x8-1 failed"; \
+		tail -20 "$(RESULTS_DIR)/loss-hydra-1x8-1_$$TS/docker.log"; \
+	fi
+
+loss-auction-1x8-1: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/loss-auction-1x8-1_$$TS; \
+	echo "Running loss-auction-1x8-1 (1% loss) experiment..."; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/loss-auction-1x8-1_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout $(REPLICATION_TIMEOUT) \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 8 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution auction \
+			--link-loss-rate 1" \
+		> "$(RESULTS_DIR)/loss-auction-1x8-1_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/loss-auction-1x8-1_$$TS/docker.log"; then \
+		echo "  ✓ loss-auction-1x8-1 passed"; \
+	else \
+		echo "  ✗ loss-auction-1x8-1 failed"; \
+		tail -20 "$(RESULTS_DIR)/loss-auction-1x8-1_$$TS/docker.log"; \
+	fi
+
+loss-hydra-1x8-5: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/loss-hydra-1x8-5_$$TS; \
+	echo "Running loss-hydra-1x8-5 (5% loss) experiment..."; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/loss-hydra-1x8-5_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout $(REPLICATION_TIMEOUT) \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 8 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution hydra \
+			--link-loss-rate 5" \
+		> "$(RESULTS_DIR)/loss-hydra-1x8-5_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/loss-hydra-1x8-5_$$TS/docker.log"; then \
+		echo "  ✓ loss-hydra-1x8-5 passed"; \
+	else \
+		echo "  ✗ loss-hydra-1x8-5 failed"; \
+		tail -20 "$(RESULTS_DIR)/loss-hydra-1x8-5_$$TS/docker.log"; \
+	fi
+
+loss-auction-1x8-5: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/loss-auction-1x8-5_$$TS; \
+	echo "Running loss-auction-1x8-5 (5% loss) experiment..."; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/loss-auction-1x8-5_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout $(REPLICATION_TIMEOUT) \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 8 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution auction \
+			--link-loss-rate 5" \
+		> "$(RESULTS_DIR)/loss-auction-1x8-5_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/loss-auction-1x8-5_$$TS/docker.log"; then \
+		echo "  ✓ loss-auction-1x8-5 passed"; \
+	else \
+		echo "  ✗ loss-auction-1x8-5 failed"; \
+		tail -20 "$(RESULTS_DIR)/loss-auction-1x8-5_$$TS/docker.log"; \
+	fi
+
+loss-hydra-1x8-10: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/loss-hydra-1x8-10_$$TS; \
+	echo "Running loss-hydra-1x8-10 (10% loss) experiment..."; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/loss-hydra-1x8-10_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout $(REPLICATION_TIMEOUT) \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 8 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution hydra \
+			--link-loss-rate 10" \
+		> "$(RESULTS_DIR)/loss-hydra-1x8-10_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/loss-hydra-1x8-10_$$TS/docker.log"; then \
+		echo "  ✓ loss-hydra-1x8-10 passed"; \
+	else \
+		echo "  ✗ loss-hydra-1x8-10 failed"; \
+		tail -20 "$(RESULTS_DIR)/loss-hydra-1x8-10_$$TS/docker.log"; \
+	fi
+
+loss-auction-1x8-10: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/loss-auction-1x8-10_$$TS; \
+	echo "Running loss-auction-1x8-10 (10% loss) experiment..."; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/loss-auction-1x8-10_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout $(REPLICATION_TIMEOUT) \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 8 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution auction \
+			--link-loss-rate 10" \
+		> "$(RESULTS_DIR)/loss-auction-1x8-10_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/loss-auction-1x8-10_$$TS/docker.log"; then \
+		echo "  ✓ loss-auction-1x8-10 passed"; \
+	else \
+		echo "  ✗ loss-auction-1x8-10 failed"; \
+		tail -20 "$(RESULTS_DIR)/loss-auction-1x8-10_$$TS/docker.log"; \
+	fi
+
+# === Steady State Cost Experiments ===
+# Measure cost to reach and maintain steady state (longer running)
+
+cost-hydra-1x8-60s: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/cost-hydra-1x8-60s_$$TS; \
+	echo "Running cost-hydra-1x8-60s (60s steady state) experiment..."; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/cost-hydra-1x8-60s_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout 60 \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 8 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution hydra" \
+		> "$(RESULTS_DIR)/cost-hydra-1x8-60s_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/cost-hydra-1x8-60s_$$TS/docker.log"; then \
+		echo "  ✓ cost-hydra-1x8-60s passed"; \
+	else \
+		echo "  ✗ cost-hydra-1x8-60s failed"; \
+		tail -20 "$(RESULTS_DIR)/cost-hydra-1x8-60s_$$TS/docker.log"; \
+	fi
+
+cost-auction-1x8-60s: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/cost-auction-1x8-60s_$$TS; \
+	echo "Running cost-auction-1x8-60s (60s steady state) experiment..."; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/cost-auction-1x8-60s_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout 60 \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 8 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution auction" \
+		> "$(RESULTS_DIR)/cost-auction-1x8-60s_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/cost-auction-1x8-60s_$$TS/docker.log"; then \
+		echo "  ✓ cost-auction-1x8-60s passed"; \
+	else \
+		echo "  ✗ cost-auction-1x8-60s failed"; \
+		tail -20 "$(RESULTS_DIR)/cost-auction-1x8-60s_$$TS/docker.log"; \
+	fi
+
+cost-hydra-1x8-120s: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/cost-hydra-1x8-120s_$$TS; \
+	echo "Running cost-hydra-1x8-120s (120s steady state) experiment..."; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/cost-hydra-1x8-120s_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout 120 \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 8 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution hydra" \
+		> "$(RESULTS_DIR)/cost-hydra-1x8-120s_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/cost-hydra-1x8-120s_$$TS/docker.log"; then \
+		echo "  ✓ cost-hydra-1x8-120s passed"; \
+	else \
+		echo "  ✗ cost-hydra-1x8-120s failed"; \
+		tail -20 "$(RESULTS_DIR)/cost-hydra-1x8-120s_$$TS/docker.log"; \
+	fi
+
+cost-auction-1x8-120s: build
+	@TS=$$(date +%Y%m%d_%H%M%S); \
+	mkdir -p $(RESULTS_DIR)/cost-auction-1x8-120s_$$TS; \
+	echo "Running cost-auction-1x8-120s (120s steady state) experiment..."; \
+	docker run --rm --privileged \
+		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
+		-v /lib/modules:/lib/modules \
+		-v "$(RESULTS_DIR)/cost-auction-1x8-120s_$$TS":/results \
+		--entrypoint /bin/sh mini-ndn-integration \
+		-c "python3 /usr/local/bin/runner.py \
+			--node-count $(NODES) \
+			--timeout 120 \
+			--replication-factor $(RF) \
+			--routing-wait $(ROUTING_WAIT) \
+			--results-dir /results \
+			--producer-count 1 \
+			--command-count 8 \
+			--command-rate $(COMMAND_RATE) \
+			--distribution auction" \
+		> "$(RESULTS_DIR)/cost-auction-1x8-120s_$$TS/docker.log" 2>&1; \
+	if grep -q "TEST PASSED" "$(RESULTS_DIR)/cost-auction-1x8-120s_$$TS/docker.log"; then \
+		echo "  ✓ cost-auction-1x8-120s passed"; \
+	else \
+		echo "  ✗ cost-auction-1x8-120s failed"; \
+		tail -20 "$(RESULTS_DIR)/cost-auction-1x8-120s_$$TS/docker.log"; \
+	fi
+
 # === Run All Experiments ===
 
 all: build \
@@ -267,6 +627,19 @@ all: build \
 	steady-auction-1x1 steady-auction-1x8 steady-auction-4x1 \
 	failure-hydra-1x8 failure-auction-1x8 \
 	partition-hydra-1x8 partition-auction-1x8
+
+# === Run Comprehensive Experiments ===
+
+all-comprehensive: build \
+	steady-hydra-1x8 steady-auction-1x8 \
+	steady-hydra-24x24 steady-auction-24x24 \
+	failure-hydra-1x8 failure-auction-1x8 \
+	partition-hydra-1x8 partition-auction-1x8 \
+	loss-hydra-1x8-1 loss-auction-1x8-1 \
+	loss-hydra-1x8-5 loss-auction-1x8-5 \
+	loss-hydra-1x8-10 loss-auction-1x8-10 \
+	cost-hydra-1x8-60s cost-auction-1x8-60s \
+	cost-hydra-1x8-120s cost-auction-1x8-120s
 
 # === Quick Tests (faster, fewer commands) ===
 

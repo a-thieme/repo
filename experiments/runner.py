@@ -149,6 +149,88 @@ def apply_link_failure(node1, node2):
             return  # Link found and failure applied
     info(f"  Warning: No link found between {node1} and {node2}\n")
 
+def capture_nfd_state(node, prefix="ndn", capture_face_scope="local"):
+    """Capture NFD FIB and face status for debugging route issues.
+
+    Args:
+        node: Mininet host node to query
+        prefix: Filter FIB entries by this prefix (empty string = all entries)
+        capture_face_scope: 'local' for faces with scope=local, 'all' for everything
+
+    Returns:
+        dict with 'fib' (list of FIB entries), 'faces' (list of face entries), 'timestamp'
+    """
+    import datetime
+
+    result = {
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "node": node.name,
+        "fib": [],
+        "faces": [],
+    }
+
+    # Capture FIB entries, optionally filtered by prefix
+    if prefix:
+        fib_output = node.cmd(f"nfdc fib list 2>&1 | grep '{prefix}' || true")
+    else:
+        fib_output = node.cmd("nfdc fib list 2>&1")
+
+    for line in fib_output.strip().split("\n"):
+        if line.strip():
+            result["fib"].append(line.strip())
+
+    # Capture face list
+    face_output = node.cmd("nfdc face list 2>&1")
+    for line in face_output.strip().split("\n"):
+        if line.strip():
+            # Filter by scope if requested
+            if capture_face_scope == "local" and "scope=local" not in line.lower():
+                continue
+            result["faces"].append(line.strip())
+
+    return result
+
+
+def capture_nfd_state_all_nodes(prefix="ndn"):
+    """Capture NFD state from all nodes. Call this during experiments to diagnose issues.
+
+    Returns:
+        dict mapping node name -> NFD state dict
+    """
+    global ndn
+    all_state = {}
+    for host in ndn.net.hosts:
+        try:
+            state = capture_nfd_state(host, prefix=prefix)
+            all_state[host.name] = state
+        except Exception as e:
+            all_state[host.name] = {"error": str(e)}
+    return all_state
+
+
+def log_nfd_state(state, log_prefix="nfd_state"):
+    """Log NFD state to stdout in a structured format for analysis.
+
+    Args:
+        state: dict from capture_nfd_state or capture_nfd_state_all_nodes
+        log_prefix: prefix for log lines
+    """
+    if isinstance(state, dict) and "node" in state:
+        # Single node state
+        info(f"  [{log_prefix}] {state['node']} @ {state['timestamp']}\n")
+        info(f"    FIB entries ({len(state.get('fib', []))}):\n")
+        for entry in state.get('fib', []):
+            info(f"      {entry}\n")
+        info(f"    Faces ({len(state.get('faces', []))}):\n")
+        for face in state.get('faces', []):
+            info(f"      {face}\n")
+    else:
+        # Multiple nodes
+        for node_name, node_state in state.items():
+            if isinstance(node_state, dict) and "error" not in node_state:
+                log_nfd_state(node_state, log_prefix=f"{log_prefix}/{node_name}")
+
+
 def remove_link_failure(node1, node2):
     """Restore link between two nodes by removing netem and iptables blocks.
 
@@ -304,6 +386,17 @@ def main():
         type=int,
         default=1,
         help="Producer command timeout (seconds)",
+    )
+    parser.add_argument(
+        "--sync-start",
+        action="store_true",
+        help="Synchronize all producers to start at the same time (for simultaneous commands)",
+    )
+    parser.add_argument(
+        "--sync-wait",
+        type=int,
+        default=5,
+        help="Seconds to wait before synchronized start (only used with --sync-start)",
     )
     parser.add_argument(
         "--replication-timeout",
@@ -658,16 +751,173 @@ def main():
         loss_nodes.extend(loss_nodes_list if loss_nodes_list else [h.name for h in ndn.net.hosts])
 
     info(f"Running {len(producer_nodes)} producer(s)...\n")
-    for producer_node in producer_nodes:
-        info(f"  Starting producer on {producer_node.name}...\n")
+
+    # Capture baseline NFD state before commands start
+    info("=== NFD STATE: BASELINE (before commands) ===\n")
+    baseline_state = capture_nfd_state_all_nodes(prefix="/ndn/drepo")
+    for node_name, state in baseline_state.items():
+        if isinstance(state, dict) and "error" not in state:
+            log_nfd_state(state, log_prefix=f"baseline/{node_name}")
+
+    # Also capture with all faces (not just local) for debugging
+    info("=== NFD STATE: BASELINE ALL FACES (before commands) ===\n")
+    baseline_all_faces = {}
+    for host in ndn.net.hosts:
+        try:
+            state = capture_nfd_state(host, prefix="/ndn/drepo", capture_face_scope="all")
+            baseline_all_faces[host.name] = state
+        except Exception as e:
+            baseline_all_faces[host.name] = {"error": str(e)}
+    for node_name, state in baseline_all_faces.items():
+        if isinstance(state, dict) and "error" not in state:
+            log_nfd_state(state, log_prefix=f"baseline_faces/{node_name}")
+
+    def run_producer_with_nfd_monitoring(node, sync_time=None):
+        """Run producer on a node with concurrent NFD state monitoring during execution.
+
+        Uses threading to run producer in background while monitoring NFD state.
+        This approach avoids the 'face is not running' issue that occurs with popen().
+        """
+        info(f"  Starting producer on {node.name} with NFD monitoring...\n")
         cmd_type_flag = f" -type {args.command_type}"
         join_ratio_flag = (
             f" -join-ratio {args.join_ratio}" if args.command_type == "both" else ""
         )
-        result = producer_node.cmd(
-            f"timeout {args.producer_timeout}s {args.producer_bin} -count {args.command_count} -rate {args.command_rate}{cmd_type_flag}{join_ratio_flag} 2>&1"
+        sync_start_flag = f" -sync-start {sync_time}" if sync_time else ""
+
+        # Use threading to run producer in background
+        producer_cmd = f"timeout {args.producer_timeout}s {args.producer_bin} -count {args.command_count} -rate {args.command_rate}{cmd_type_flag}{join_ratio_flag}{sync_start_flag}"
+        producer_output_file = results_dir / f"producer-{node.name}.log"
+        producer_result = [None]  # Use list to capture result from thread
+
+        def run_producer_thread():
+            # Use node.cmd() which properly maintains NFD face connectivity
+            result = node.cmd(f"{producer_cmd} > {producer_output_file} 2>&1")
+            producer_result[0] = result
+
+        # Start producer in a thread
+        prod_thread = threading.Thread(target=run_producer_thread)
+        prod_thread.daemon = True
+        prod_thread.start()
+
+        # Give the thread a moment to start
+        time.sleep(0.1)
+
+        # Monitor NFD state during producer execution
+        monitoring_interval = 0.5  # Capture state every 500ms
+        max_wait = args.command_count / args.command_rate + 10  # Expected runtime + buffer
+
+        start_time = time.time()
+        nfd_states_during = []
+
+        # Capture initial state
+        try:
+            state = capture_nfd_state(node, prefix="/ndn/drepo", capture_face_scope="all")
+            state["elapsed_ms"] = 0
+            nfd_states_during.append(state)
+        except Exception as e:
+            info(f"  Warning: Initial NFD state capture failed: {e}\n")
+
+        # Monitor during execution
+        while prod_thread.is_alive() and (time.time() - start_time) < max_wait:
+            time.sleep(monitoring_interval)
+
+            # Capture NFD state
+            try:
+                state = capture_nfd_state(node, prefix="/ndn/drepo", capture_face_scope="all")
+                state["elapsed_ms"] = int((time.time() - start_time) * 1000)
+                nfd_states_during.append(state)
+
+                # Check for local unix faces (on-demand faces that may go idle)
+                for face_line in state.get("faces", []):
+                    if "unix" in face_line.lower() and "on-demand" in face_line.lower():
+                        info(f"  [NFD MONITOR] {node.name} face @ {state['elapsed_ms']}ms: {face_line[:80]}...\n")
+            except Exception as e:
+                info(f"  Warning: NFD state capture failed during monitoring: {e}\n")
+
+            # Also check for any Nack patterns in producer output so far
+            try:
+                if producer_output_file.exists():
+                    content = producer_output_file.read_text()
+                    if "no_route" in content.lower():
+                        info(f"  [NFD MONITOR] *** NO_ROUTE detected in producer output at {state['elapsed_ms']}ms ***\n")
+                        # Capture full state immediately when Nack detected
+                        try:
+                            immediate_state = capture_nfd_state(node, prefix="/ndn/drepo", capture_face_scope="all")
+                            immediate_state["elapsed_ms"] = int((time.time() - start_time) * 1000)
+                            immediate_state["note"] = "CAPTURED_AT_NACK"
+                            nfd_states_during.append(immediate_state)
+                            info(f"  [NFD MONITOR] Immediate face list at failure:\n")
+                            for face in immediate_state.get("faces", []):
+                                info(f"    {face}\n")
+                        except Exception as e2:
+                            info(f"  Warning: Immediate NFD capture failed: {e2}\n")
+            except Exception:
+                pass
+
+        # Wait for producer thread to complete
+        prod_thread.join(timeout=max_wait)
+        result = producer_output_file.read_text() if producer_output_file.exists() else ""
+
+        # Log captured states
+        if nfd_states_during:
+            nfd_monitoring_file = results_dir / f"nfd-monitoring-{node.name}.json"
+            with open(nfd_monitoring_file, "w") as f:
+                json.dump(nfd_states_during, f, indent=2)
+            info(f"  NFD monitoring data written to {nfd_monitoring_file} ({len(nfd_states_during)} snapshots)\n")
+
+        info(f"  Producer {node.name} output: {result[:500]}...\n")
+        return result
+
+    def run_producer(node, sync_time=None):
+        """Run producer on a node, optionally with synchronized start."""
+        info(f"  Starting producer on {node.name}...\n")
+        cmd_type_flag = f" -type {args.command_type}"
+        join_ratio_flag = (
+            f" -join-ratio {args.join_ratio}" if args.command_type == "both" else ""
         )
-        info(f"  Producer {producer_node.name} output: {result}\n")
+        sync_start_flag = f" -sync-start {sync_time}" if sync_time else ""
+        result = node.cmd(
+            f"timeout {args.producer_timeout}s {args.producer_bin} -count {args.command_count} -rate {args.command_rate}{cmd_type_flag}{join_ratio_flag}{sync_start_flag} 2>&1"
+        )
+        info(f"  Producer {node.name} output: {result}\n")
+        return result
+
+    if args.sync_start and len(producer_nodes) > 1:
+        # Synchronized start: all producers send at the same moment
+        sync_time = int(time.time()) + args.sync_wait
+        info(f"=== SYNCHRONIZED START: all producers will send at Unix timestamp {sync_time} ===\n")
+        threads = []
+        for producer_node in producer_nodes:
+            t = threading.Thread(target=lambda pn=producer_node: run_producer_with_nfd_monitoring(pn, sync_time))
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join()
+    else:
+        # Sequential start (original behavior)
+        for producer_node in producer_nodes:
+            run_producer(producer_node)
+
+    # Capture NFD state after commands complete (before replication wait)
+    info("=== NFD STATE: AFTER COMMANDS (before replication) ===\n")
+    after_commands_state = capture_nfd_state_all_nodes(prefix="/ndn/drepo")
+    for node_name, state in after_commands_state.items():
+        if isinstance(state, dict) and "error" not in state:
+            log_nfd_state(state, log_prefix=f"after_cmds/{node_name}")
+
+    # Also capture with all faces (not just local) for debugging
+    info("=== NFD STATE: AFTER COMMANDS ALL FACES (before replication) ===\n")
+    after_all_faces = {}
+    for host in ndn.net.hosts:
+        try:
+            state = capture_nfd_state(host, prefix="/ndn/drepo", capture_face_scope="all")
+            after_all_faces[host.name] = state
+        except Exception as e:
+            after_all_faces[host.name] = {"error": str(e)}
+    for node_name, state in after_all_faces.items():
+        if isinstance(state, dict) and "error" not in state:
+            log_nfd_state(state, log_prefix=f"after_cmds_faces/{node_name}")
 
     expected_claims = expected_commands * args.replication_factor
 
@@ -704,7 +954,7 @@ def main():
             if cmd["final_replication"] < args.replication_factor
         )
 
-        if commands_under == 0:
+        if commands_under == 0 and len(commands) > 0:
             # Allow over-replication - more copies than RF is okay for partition testing
             # What matters is that no command is under-replicated
             replicated = True
