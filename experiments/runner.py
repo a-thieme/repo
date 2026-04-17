@@ -1010,7 +1010,7 @@ def main():
             commands_at_2rf = sum(
                 1
                 for cmd in commands_after_partition.values()
-                if cmd["final_replication"] >= 2 * args.replication_factor
+                if cmd["final_replication"] == 2 * args.replication_factor
             )
             commands_under_2rf = sum(
                 1
