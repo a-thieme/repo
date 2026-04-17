@@ -190,6 +190,11 @@ func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availa
 	log.Info(a.repo, "runAuction_started", "auctionID", auctionID, "candidates", len(under))
 
 	peerMetrics := make(map[string]Availability)
+	if len(under) == 0 {
+		log.Debug(a.repo, "runAuction_no_candidates")
+		return peerMetrics
+	}
+
 	myPrefix := a.repo.nodePrefix.String()
 	// get all the candidates from under and request their availability
 	target := under[0].Target

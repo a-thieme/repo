@@ -337,7 +337,7 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 
 	r.mu.Unlock()
 
-	// NOTE: evaluateBatch and scheduleEvalIfNotExists are called WITHOUT holding r.mu
+	// NOTE: evaluateBatch is called WITHOUT holding r.mu
 	// to avoid blocking heartbeat processing and to avoid deadlock with scheduleFallback's
 	// timer callback which also needs r.mu.
 	if len(removedJobInfos) > 0 {
@@ -346,7 +346,7 @@ func (r *Repo) updateNodeStatus(publisher string, update *tlv.NodeUpdate) {
 	}
 
 	for _, target := range addedJobTargets {
-		r.scheduleEvalIfNotExists(target)
+		r.scheduleFallback(target)
 	}
 
 	// Cancel fallbacks for jobs in this update - but only if RF is satisfied
