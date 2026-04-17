@@ -29,17 +29,17 @@ const (
 	maxRetryDelayMs  = 1000
 )
 
-func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, maxRetries int, callback func(enc.Wire, error)) {
+func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, maxRetries int, correlationID string, callback func(enc.Wire, error, int64)) {
 	signer := c.SuggestSigner(name)
 	if signer == nil {
-		callback(nil, fmt.Errorf("no signer found for command: %s", name))
+		callback(nil, fmt.Errorf("no signer found for command: %s", name), 0)
 		return
 	}
 
 	dataCfg := ndn.DataConfig{}
 	data, err := spec.Spec{}.MakeData(name, &dataCfg, cmd, signer)
 	if err != nil {
-		callback(nil, fmt.Errorf("failed to make command data: %w", err))
+		callback(nil, fmt.Errorf("failed to make command data: %w", err), 0)
 		return
 	}
 
@@ -47,11 +47,21 @@ func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, ma
 	resultCh := make(chan struct {
 		wire enc.Wire
 		err  error
+		rttMs int64
 	}, maxRetries)
 	success := make(chan struct{})
 
 	var attemptExpr func(data *ndn.EncodedData, attempt int)
 	attemptExpr = func(thisData *ndn.EncodedData, attempt int) {
+		sendTime := time.Now()
+		// Log detailed send information including destination and correlation ID
+		// This helps track which specific command/attempt is being sent
+		log.Info(nil, "command_about_to_send",
+			"dest", dest.String(),
+			"attempt", attempt,
+			"sendTimeNsec", sendTime.UnixNano(),
+			"correlationID", correlationID,
+			"interestName", name.String())
 		c.ExpressR(ndn.ExpressRArgs{
 			Name: dest,
 			Config: &ndn.InterestConfig{
@@ -61,19 +71,55 @@ func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, ma
 			AppParam: thisData.Wire,
 			Retries:  0,
 			Callback: func(args ndn.ExpressCallbackArgs) {
+				receiveTime := time.Now()
+				rttMs := receiveTime.Sub(sendTime).Milliseconds()
+				nackReason := "none"
+				if args.Result == ndn.InterestResultNack {
+					switch args.NackReason {
+					case 50:
+						nackReason = "congestion"
+					case 100:
+						nackReason = "duplicate"
+					case 150:
+						nackReason = "no_route"
+					default:
+						nackReason = fmt.Sprintf("unknown(%d)", args.NackReason)
+					}
+					// Log Nack with full details for debugging
+					// The no_route Nack is the key mystery - why does NFD reject with no_route
+					// when the route was registered and working moments before?
+					log.Warn(nil, "command_nack_received",
+						"attempt", attempt,
+						"nackReason", nackReason,
+						"rttMs", rttMs,
+						"correlationID", correlationID,
+						"dest", dest.String(),
+						"resultCode", args.Result.String())
+				}
+				// Log final attempt result
+				log.Warn(nil, "command_attempt_result", "attempt", attempt, "result", args.Result.String(), "nackReason", nackReason, "rttMs", rttMs, "correlationID", correlationID)
 				if args.Result != ndn.InterestResultData {
 					if attempt < maxRetries-1 {
 						delayMs := retryBaseDelayMs * (1 << attempt)
 						if delayMs > maxRetryDelayMs {
 							delayMs = maxRetryDelayMs
 						}
-						time.Sleep(time.Duration(delayMs) * time.Millisecond)
-						attemptExpr(thisData, attempt+1)
+						log.Warn(nil, "command_retry_scheduled", "attempt", attempt, "delayMs", delayMs, "correlationID", correlationID)
+						// Run retry in a goroutine to avoid deadlock.
+						// The callback must return without blocking; if we called attemptExpr
+						// directly here and it later tried to send to resultCh before the
+						// main goroutine received from it, we'd deadlock.
+						go func() {
+							time.Sleep(time.Duration(delayMs) * time.Millisecond)
+							attemptExpr(thisData, attempt+1)
+						}()
 					} else {
+						log.Error(nil, "command_all_retries_failed", "maxRetries", maxRetries, "lastResult", args.Result.String(), "nackReason", nackReason, "rttMs", rttMs, "correlationID", correlationID)
 						resultCh <- struct {
 							wire enc.Wire
 							err  error
-						}{nil, fmt.Errorf("command failed after %d retries: %s", maxRetries, args.Result)}
+							rttMs int64
+						}{nil, fmt.Errorf("command failed after %d retries: %s", maxRetries, args.Result), rttMs}
 					}
 					return
 				}
@@ -91,7 +137,8 @@ func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, ma
 					resultCh <- struct {
 						wire enc.Wire
 						err  error
-					}{args.Data.Content(), nil}
+						rttMs int64
+					}{args.Data.Content(), nil, rttMs}
 				})
 			},
 		})
@@ -101,7 +148,7 @@ func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, ma
 
 	select {
 	case result := <-resultCh:
-		callback(result.wire, result.err)
+		callback(result.wire, result.err, result.rttMs)
 	case <-time.After(10 * time.Second):
 		mu.Lock()
 		select {
@@ -112,7 +159,7 @@ func ExpressCommand(c ndn.Client, dest enc.Name, name enc.Name, cmd enc.Wire, ma
 		}
 		close(success)
 		mu.Unlock()
-		callback(nil, fmt.Errorf("command timed out after %d retries", maxRetries))
+		callback(nil, fmt.Errorf("command timed out after %d retries", maxRetries), 0)
 	}
 }
 
@@ -143,7 +190,15 @@ func main() {
 	cmdType := flag.String("type", "insert", "command type: insert, join, or both")
 	joinRatio := flag.Float64("join-ratio", 0.5, "ratio of JOIN commands when type is both (0.0-1.0)")
 	retries := flag.Int("retries", defaultRetries, "max retries for failed commands")
+	syncStart := flag.Int("sync-start", 0, "Unix timestamp to start sending commands (synchronized start across producers)")
 	flag.Parse()
+	if *syncStart > 0 {
+		waitDuration := time.Until(time.Unix(int64(*syncStart), 0))
+		if waitDuration > 0 {
+			log.Info(nil, "producer_sync_wait", "waitingSeconds", waitDuration.Seconds(), "syncTimestamp", *syncStart)
+			time.Sleep(waitDuration)
+		}
+	}
 
 	validTypes := map[string]bool{"insert": true, "join": true, "both": true}
 	if !validTypes[*cmdType] {
@@ -230,11 +285,11 @@ func main() {
 
 		fmt.Printf("Sending command %d/%d (type=%s)...\n", i+1, *count, commandType)
 		log.Info(nil, "command_send_started", "attempt", i+1, "total", *count, "correlationID", targetStr)
-		ExpressCommand(client, notify, target, command.Encode(), *retries,
-			func(w enc.Wire, e error) {
+		ExpressCommand(client, notify, target, command.Encode(), *retries, targetStr,
+			func(w enc.Wire, e error, rttMs int64) {
 				defer close(done)
 				if e != nil {
-					log.Error(nil, "command_send_failed", "correlationID", targetStr, "error", e.Error())
+					log.Error(nil, "command_send_failed", "correlationID", targetStr, "error", e.Error(), "rttMs", rttMs)
 					fmt.Println("Error:", e.Error())
 					return
 				}
@@ -244,7 +299,7 @@ func main() {
 					fmt.Println("Parse Error:", err.Error())
 					return
 				}
-				log.Info(nil, "command_acked", "target", sr.Target.String(), "status", sr.Status, "correlationID", targetStr)
+				log.Info(nil, "command_acked", "target", sr.Target.String(), "status", sr.Status, "rttMs", rttMs, "correlationID", targetStr)
 				fmt.Println("Target:", sr.Target)
 				fmt.Println("Status:", sr.Status)
 			})

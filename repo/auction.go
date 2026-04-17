@@ -241,7 +241,7 @@ func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availa
 				Name: bidName,
 				Config: &ndn.InterestConfig{
 					CanBePrefix: false,
-					MustBeFresh: true,
+					MustBeFresh: false, // Data is fresh - just published by auction
 				},
 				AppParam: metricReq.Encode(),
 				Retries:  0,
@@ -371,7 +371,7 @@ func (a *AuctionMechanism) onBidInterest(args ndn.InterestHandlerArgs) {
 		Name: resultsName,
 		Config: &ndn.InterestConfig{
 			CanBePrefix: false,
-			MustBeFresh: true,
+			MustBeFresh: false, // Data is fresh - just published by auction
 		},
 		Retries: 3,
 		Callback: func(args ndn.ExpressCallbackArgs) {
