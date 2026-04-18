@@ -36,6 +36,20 @@ build:
 	@cd $(REPO_DIR) && docker build -t mini-ndn-integration -f experiments/Dockerfile.integration . > /dev/null 2>&1 || { echo "Failed to build Docker image"; exit 1; }
 	@echo "Docker image built."
 
+# === Ground Truth RTTs ===
+# Generate ground truth RTT measurements from topology
+# Use: make generate-rtts TOPOLOGY=testbed_topology.conf
+GROUND_TRUTH_RTT_PY := $(MAKEFILE_DIR)/ground_truth_rtt.py
+TOPOLOGY ?= $(MAKEFILE_DIR)/testbed_topology.conf
+RTT_OUTPUT ?= $(MAKEFILE_DIR)/ground_truth_rtts.json
+
+generate-rtts:
+	@echo "=== Generating ground truth RTTs ==="
+	@echo "Topology: $(TOPOLOGY)"
+	@echo "Output: $(RTT_OUTPUT)"
+	@python3 $(GROUND_TRUTH_RTT_PY) --topology $(TOPOLOGY) --output $(RTT_OUTPUT) --theoretical
+	@echo "Ground truth RTTs saved to: $(RTT_OUTPUT)"
+
 # === Helper Macro ===
 
 define run_experiment
@@ -92,42 +106,7 @@ steady-hydra-24x1: build
 
 # 24x24: 24 producers, 1 command each, synchronized start
 steady-hydra-24x24: build
-	@TS=$$(date +%Y%m%d_%H%M%S); \
-	mkdir -p $(RESULTS_DIR)/steady-hydra-24x24_$$TS; \
-	echo "Running steady-hydra-24x24 experiment..."; \
-	echo "Timestamp: $$TS"; \
-	echo "Results: $(RESULTS_DIR)/steady-hydra-24x24_$$TS"; \
-	docker run --rm --privileged \
-		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
-		-v /lib/modules:/lib/modules \
-		-v "$(RESULTS_DIR)/steady-hydra-24x24_$$TS":/results \
-		--entrypoint /bin/sh mini-ndn-integration \
-		-c "python3 /usr/local/bin/runner.py \
-			--node-count $(NODES) \
-			--timeout $(REPLICATION_TIMEOUT) \
-			--replication-factor $(RF) \
-			--routing-wait $(ROUTING_WAIT) \
-			--results-dir /results \
-			--producer-count 24 \
-			--command-count 1 \
-			--command-rate $(COMMAND_RATE) \
-			--distribution hydra \
-			--sync-start \
-			--sync-wait 5" \
-		> "$(RESULTS_DIR)/steady-hydra-24x24_$$TS/docker.log" 2>&1; \
-	if grep -q "TEST PASSED" "$(RESULTS_DIR)/steady-hydra-24x24_$$TS/docker.log"; then \
-		echo "  ✓ steady-hydra-24x24 passed"; \
-	else \
-		echo "  ✗ steady-hydra-24x24 failed"; \
-		tail -20 "$(RESULTS_DIR)/steady-hydra-24x24_$$TS/docker.log"; \
-	fi; \
-	echo ""; \
-	echo "=== Analyzing Results ==="; \
-	python3 $(ANALYZE_PY) \
-		--experiments "$(RESULTS_DIR)/steady-hydra-24x24_$$TS" \
-		--output-dir "$(RESULTS_DIR)/steady-hydra-24x24_$$TS" \
-		--format json csv markdown 2>/dev/null || true; \
-	echo "Results saved to: $(RESULTS_DIR)/steady-hydra-24x24_$$TS"
+	$(call run_experiment,steady-hydra-24x24,24,24,hydra)
 
 steady-auction-1x1: build
 	$(call run_experiment,steady-auction-1x1,1,1,auction)
@@ -141,44 +120,9 @@ steady-auction-4x1: build
 steady-auction-24x1: build
 	$(call run_experiment,steady-auction-24x1,24,1,auction)
 
-# 24x24: 24 producers, 1 command each, synchronized start
+# 24x24: 24 producers, 24 commands each, synchronized start
 steady-auction-24x24: build
-	@TS=$$(date +%Y%m%d_%H%M%S); \
-	mkdir -p $(RESULTS_DIR)/steady-auction-24x24_$$TS; \
-	echo "Running steady-auction-24x24 experiment..."; \
-	echo "Timestamp: $$TS"; \
-	echo "Results: $(RESULTS_DIR)/steady-auction-24x24_$$TS"; \
-	docker run --rm --privileged \
-		-m $(DOCKER_MEM) --cpus $(DOCKER_CPUS) \
-		-v /lib/modules:/lib/modules \
-		-v "$(RESULTS_DIR)/steady-auction-24x24_$$TS":/results \
-		--entrypoint /bin/sh mini-ndn-integration \
-		-c "python3 /usr/local/bin/runner.py \
-			--node-count $(NODES) \
-			--timeout $(REPLICATION_TIMEOUT) \
-			--replication-factor $(RF) \
-			--routing-wait $(ROUTING_WAIT) \
-			--results-dir /results \
-			--producer-count 24 \
-			--command-count 1 \
-			--command-rate $(COMMAND_RATE) \
-			--distribution auction \
-			--sync-start \
-			--sync-wait 5" \
-		> "$(RESULTS_DIR)/steady-auction-24x24_$$TS/docker.log" 2>&1; \
-	if grep -q "TEST PASSED" "$(RESULTS_DIR)/steady-auction-24x24_$$TS/docker.log"; then \
-		echo "  ✓ steady-auction-24x24 passed"; \
-	else \
-		echo "  ✗ steady-auction-24x24 failed"; \
-		tail -20 "$(RESULTS_DIR)/steady-auction-24x24_$$TS/docker.log"; \
-	fi; \
-	echo ""; \
-	echo "=== Analyzing Results ==="; \
-	python3 $(ANALYZE_PY) \
-		--experiments "$(RESULTS_DIR)/steady-auction-24x24_$$TS" \
-		--output-dir "$(RESULTS_DIR)/steady-auction-24x24_$$TS" \
-		--format json csv markdown 2>/dev/null || true; \
-	echo "Results saved to: $(RESULTS_DIR)/steady-auction-24x24_$$TS"
+	$(call run_experiment,steady-auction-24x24,24,24,auction)
 
 # === Failure Experiments ===
 # Test one node failure: wait for replication, kill one node, verify recovery
@@ -667,6 +611,8 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  build                    Build binaries, keys, and Docker image"
+	@echo "  generate-rtts            Generate ground truth RTTs from topology"
+	@echo "                          (TOPOLOGY=... RTT_OUTPUT=... make generate-rtts)"
 	@echo ""
 	@echo "  Steady-State Experiments:"
 	@echo "  steady-hydra-1x1         Hydra: 1 producer, 1 command"

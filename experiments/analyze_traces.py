@@ -35,26 +35,63 @@ PHASE_CONFIG = {
 }
 
 
+class GroundTruthRTT:
+    """Container for pre-measured ground truth RTTs between node pairs."""
+
+    def __init__(self, rtt_dict: Dict[str, Dict[str, float]]):
+        # rtt_dict: {node1: {node2: rtt_ms, ...}, ...}
+        self.rtts = {}
+        for n1, inner in rtt_dict.items():
+            self.rtts[n1.lower()] = {}
+            for n2, rtt in inner.items():
+                self.rtts[n1.lower()][n2.lower()] = rtt
+
+    def get_rtt(self, node1: str, node2: str) -> Optional[float]:
+        """Get RTT between two nodes. Returns None if not found."""
+        n1 = node1.lower() if isinstance(node1, str) else "unknown"
+        n2 = node2.lower() if isinstance(node2, str) else "unknown"
+        return self.rtts.get(n1, {}).get(n2)
+
+
+def extract_short_name(node_path: str) -> str:
+    """Extract short node name from full path like /ndn/repo/ucla -> ucla."""
+    if not node_path:
+        return "unknown"
+    # Handle full paths like /ndn/repo/ucla
+    parts = node_path.strip("/").split("/")
+    return parts[-1].lower() if parts else "unknown"
+
+
 def parse_topology_delays(topo_path: Path) -> tuple:
     """Parse link delays from topology file.
-    Returns: ({node_pair: delay_ms}, median_delay_ms)
+    Returns: ({node_pair: delay_ms}, median_delay_ms, all_nodes_set)
     """
     delays = {}
     median_delays = []
+    all_nodes = set()
 
     if not topo_path.exists():
-        return delays, None
+        return delays, None, all_nodes
 
     try:
         with open(topo_path) as f:
             in_links = False
             for line in f:
                 line = line.strip()
+                if line == "[nodes]":
+                    continue
                 if line == "[links]":
                     in_links = True
                     continue
                 if line.startswith("[") and in_links:
                     break
+                # Parse nodes section for node names
+                if not in_links and ":" in line and not line.startswith("/"):
+                    parts = line.split()
+                    if parts:
+                        node_name = parts[0].lower()
+                        all_nodes.add(node_name)
+                # Parse links section for delays
                 if in_links and ":" in line and "delay" in line:
                     parts = line.split()
                     node_part = parts[0]
@@ -65,6 +102,8 @@ def parse_topology_delays(topo_path: Path) -> tuple:
                         continue
 
                     node1, node2 = nodes[0].lower(), nodes[1].lower()
+                    all_nodes.add(node1)
+                    all_nodes.add(node2)
                     delay_str = delay_part.split("=")[1].rstrip("ms")
                     try:
                         delay_ms = float(delay_str)
@@ -77,7 +116,60 @@ def parse_topology_delays(topo_path: Path) -> tuple:
         pass
 
     median = statistics.median(median_delays) if median_delays else None
-    return delays, median
+    return delays, median, all_nodes
+
+
+def compute_all_pair_delays(
+    direct_delays: Dict[Tuple[str, str], float], all_nodes: set, fallback_delay: float = 50.0
+) -> Dict[Tuple[str, str], float]:
+    """Compute shortest path delays between all node pairs using Floyd-Warshall.
+
+    Args:
+        direct_delays: Dict of (node1, node2) -> direct link delay
+        all_nodes: Set of all node names
+        fallback_delay: Default delay for pairs without any path
+
+    Returns:
+        Dict of (node1, node2) -> shortest path delay in ms
+    """
+    if not all_nodes:
+        return {}
+
+    nodes = sorted(all_nodes)
+    n = len(nodes)
+    node_idx = {node: i for i, node in enumerate(nodes)}
+
+    # Initialize distance matrix with infinity
+    INF = float("inf")
+    dist = [[INF] * n for _ in range(n)]
+
+    # Self-distance is 0
+    for i in range(n):
+        dist[i][i] = 0
+
+    # Set direct link distances
+    for (n1, n2), delay in direct_delays.items():
+        if n1 in node_idx and n2 in node_idx:
+            dist[node_idx[n1]][node_idx[n2]] = delay
+
+    # Floyd-Warshall
+    for k in range(n):
+        for i in range(n):
+            for j in range(n):
+                if dist[i][k] + dist[k][j] < dist[i][j]:
+                    dist[i][j] = dist[i][k] + dist[k][j]
+
+    # Convert back to dict with (node1, node2) keys
+    pair_delays = {}
+    for i, n1 in enumerate(nodes):
+        for j, n2 in enumerate(nodes):
+            if i != j and dist[i][j] < INF:
+                pair_delays[(n1, n2)] = dist[i][j]
+            elif i != j:
+                # No path exists, use fallback
+                pair_delays[(n1, n2)] = fallback_delay
+
+    return pair_delays
 
 
 def parse_ts(ts_str: str) -> Optional[datetime]:
@@ -159,12 +251,19 @@ def build_command_timelines(events: List[Dict], metadata: Dict) -> Dict[str, Any
             "max_replication": cmd_data.get("max_replication", 0),
             "was_ever_over_replicated": cmd_data.get("was_ever_over_replicated", False),
             "first_claim_ts": None,
+            "first_claim_node": None,
             "all_claims_ts": [],
+            "all_claim_nodes": [],
             "decisions": [],
+            "first_decision_node": None,
             "assignments": [],
             "command_received_ts": None,
+            "command_received_node": None,
+            "command_published_ts": None,
+            "command_published_node": None,
             "command_synced_ts": None,
             "command_synced_from": [],
+            "svs_syncs": [],  # List of {publisher, receiver, synced_ts}
         }
         timelines[cmd_id] = timeline
 
@@ -182,22 +281,43 @@ def build_command_timelines(events: List[Dict], metadata: Dict) -> Dict[str, Any
             if event_type == "command_received":
                 if tl["command_received_ts"] is None:
                     tl["command_received_ts"] = ts
+                    tl["command_received_node"] = extract_short_name(event.get("node", ""))
 
             elif event_type == "command_synced":
                 if tl["command_synced_ts"] is None:
                     tl["command_synced_ts"] = ts
                 tl["command_synced_from"].append(event.get("from", "unknown"))
+                # Track ALL syncs for SVS propagation analysis
+                publisher = extract_short_name(event.get("from", ""))
+                receiver = extract_short_name(event.get("node", ""))
+                tl["svs_syncs"].append({
+                    "publisher": publisher,
+                    "receiver": receiver,
+                    "synced_ts": ts,
+                })
+
+            elif event_type == "command_published":
+                if tl["command_published_ts"] is None:
+                    tl["command_published_ts"] = ts
+                    tl["command_published_node"] = extract_short_name(event.get("node", ""))
 
             elif event_type == "job_claimed":
                 claim_ts = ts
+                claim_node = extract_short_name(event.get("node", ""))
                 if tl["first_claim_ts"] is None:
                     tl["first_claim_ts"] = claim_ts
+                    tl["first_claim_node"] = claim_node
                 tl["all_claims_ts"].append(claim_ts)
+                tl["all_claim_nodes"].append(claim_node)
 
             elif event_type == "decision_made":
+                decision_node = extract_short_name(event.get("node", ""))
+                if tl["first_decision_node"] is None:
+                    tl["first_decision_node"] = decision_node
                 tl["decisions"].append(
                     {
                         "ts": ts,
+                        "node": decision_node,
                         "should_claim": event.get("shouldClaim", False),
                         "reason": event.get("reason", ""),
                         "current_replication": event.get("currentReplication", 0),
@@ -221,22 +341,36 @@ def build_command_timelines(events: List[Dict], metadata: Dict) -> Dict[str, Any
 
 
 def compute_phase_durations(
-    timelines: Dict, metadata: Dict, median_delay_ms: float = None
+    timelines: Dict, metadata: Dict, pair_delays: Dict[Tuple[str, str], float] = None
 ) -> Dict[str, Any]:
     """Calculate duration for each phase per command.
 
     Args:
         timelines: Command timelines dict
         metadata: Experiment metadata
-        median_delay_ms: Median one-way link delay for RTT normalization (if None, skip RTT)
+        pair_delays: Dict of (node1, node2) -> shortest path delay in ms. If None, skip RTT.
     """
     replication_factor = metadata.get(
         "replication_factor", PHASE_CONFIG["replication_factor"]
     )
 
-    # Use median_delay as fallback for RTT calculation
-    fallback_delay = median_delay_ms if median_delay_ms else 10.0
-    expected_rtt = 2 * fallback_delay  # RTT = 2 * one-way delay
+    # Fallback delay if pair_delays not available
+    fallback_delay = 10.0
+
+    def get_pair_delay(node1: str, node2: str) -> float:
+        """Get shortest path delay between two nodes."""
+        if pair_delays is None:
+            return fallback_delay
+        # Normalize node names to lowercase
+        n1 = node1.lower() if isinstance(node1, str) else "unknown"
+        n2 = node2.lower() if isinstance(node2, str) else "unknown"
+        if n1 == "unknown" or n2 == "unknown":
+            return fallback_delay
+        return pair_delays.get((n1, n2), fallback_delay)
+
+    def get_rtt(node1: str, node2: str) -> float:
+        """Get RTT (2 * one-way delay) between two nodes."""
+        return 2 * get_pair_delay(node1, node2)
 
     phase_stats = {
         "ingestion_ms": [],
@@ -247,7 +381,6 @@ def compute_phase_durations(
         # RTT-normalized versions
         "ingestion_rtt": [],
         "propagation_rtt": [],
-        "assignment_chain_rtt": [],
         "replication_rtt": [],
         "sync_rtt": [],
         "total_commands": len(timelines),
@@ -257,15 +390,21 @@ def compute_phase_durations(
         cmd_phases = {}
 
         cmd_received = tl["command_received_ts"]
+        cmd_received_node = tl["command_received_node"]
         first_decision = tl["decisions"][0]["ts"] if tl["decisions"] else None
+        first_decision_node = tl["first_decision_node"]
         first_claim = tl["first_claim_ts"]
+        first_claim_node = tl["first_claim_node"]
         all_claims = sorted(tl["all_claims_ts"])
+        all_claim_nodes = tl["all_claim_nodes"]
         command_synced = tl["command_synced_ts"]
 
+        # Ingestion: cmd_received node -> decision node
         if cmd_received and first_decision:
             ingestion_ms = (first_decision - cmd_received).total_seconds() * 1000
             cmd_phases["ingestion_ms"] = ingestion_ms
             phase_stats["ingestion_ms"].append(ingestion_ms)
+            expected_rtt = get_rtt(cmd_received_node, first_decision_node)
             if expected_rtt > 0:
                 ingestion_rtt = ingestion_ms / expected_rtt
                 cmd_phases["ingestion_rtt"] = ingestion_rtt
@@ -274,10 +413,12 @@ def compute_phase_durations(
             cmd_phases["ingestion_ms"] = None
             cmd_phases["ingestion_rtt"] = None
 
+        # Propagation: decision node -> first claim node
         if first_decision and first_claim:
             propagation_ms = (first_claim - first_decision).total_seconds() * 1000
             cmd_phases["propagation_ms"] = propagation_ms
             phase_stats["propagation_ms"].append(propagation_ms)
+            expected_rtt = get_rtt(first_decision_node, first_claim_node)
             if expected_rtt > 0:
                 propagation_rtt = propagation_ms / expected_rtt
                 cmd_phases["propagation_rtt"] = propagation_rtt
@@ -286,40 +427,46 @@ def compute_phase_durations(
             cmd_phases["propagation_ms"] = None
             cmd_phases["propagation_rtt"] = None
 
+        # Assignment chain: time from first_claim to RFth_claim (we track ms but don't compute RTT)
         if first_claim and len(all_claims) >= replication_factor:
             rf_claim_time = all_claims[replication_factor - 1]
             assignment_chain_ms = (rf_claim_time - first_claim).total_seconds() * 1000
             cmd_phases["assignment_chain_ms"] = assignment_chain_ms
             phase_stats["assignment_chain_ms"].append(assignment_chain_ms)
-            if expected_rtt > 0:
-                assignment_chain_rtt = assignment_chain_ms / expected_rtt
-                cmd_phases["assignment_chain_rtt"] = assignment_chain_rtt
-                phase_stats["assignment_chain_rtt"].append(assignment_chain_rtt)
         else:
             cmd_phases["assignment_chain_ms"] = None
-            cmd_phases["assignment_chain_rtt"] = None
 
+        # Replication: cmd_received -> RFth claim (full cycle)
         if first_claim and len(all_claims) >= replication_factor:
             rf_claim_time = all_claims[replication_factor - 1]
-            replication_ms = (rf_claim_time - first_claim).total_seconds() * 1000
+            replication_ms = (rf_claim_time - cmd_received).total_seconds() * 1000
             cmd_phases["replication_ms"] = replication_ms
             phase_stats["replication_ms"].append(replication_ms)
-            if expected_rtt > 0:
-                replication_rtt = replication_ms / expected_rtt
-                cmd_phases["replication_rtt"] = replication_rtt
-                phase_stats["replication_rtt"].append(replication_rtt)
+            # For replication, we use the sum of ingestion and assignment chain RTT contributions
+            # Or simply: total path delay from producer to last claimer
+            if len(all_claim_nodes) >= replication_factor:
+                last_claim_node = all_claim_nodes[replication_factor - 1]
+                expected_rtt = get_rtt(cmd_received_node, last_claim_node)
+                if expected_rtt > 0:
+                    replication_rtt = replication_ms / expected_rtt
+                    cmd_phases["replication_rtt"] = replication_rtt
+                    phase_stats["replication_rtt"].append(replication_rtt)
         else:
             cmd_phases["replication_ms"] = None
             cmd_phases["replication_rtt"] = None
 
+        # Sync: cmd_received -> command_synced
         if cmd_received and command_synced:
             sync_ms = (command_synced - cmd_received).total_seconds() * 1000
             cmd_phases["sync_ms"] = sync_ms
             phase_stats["sync_ms"].append(sync_ms)
-            if expected_rtt > 0:
-                sync_rtt = sync_ms / expected_rtt
-                cmd_phases["sync_rtt"] = sync_rtt
-                phase_stats["sync_rtt"].append(sync_rtt)
+            # For sync, we use the producer node as reference
+            if cmd_received_node and first_decision_node:
+                expected_rtt = get_rtt(cmd_received_node, first_decision_node)
+                if expected_rtt > 0:
+                    sync_rtt = sync_ms / expected_rtt
+                    cmd_phases["sync_rtt"] = sync_rtt
+                    phase_stats["sync_rtt"].append(sync_rtt)
         else:
             cmd_phases["sync_ms"] = None
             cmd_phases["sync_rtt"] = None
@@ -729,7 +876,130 @@ def analyze_publication_triggers(events: List[Dict], metadata: Dict) -> Dict[str
     }
 
 
-def analyze_experiment(exp_dir: Path) -> Dict[str, Any]:
+def compute_svs_propagation_delays(
+    timelines: Dict,
+    ground_truth_rtt: GroundTruthRTT = None
+) -> Dict[str, Any]:
+    """Compute SVS propagation delays for all (publisher, receiver) pairs.
+
+    SVS propagation delay = time from command_published to command_synced
+    per (publisher, receiver) pair.
+    """
+    all_delays = []  # raw delays in ms
+    pair_delays = defaultdict(list)  # (pub, recv) -> [delays]
+    pair_rtt_normalized = defaultdict(list)  # normalized by ground truth RTT
+
+    for cmd_id, tl in timelines.items():
+        pub_ts = tl["command_published_ts"]
+        pub_node = tl["command_published_node"]
+        if not pub_ts or not pub_node:
+            continue
+
+        for sync in tl["svs_syncs"]:
+            delay_ms = (sync["synced_ts"] - pub_ts).total_seconds() * 1000
+            all_delays.append(delay_ms)
+            pair = (sync["publisher"], sync["receiver"])
+            pair_delays[pair].append(delay_ms)
+
+            if ground_truth_rtt:
+                rtt = ground_truth_rtt.get_rtt(sync["publisher"], sync["receiver"])
+                if rtt and rtt > 0:
+                    pair_rtt_normalized[pair].append(delay_ms / rtt)
+
+    # Compute summary stats
+    def compute_stats(values: List[float]) -> Dict[str, float]:
+        if not values:
+            return {}
+        sorted_values = sorted(values)
+        n = len(sorted_values)
+        return {
+            "count": n,
+            "min_ms": min(values),
+            "max_ms": max(values),
+            "avg_ms": statistics.mean(values),
+            "median_ms": statistics.median(values),
+            "p95_ms": sorted_values[int(n * 0.95)] if n >= 20 else sorted_values[-1],
+            "p99_ms": sorted_values[int(n * 0.99)] if n >= 100 else sorted_values[-1],
+        }
+
+    result = {
+        "all_delays": all_delays,
+        "count": len(all_delays),
+        "stats": compute_stats(all_delays) if all_delays else {},
+    }
+
+    # Per-pair stats
+    if pair_delays:
+        pair_stats = {}
+        for pair, delays in pair_delays.items():
+            pair_key = f"{pair[0]}->{pair[1]}"
+            pair_stats[pair_key] = compute_stats(delays)
+            if ground_truth_rtt and pair in pair_rtt_normalized:
+                norm_values = pair_rtt_normalized[pair]
+                if norm_values:
+                    pair_stats[pair_key]["rtt_normalized_avg"] = statistics.mean(norm_values)
+        result["by_pair"] = pair_stats
+
+    return result
+
+
+def compute_replication_delays(
+    timelines: Dict,
+    ground_truth_rtt: GroundTruthRTT = None
+) -> Dict[str, Any]:
+    """Compute replication delays: RFth_claim_ts - command_received_ts."""
+    replication_factor = 3  # from PHASE_CONFIG
+    all_delays = []  # ms
+    pair_delays = defaultdict(list)
+
+    for cmd_id, tl in timelines.items():
+        received_ts = tl["command_received_ts"]
+        received_node = tl["command_received_node"]
+        all_claims = sorted(zip(tl["all_claims_ts"], tl["all_claim_nodes"]))
+
+        if received_ts and len(all_claims) >= replication_factor:
+            rf_claim_ts = all_claims[replication_factor - 1][0]
+            rf_claim_node = all_claims[replication_factor - 1][1]
+            delay_ms = (rf_claim_ts - received_ts).total_seconds() * 1000
+            all_delays.append(delay_ms)
+            pair_delays[(received_node, rf_claim_node)].append(delay_ms)
+
+    # Compute summary stats
+    def compute_stats(values: List[float]) -> Dict[str, float]:
+        if not values:
+            return {}
+        sorted_values = sorted(values)
+        n = len(sorted_values)
+        return {
+            "count": n,
+            "min_ms": min(values),
+            "max_ms": max(values),
+            "avg_ms": statistics.mean(values),
+            "median_ms": statistics.median(values),
+            "p95_ms": sorted_values[int(n * 0.95)] if n >= 20 else sorted_values[-1],
+            "p99_ms": sorted_values[int(n * 0.99)] if n >= 100 else sorted_values[-1],
+        }
+
+    result = {
+        "count": len(all_delays),
+        "stats": compute_stats(all_delays) if all_delays else {},
+    }
+
+    # Per-pair stats
+    if pair_delays:
+        pair_stats = {}
+        for pair, delays in pair_delays.items():
+            pair_key = f"{pair[0]}->{pair[1]}"
+            pair_stats[pair_key] = compute_stats(delays)
+        result["by_pair"] = pair_stats
+
+    return result
+
+
+def analyze_experiment(
+    exp_dir: Path,
+    ground_truth_rtt: GroundTruthRTT = None
+) -> Dict[str, Any]:
     """Analyze a single experiment directory."""
     print(f"  Parsing events from {exp_dir.name}...")
     events, metadata = parse_events(exp_dir)
@@ -748,13 +1018,16 @@ def analyze_experiment(exp_dir: Path) -> Dict[str, Any]:
     topo_path = exp_dir / "topology.conf"
     if not topo_path.exists():
         topo_path = Path("/usr/local/share/testbed_topology.conf")
-    _, median_delay = parse_topology_delays(topo_path)
+    direct_delays, median_delay, all_nodes = parse_topology_delays(topo_path)
+
+    # Compute all-pair shortest path delays using Floyd-Warshall
+    pair_delays = compute_all_pair_delays(direct_delays, all_nodes, fallback_delay=50.0)
 
     print(f"  Building command timelines...")
     timelines = build_command_timelines(events, metadata)
 
     print(f"  Computing phase durations...")
-    phases = compute_phase_durations(timelines, metadata, median_delay)
+    phases = compute_phase_durations(timelines, metadata, pair_delays)
 
     print(f"  Categorizing sync interests...")
     sync_breakdown = categorize_sync_interests(events, timelines, metadata)
@@ -764,6 +1037,19 @@ def analyze_experiment(exp_dir: Path) -> Dict[str, Any]:
 
     print(f"  Analyzing publication triggers...")
     pub_triggers = analyze_publication_triggers(events, metadata)
+
+    # Count sync_interest_sent and data_sent events
+    total_commands = metadata.get("total_commands", 1) or 1
+    sync_interest_count = sum(1 for e in events if e.get("event") == "sync_interest_sent")
+    data_sent_count = sum(1 for e in events if e.get("event") == "data_sent")
+
+    # Compute SVS propagation delays
+    print(f"  Computing SVS propagation delays...")
+    svs_results = compute_svs_propagation_delays(timelines, ground_truth_rtt)
+
+    # Compute replication delays
+    print(f"  Computing replication delays...")
+    rep_results = compute_replication_delays(timelines, ground_truth_rtt)
 
     return {
         "name": exp_dir.name,
@@ -784,6 +1070,16 @@ def analyze_experiment(exp_dir: Path) -> Dict[str, Any]:
         "sync_breakdown": sync_breakdown,
         "conflicts": conflicts,
         "publication_triggers": pub_triggers,
+        "sync_interest_count": {
+            "total": sync_interest_count,
+            "per_command": sync_interest_count / total_commands,
+        },
+        "data_sent_count": {
+            "total": data_sent_count,
+            "per_command": data_sent_count / total_commands,
+        },
+        "svs_propagation": svs_results,
+        "replication_delays": rep_results,
     }
 
 
@@ -802,6 +1098,10 @@ def generate_json_output(data: Dict, output_path: Path):
             "sync_breakdown": exp["sync_breakdown"],
             "conflicts": exp["conflicts"],
             "publication_triggers": exp.get("publication_triggers", {}),
+            "sync_interest_count": exp.get("sync_interest_count", {}),
+            "data_sent_count": exp.get("data_sent_count", {}),
+            "svs_propagation": exp.get("svs_propagation", {}),
+            "replication_delays": exp.get("replication_delays", {}),
         }
         output["experiments"].append(exp_data)
 
@@ -820,7 +1120,7 @@ def generate_csv_output(data: Dict, output_dir: Path):
             "experiment,cmd_id,"
             "ingestion_ms,ingestion_rtt,"
             "propagation_ms,propagation_rtt,"
-            "assignment_chain_ms,assignment_chain_rtt,"
+            "assignment_chain_ms,"
             "replication_ms,replication_rtt,"
             "sync_ms,sync_rtt\n"
         )
@@ -841,11 +1141,11 @@ def generate_csv_output(data: Dict, output_dir: Path):
                     if phases.get("propagation_ms")
                     else ",,"
                 )
-                # Assignment chain
+                # Assignment chain (ms only, no RTT)
                 f.write(
-                    f"{phases.get('assignment_chain_ms', ''):.2f},{phases.get('assignment_chain_rtt', ''):.2f},"
+                    f"{phases.get('assignment_chain_ms', ''):.2f},"
                     if phases.get("assignment_chain_ms")
-                    else ",,"
+                    else ","
                 )
                 # Replication
                 f.write(
@@ -939,6 +1239,35 @@ def generate_csv_output(data: Dict, output_dir: Path):
                 f"{exp['name']},{m['producer_count']},{m['total_commands']},{m['node_count']},{m['replication_factor']},{m.get('total_duration_seconds', 0):.2f},{sb['total_sync_interests']},{c['total_conflicts']},{c.get('total_reassignments', 0)}\n"
             )
     print(f"  CSV (summary) written to: {summary_csv}")
+
+    # SVS propagation delays CSV
+    svs_csv = output_dir / "svs_propagation_delays.csv"
+    with open(svs_csv, "w") as f:
+        f.write("experiment,publisher,receiver,delay_ms,rtt_normalized\n")
+        for exp in data["experiments"]:
+            svs = exp.get("svs_propagation", {})
+            by_pair = svs.get("by_pair", {})
+            for pair_key, stats in by_pair.items():
+                publisher, receiver = pair_key.split("->")
+                rtt_norm = stats.get("rtt_normalized_avg", "")
+                f.write(f"{exp['name']},{publisher},{receiver},{stats.get('avg_ms', ''):.2f}")
+                if rtt_norm != "":
+                    f.write(f",{rtt_norm:.2f}\n")
+                else:
+                    f.write(",\n")
+    print(f"  CSV (SVS propagation) written to: {svs_csv}")
+
+    # Replication delays CSV
+    rep_csv = output_dir / "replication_delays.csv"
+    with open(rep_csv, "w") as f:
+        f.write("experiment,from_node,to_node,delay_ms\n")
+        for exp in data["experiments"]:
+            rep = exp.get("replication_delays", {})
+            by_pair = rep.get("by_pair", {})
+            for pair_key, stats in by_pair.items():
+                from_node, to_node = pair_key.split("->")
+                f.write(f"{exp['name']},{from_node},{to_node},{stats.get('avg_ms', ''):.2f}\n")
+    print(f"  CSV (replication delays) written to: {rep_csv}")
 
 
 def generate_markdown_report(data: Dict, output_path: Path):
@@ -1163,7 +1492,6 @@ def generate_markdown_report(data: Dict, output_path: Path):
             f.write(f"| {s.get('ingestion_ms_avg', 0):.1f} ")
             f.write(f"| {s.get('ingestion_rtt_avg', 0):.2f} ")
             f.write(f"| {s.get('assignment_chain_ms_avg', 0):.1f} ")
-            f.write(f"| {s.get('assignment_chain_rtt_avg', 0):.2f} ")
             f.write(f"| {s.get('replication_ms_avg', 0):.1f} ")
             f.write(f"| {s.get('replication_rtt_avg', 0):.2f} |\n")
 
@@ -1182,6 +1510,59 @@ def generate_markdown_report(data: Dict, output_path: Path):
             f.write(
                 f"| {exp['name']} | {dist} | {m['producer_count']} | {total_cmds} | {duration:.2f} |\n"
             )
+
+        f.write("\n## SVS Propagation Delay\n\n")
+        f.write(
+            "| Experiment | Distribution | Count | Avg (ms) | Median (ms) | P95 (ms) | P99 (ms) |\n"
+        )
+        f.write(
+            "|------------|--------------|-------|----------|-------------|----------|----------|\n"
+        )
+        for exp in data["experiments"]:
+            svs = exp.get("svs_propagation", {})
+            stats = svs.get("stats", {})
+            dist = exp.get("distribution", "unknown")
+            f.write(f"| {exp['name']} | {dist} ")
+            f.write(f"| {stats.get('count', 0):,} ")
+            f.write(f"| {stats.get('avg_ms', 0):.2f} ")
+            f.write(f"| {stats.get('median_ms', 0):.2f} ")
+            f.write(f"| {stats.get('p95_ms', 0):.2f} ")
+            f.write(f"| {stats.get('p99_ms', 0):.2f} |\n")
+
+        f.write("\n## Replication Delay (RFth Claim)\n\n")
+        f.write(
+            "| Experiment | Distribution | Count | Avg (ms) | Median (ms) | P95 (ms) | P99 (ms) |\n"
+        )
+        f.write(
+            "|------------|--------------|-------|----------|-------------|----------|----------|\n"
+        )
+        for exp in data["experiments"]:
+            rep = exp.get("replication_delays", {})
+            stats = rep.get("stats", {})
+            dist = exp.get("distribution", "unknown")
+            f.write(f"| {exp['name']} | {dist} ")
+            f.write(f"| {stats.get('count', 0):,} ")
+            f.write(f"| {stats.get('avg_ms', 0):.2f} ")
+            f.write(f"| {stats.get('median_ms', 0):.2f} ")
+            f.write(f"| {stats.get('p95_ms', 0):.2f} ")
+            f.write(f"| {stats.get('p99_ms', 0):.2f} |\n")
+
+        f.write("\n## Traffic Statistics\n\n")
+        f.write(
+            "| Experiment | Distribution | Sync Interests | Sync/Cmd | Data Sent | Data/Cmd |\n"
+        )
+        f.write(
+            "|------------|--------------|---------------|----------|-----------|----------|\n"
+        )
+        for exp in data["experiments"]:
+            sic = exp.get("sync_interest_count", {})
+            dsc = exp.get("data_sent_count", {})
+            dist = exp.get("distribution", "unknown")
+            f.write(f"| {exp['name']} | {dist} ")
+            f.write(f"| {sic.get('total', 0):,} ")
+            f.write(f"| {sic.get('per_command', 0):.1f} ")
+            f.write(f"| {dsc.get('total', 0):,} ")
+            f.write(f"| {dsc.get('per_command', 0):.1f} |\n")
 
         f.write("\n## Assignment Conflict Analysis\n\n")
         f.write(
@@ -1283,10 +1664,26 @@ def main():
         choices=["json", "csv", "markdown"],
         help="Output formats",
     )
+    parser.add_argument(
+        "--ground-truth-rtt",
+        type=Path,
+        help="JSON file with pre-measured ground truth RTTs",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load ground truth RTTs if provided
+    ground_truth_rtt = None
+    if args.ground_truth_rtt:
+        if args.ground_truth_rtt.exists():
+            with open(args.ground_truth_rtt) as f:
+                rtt_data = json.load(f)
+            ground_truth_rtt = GroundTruthRTT(rtt_data.get("rtts", {}))
+            print(f"Loaded ground truth RTTs for {len(rtt_data.get('nodes', []))} nodes")
+        else:
+            print(f"Warning: Ground truth RTT file not found: {args.ground_truth_rtt}")
 
     print(f"Analyzing {len(args.experiments)} experiments...\n")
 
@@ -1297,7 +1694,7 @@ def main():
         if not exp_path.exists():
             print(f"Warning: {exp_dir} does not exist, skipping")
             return None
-        return analyze_experiment(exp_path)
+        return analyze_experiment(exp_path, ground_truth_rtt)
 
     with ThreadPoolExecutor(max_workers=min(8, len(args.experiments))) as executor:
         futures = {
