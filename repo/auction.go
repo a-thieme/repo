@@ -246,10 +246,10 @@ func (a *AuctionMechanism) GetAvailability(under []UnderStats) map[string]Availa
 				Name: bidName,
 				Config: &ndn.InterestConfig{
 					CanBePrefix: false,
-					MustBeFresh: false, // Data is fresh - just published by auction
+					MustBeFresh: true,  // Data must be fresh - auction depends on current bids
 				},
 				AppParam: metricReq.Encode(),
-				Retries:  0,
+				Retries:  8,
 				Callback: func(args ndn.ExpressCallbackArgs) {
 					defer callbackWg.Done()
 
@@ -376,9 +376,9 @@ func (a *AuctionMechanism) onBidInterest(args ndn.InterestHandlerArgs) {
 		Name: resultsName,
 		Config: &ndn.InterestConfig{
 			CanBePrefix: false,
-			MustBeFresh: false, // Data is fresh - just published by auction
+			MustBeFresh: true,  // Data must be fresh - only published after auction completes
 		},
-		Retries: 3,
+		Retries: 8,
 		Callback: func(args ndn.ExpressCallbackArgs) {
 			if args.Result != ndn.InterestResultData {
 				log.Warn(a.repo, "subscribeToResults_failed", "result", args.Result)
